@@ -37,6 +37,35 @@ pub fn keys_query(
 ) -> DbResult<BoundSelect> {
     keys_query_joined(table, source, filter, limit, offset, layout, &[], &[])
 }
+/// Puts the target's `INDEXED BY` or `NOT INDEXED` onto the query that finds a
+/// write's rows.
+///
+/// [`keys_query`] builds that query's target term from the table alone, so the
+/// hint the statement wrote on it was dropped here, and `DELETE FROM h INDEXED
+/// BY h_a WHERE b = 5` searched `h_b`. The pinned 3.53.4 shell answers
+/// `UPDATE h INDEXED BY h_a SET c = 1 WHERE b = 5` with `SCAN h USING INDEX
+/// h_a`. `INDEXED BY` also brings the target's bound index expressions, because
+/// a partial index is only usable when its predicate can be compared with the
+/// `WHERE`, and the binder has already refused one that cannot be.
+///
+/// @param select - a query from [`keys_query`] or [`keys_query_joined`], whose
+///   first term is the target
+/// @param hint - the hint the statement wrote on the target
+/// @param index_exprs - the target's bound index expressions
+pub fn hint_target(
+    select: &mut BoundSelect,
+    hint: &inillucent_sql::bind::IndexChoice,
+    index_exprs: &[inillucent_sql::dml::BoundIndexExprs],
+) {
+    let Some(target) = select.sources.first_mut() else {
+        return;
+    };
+    target.index_hint = hint.clone();
+    if matches!(hint, inillucent_sql::bind::IndexChoice::Only(_)) {
+        target.index_exprs = index_exprs.to_vec();
+    }
+}
+
 /// Returns the query that finds the keys of an `UPDATE ... FROM`, and the
 /// values it will write into them.
 ///
@@ -87,7 +116,7 @@ pub fn keys_query_joined(
         });
     }
     let mut sources = vec![BoundSource {
-        index_hint: inillucent_sql::ast::IndexHint::None,
+        index_hint: inillucent_sql::bind::IndexChoice::Any,
         id: source,
         rows: SourceRows::Table,
         table: std::rc::Rc::new(table.clone()),
@@ -138,7 +167,7 @@ pub fn module_keys_query(
 ) -> BoundSelect {
     BoundSelect {
         sources: vec![BoundSource {
-            index_hint: inillucent_sql::ast::IndexHint::None,
+            index_hint: inillucent_sql::bind::IndexChoice::Any,
             id: source,
             rows: SourceRows::Table,
             table: std::rc::Rc::new(table.clone()),

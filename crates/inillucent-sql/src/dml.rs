@@ -355,6 +355,9 @@ pub struct BoundUpdate {
     pub not_null_defaults: Vec<BoundDefault>,
     /// The expressions the table's partial and expression indexes need.
     pub index_exprs: Vec<BoundIndexExprs>,
+    /// `INDEXED BY` or `NOT INDEXED` on the target, which the query that finds
+    /// the rows to change obeys; `inillucent_exec::dml::hint_target` puts it there.
+    pub index_hint: crate::bind::IndexChoice,
     /// The `RETURNING` columns.
     pub returning: Vec<BoundResultColumn>,
     /// The `LIMIT`.
@@ -382,6 +385,8 @@ pub struct BoundDelete {
     /// the row was in it, and a key the index computed has to be recomputed to
     /// be found.
     pub index_exprs: Vec<BoundIndexExprs>,
+    /// `INDEXED BY` or `NOT INDEXED` on the target, as on [`BoundUpdate`].
+    pub index_hint: crate::bind::IndexChoice,
     /// The statement-wide number of the FROM term being written.
     ///
     /// It used to be implicitly zero, because a DML statement had exactly one
@@ -723,9 +728,11 @@ impl<'a> Binder<'a> {
             &changed,
         )?);
         let view_rows = self.view_rows(&table, filter.clone());
+        let index_hint = self.write_hint(source, &index_exprs, filter.as_ref(), &joined)?;
         Ok(BoundUpdate {
             table,
             index_exprs,
+            index_hint,
             source,
             from: joined,
             assignments,
@@ -776,9 +783,11 @@ impl<'a> Binder<'a> {
         let mut triggers = self.bind_triggers(&table, TriggerEventInfo::Delete, &[])?;
         triggers.extend(self.bind_foreign_keys(&table, TriggerEventInfo::Delete, &[])?);
         let view_rows = self.view_rows(&table, filter.clone());
+        let index_hint = self.write_hint(source, &index_exprs, filter.as_ref(), &[])?;
         Ok(BoundDelete {
             table,
             index_exprs,
+            index_hint,
             source,
             filter,
             returning,
@@ -1157,7 +1166,7 @@ impl<'a> Binder<'a> {
             // re-pointing afterwards would be two chances to disagree.
             let inner = self.view_query(&table, term.span)?;
             let source = BoundSource {
-                index_hint: crate::ast::IndexHint::None,
+                index_hint: crate::bind::IndexChoice::Any,
                 id: self.sources.len(),
                 rows: crate::bind::SourceRows::Subquery(Box::new(inner)),
                 table: std::rc::Rc::new(table.clone()),
@@ -1174,6 +1183,10 @@ impl<'a> Binder<'a> {
             return Ok((table, scope));
         }
         let scope = self.push_write_source(table.clone(), alias);
+        let choice = self.index_choice(indexed_by);
+        if let Some(source) = self.sources.get_mut(scope) {
+            source.index_hint = choice;
+        }
         Ok((table, scope))
     }
 
@@ -1266,6 +1279,42 @@ impl<'a> Binder<'a> {
         Some(Box::new(crate::bind::block_over(source, filter, columns)))
     }
 
+    /// Returns the target's index hint, or refuses a write whose `INDEXED BY`
+    /// index cannot find its rows.
+    ///
+    /// The same rule and the same test a `SELECT` gets from
+    /// `crate::bind::refuse_unanswerable_hints`, asked of the query the write
+    /// will run to find its rows: the target, any `UPDATE ... FROM` terms, and
+    /// the statement's `WHERE`. The pinned 3.53.4 shell refuses
+    /// `DELETE FROM h INDEXED BY h_part WHERE a = 1`, where `h_part` is declared
+    /// `WHERE c > 3`, with `no query solution`.
+    /// @param source - the target's statement-wide number
+    /// @param index_exprs - the target's bound index expressions
+    /// @param filter - the statement's `WHERE`
+    /// @param joined - the `UPDATE ... FROM` terms, empty for a `DELETE`
+    fn write_hint(
+        &self,
+        source: usize,
+        index_exprs: &[BoundIndexExprs],
+        filter: Option<&BoundExpr>,
+        joined: &[BoundSource],
+    ) -> Result<crate::bind::IndexChoice, ParseError> {
+        let Some(target) = self.sources.get(source) else {
+            return Ok(crate::bind::IndexChoice::Any);
+        };
+        if target.index_hint == crate::bind::IndexChoice::Any {
+            return Ok(crate::bind::IndexChoice::Any);
+        }
+        let mut probe = target.clone();
+        probe.index_exprs = index_exprs.to_vec();
+        let mut block = crate::bind::block_over(probe, filter.cloned(), Vec::new());
+        block.sources.extend(joined.iter().cloned());
+        if crate::plan::unanswerable_index_hint(&block).is_some() {
+            return Err(crate::bind::no_query_solution(Span::default()));
+        }
+        Ok(target.index_hint.clone())
+    }
+
     /// Makes the target table the statement's one visible source.
     ///
     /// It opens a scope holding just the target, so every name in the
@@ -1274,7 +1323,7 @@ impl<'a> Binder<'a> {
     fn push_write_source(&mut self, table: TableInfo, alias: Vec<u8>) -> usize {
         let id = self.sources.len();
         self.sources.push(BoundSource {
-            index_hint: crate::ast::IndexHint::None,
+            index_hint: crate::bind::IndexChoice::Any,
             id,
             rows: crate::bind::SourceRows::Table,
             table: std::rc::Rc::new(table),

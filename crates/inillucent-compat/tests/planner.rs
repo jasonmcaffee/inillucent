@@ -825,91 +825,275 @@ fn not_indexed_removes_the_indexes_and_keeps_the_rowid() {
     );
 }
 
-/// **`INDEXED BY` is checked for a name that exists and is then ignored.**
+/// Builds the fixture every `INDEXED BY` case uses: the one the measurement in
+/// the ticket was taken on, plus a partial index and a second table to join.
 ///
-/// A known difference, recorded as §1.3 of the testing standard requires: a
-/// difference a document knows about and no test asserts can be closed, or
-/// widened, with nothing going red.
-///
-/// Measured against the pinned 3.53.4 shell on the same fixture as the case
-/// above:
-///
-/// | statement | sqlite | inillucent |
-/// |---|---|---|
-/// | `... FROM h WHERE a = 3 AND b = 100` | `SEARCH h USING INDEX h_b (b=?)` | the same |
-/// | `... FROM h INDEXED BY h_a WHERE a = 3 AND b = 100` | `SEARCH h USING INDEX h_a (a=?)` | `SEARCH h USING INDEX h_b (b=?)` |
-///
-/// **Why it is recorded rather than fixed here.** Forcing an index means
-/// refusing the statement when the named one cannot answer it - SQLite answers
-/// `no query solution` - and `choose_path` returns an `AccessPath` rather than
-/// a `Result`, so the refusal has nowhere to go without changing the signature
-/// of the path chooser and everything that calls it. `NOT INDEXED` needed
-/// neither, because taking a candidate away always leaves the scan.
-///
-/// The answer is the same either way, so this is a performance difference and
-/// not a wrong result. **When it is fixed, this test fails**, and the row in
-/// `docs/feature-comparison.md` moves with it.
-#[test]
-fn indexed_by_names_an_index_and_does_not_yet_force_it() {
-    let path = scratch("indexed-by");
+/// `b` is the row number and `a` is that number modulo seven, so after
+/// `ANALYZE` an equality on `b` is the more selective and the planner left to
+/// itself searches `h_b`. That is what makes forcing `h_a` visible.
+/// @param tag - the scratch file's name
+fn build_hinted(tag: &str) -> (Database, inillucent_compat::facade::Connection) {
+    let path = scratch(tag);
     let database = Database::open(&path).expect("the database opens");
     let connection = database.session().expect("the connection opens");
     run_all(
         &connection,
         &[
-            "CREATE TABLE h (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER)",
+            "CREATE TABLE h (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER)",
             "CREATE INDEX h_a ON h (a)",
             "CREATE INDEX h_b ON h (b)",
+            "CREATE INDEX h_part ON h (c) WHERE c > 3",
+            "CREATE TABLE s (k INTEGER, v TEXT)",
+            "INSERT INTO s VALUES (3, 'x'), (4, 'y')",
         ],
     );
     run_all(&connection, &["BEGIN"]);
     for row in 1..=600 {
-        let sql = format!("INSERT INTO h VALUES ({row}, {}, {row})", row % 7);
+        let sql = format!(
+            "INSERT INTO h VALUES ({row}, {}, {row}, {})",
+            row % 7,
+            row % 5
+        );
         run_all(&connection, &[sql.as_str()]);
     }
     run_all(&connection, &["COMMIT", "ANALYZE"]);
+    (database, connection)
+}
 
-    // The name is checked, which is the half that works and is worth keeping:
-    // a misspelled hint is a plan that quietly does something else.
+/// Asserts each statement's `EXPLAIN QUERY PLAN` lines.
+/// @param connection - the fixture's connection
+/// @param cases - each statement with the lines the pinned shell printed for it
+fn assert_plans(connection: &inillucent_compat::facade::Connection, cases: &[(&str, &[&str])]) {
+    for (sql, expected) in cases {
+        let lines: Vec<String> = expected.iter().map(|line| line.to_string()).collect();
+        assert_eq!(plan(connection, sql), lines, "{sql}");
+    }
+}
+
+/// **`INDEXED BY` uses the named index and nothing else (task-2078).**
+///
+/// Until task-2078 the name was checked and then ignored: `BoundSource` carried
+/// the hint from task-2068 on, and `choose_path` read it for `NOT INDEXED`
+/// only. Every plan string below was read from the pinned 3.53.4 shell on this
+/// fixture, and the first forced one is the measurement the ticket was filed
+/// with:
+///
+/// | statement | sqlite | inillucent before |
+/// |---|---|---|
+/// | `... FROM h INDEXED BY h_a WHERE a = 3 AND b = 100` | `SEARCH h USING INDEX h_a (a=?)` | `SEARCH h USING INDEX h_b (b=?)` |
+///
+/// The next two arms are what "nothing else" means. With nothing on `a` the
+/// index is walked from end to end rather than dropped for a table scan, and
+/// the rowid seek that `WHERE id = 5` offers is given up too. A fix that only
+/// preferred the named index among the indexes would pass the first arm and
+/// fail these. They also found that a whole walk was always described as
+/// `COVERING`, because before this every such walk was.
+#[test]
+fn indexed_by_forces_the_named_index() {
+    let (_database, connection) = build_hinted("indexed-by");
+
+    // The name is still checked, which is the half that always worked: a
+    // misspelled hint is a plan that quietly does something else.
     let misspelled = run(
         &connection,
         "SELECT count(*) FROM h INDEXED BY h_nowhere WHERE a = 3",
     )
     .expect_err("an index that does not exist is refused");
-    assert!(
-        misspelled.contains("h_nowhere"),
-        "the refusal did not name the index that does not exist: {misspelled}"
+    assert_eq!(misspelled, "no such index: h_nowhere");
+
+    // The control: left to itself, the planner takes `h_b`. If it took `h_a`
+    // anyway, the forced arm below would prove nothing.
+    assert_plans(
+        &connection,
+        &[
+            (
+                "SELECT count(*) FROM h WHERE a = 3 AND b = 100",
+                &["SEARCH h USING INDEX h_b (b=?)"],
+            ),
+            (
+                "SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND b = 100",
+                &["SEARCH h USING INDEX h_a (a=?)"],
+            ),
+            (
+                "SELECT * FROM h INDEXED BY h_a WHERE c = 3",
+                &["SCAN h USING INDEX h_a"],
+            ),
+            (
+                "SELECT * FROM h INDEXED BY h_a WHERE id = 5",
+                &["SCAN h USING INDEX h_a"],
+            ),
+            (
+                "SELECT count(*) FROM h INDEXED BY h_b",
+                &["SCAN h USING COVERING INDEX h_b"],
+            ),
+            (
+                "SELECT * FROM h INDEXED BY h_part WHERE c > 3",
+                &["SEARCH h USING INDEX h_part (c>?)"],
+            ),
+        ],
     );
 
-    let unhinted = plan(
-        &connection,
-        "SELECT count(*) FROM h WHERE a = 3 AND b = 100",
-    );
-    let hinted = plan(
-        &connection,
-        "SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND b = 100",
-    );
-    assert_eq!(
-        hinted, unhinted,
-        "`INDEXED BY h_a` changed the plan, so the hint now reaches the planner - \
-         which is the fix this case is waiting for. Assert the forced index instead, \
-         and move the `INDEXED BY` row in docs/feature-comparison.md."
-    );
+    // A forced index changes the route and never the rows.
+    for (hinted, plain) in [
+        (
+            "SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND b = 101",
+            "SELECT count(*) FROM h WHERE a = 3 AND b = 101",
+        ),
+        (
+            "SELECT sum(b) FROM h INDEXED BY h_a WHERE c = 3",
+            "SELECT sum(b) FROM h WHERE c = 3",
+        ),
+        (
+            "SELECT b FROM h INDEXED BY h_a WHERE id = 5",
+            "SELECT b FROM h WHERE id = 5",
+        ),
+    ] {
+        let forced = run(&connection, hinted).expect("the hinted query runs");
+        let free = run(&connection, plain).expect("the plain query runs");
+        assert!(
+            free.iter().all(|row| row != "null"),
+            "the control has nothing to compare: {plain}"
+        );
+        assert_eq!(forced, free, "`INDEXED BY` changed the answer: {hinted}");
+    }
+}
 
-    // And the rows are right whichever index is walked, which is why this is a
-    // performance difference rather than a wrong answer.
-    // `b` is the row number and `a` is that number modulo seven, so `b = 101`
-    // is the one row whose `a` is 3. The plan queries above use `b = 100`
-    // because that is the pair the measurement in this comment was taken with,
-    // and a plan does not depend on whether a row matches.
-    let answered = run(
+/// **A named index that cannot answer is refused, not silently replaced.**
+///
+/// SQLite's rule is `no query solution`, and in the pinned 3.53.4 shell the
+/// only index that earns it is a partial one whose predicate the statement does
+/// not imply, because walking it would lose the rows the predicate leaves out.
+/// `choose_path` returns an `AccessPath` and cannot refuse, so the binder asks
+/// `plan::unanswerable_index_hint` the same question with the same terms, for
+/// every block including a nested one and a compound arm.
+///
+/// The join arms found a second defect. A partial index's predicate was bound
+/// against a list holding its table at position zero and then looked up by the
+/// table's own id, so for every FROM term after the first it did not bind and
+/// the index was left out. That refused `FROM s, h INDEXED BY h_part WHERE
+/// h.c > 3`, which SQLite answers, and it had kept the same index from every
+/// unhinted query of that shape.
+///
+/// And a third. An inner term may not be read between two bounds, because the
+/// physical pass refuses that, and `index_candidate` was the one candidate
+/// builder that did not know it. `SELECT count(*) FROM s CROSS JOIN h WHERE
+/// h.b > 595` was refused with exit code 3 on the release build with no hint
+/// anywhere. The bound is now left as a residual over a whole walk, so the two
+/// join arms are **known plan differences with the same rows**: the pinned
+/// shell says `SEARCH h USING COVERING INDEX h_part (c>?)` for both, and
+/// `LEFT-JOIN` after the second.
+#[test]
+fn indexed_by_refuses_what_the_named_index_cannot_answer() {
+    let (_database, connection) = build_hinted("indexed-by-refused");
+    let refused = [
+        "SELECT * FROM h INDEXED BY h_part WHERE a = 1",
+        "SELECT (SELECT count(*) FROM h INDEXED BY h_part WHERE a = 1)",
+        "SELECT * FROM (SELECT count(*) FROM h INDEXED BY h_part WHERE a = 1)",
+        "SELECT 1 UNION ALL SELECT count(*) FROM h INDEXED BY h_part WHERE a = 2",
+        "DELETE FROM h INDEXED BY h_part WHERE a = 1",
+    ];
+    for sql in refused {
+        let reason = run(&connection, sql).expect_err(sql);
+        assert_eq!(reason, "no query solution", "{sql}");
+    }
+    // The refused `DELETE` removed nothing.
+    let total = run(&connection, "SELECT count(*) FROM h").expect("the count runs");
+    assert_eq!(total, vec!["int:600".to_string()]);
+
+    assert_plans(
         &connection,
-        "SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND b = 101",
-    )
-    .expect("the hinted query runs");
-    assert_eq!(
-        answered,
-        vec!["int:1".to_string()],
-        "the hinted query answered something other than the one matching row"
+        &[
+            (
+                "SELECT count(*) FROM s, h INDEXED BY h_part WHERE h.c > 3",
+                &["SCAN s", "SCAN h USING COVERING INDEX h_part"],
+            ),
+            (
+                "SELECT count(*) FROM s LEFT JOIN h INDEXED BY h_part ON h.c > 3",
+                &["SCAN s", "SCAN h USING COVERING INDEX h_part"],
+            ),
+        ],
+    );
+    // The rows are the pinned shell's. Two rows of `s` against the 120 rows of
+    // `h` whose `c` is 4, and five rows of `h` above 595 for each row of `s`.
+    for (sql, expected) in [
+        (
+            "SELECT count(*) FROM s, h INDEXED BY h_part WHERE h.c > 3",
+            "int:240",
+        ),
+        (
+            "SELECT count(*) FROM s LEFT JOIN h INDEXED BY h_part ON h.c > 3",
+            "int:240",
+        ),
+        ("SELECT count(*) FROM s CROSS JOIN h WHERE h.b > 595", "int:10"),
+    ] {
+        let rows = run(&connection, sql).unwrap_or_else(|reason| panic!("{sql}: {reason}"));
+        assert_eq!(rows, vec![expected.to_string()], "{sql}");
+    }
+}
+
+/// **A write obeys the hint on its target, and a trigger body may not carry one.**
+///
+/// The query that finds a write's rows was built from the table alone, so the
+/// hint the statement wrote was dropped there even once a `SELECT` obeyed it.
+/// The pinned 3.53.4 shell plans `UPDATE h INDEXED BY h_a SET c = 1 WHERE b = 5`
+/// as `SCAN h USING INDEX h_a`, and refuses both clauses on an `UPDATE` or a
+/// `DELETE` in a trigger body in the words asserted below. inillucent created
+/// such a trigger, even one naming an index that does not exist, because a
+/// trigger body is only bound when it fires.
+#[test]
+fn indexed_by_reaches_writes_and_is_refused_in_triggers() {
+    let (_database, connection) = build_hinted("indexed-by-writes");
+    assert_plans(
+        &connection,
+        &[
+            (
+                "UPDATE h INDEXED BY h_a SET c = 1 WHERE b = 5",
+                &["SCAN h USING INDEX h_a"],
+            ),
+            ("DELETE FROM h NOT INDEXED WHERE b = 7", &["SCAN h"]),
+            (
+                "DELETE FROM h INDEXED BY h_part WHERE c > 3 AND a = 1",
+                &["SEARCH h USING INDEX h_part (c>?)"],
+            ),
+        ],
+    );
+    let before =
+        run(&connection, "SELECT count(*) FROM h WHERE c > 3 AND a = 1").expect("the count runs");
+    assert_eq!(before, vec!["int:17".to_string()]);
+    run_all(
+        &connection,
+        &["DELETE FROM h INDEXED BY h_part WHERE c > 3 AND a = 1"],
+    );
+    let left =
+        run(&connection, "SELECT count(*) FROM h WHERE c > 3 AND a = 1").expect("the count runs");
+    assert_eq!(left, vec!["int:0".to_string()]);
+    let kept = run(&connection, "SELECT count(*) FROM h").expect("the count runs");
+    assert_eq!(kept, vec!["int:583".to_string()]);
+
+    let bodies = [
+        ("DELETE FROM h INDEXED BY h_a WHERE a = new.k", "INDEXED BY"),
+        ("DELETE FROM h NOT INDEXED WHERE a = new.k", "NOT INDEXED"),
+        (
+            "UPDATE h INDEXED BY h_a SET a = 1 WHERE a = new.k",
+            "INDEXED BY",
+        ),
+        ("UPDATE h NOT INDEXED SET a = 1", "NOT INDEXED"),
+        ("DELETE FROM h INDEXED BY nope", "INDEXED BY"),
+    ];
+    for (body, clause) in bodies {
+        let sql = format!("CREATE TRIGGER tr AFTER INSERT ON s BEGIN {body}; END");
+        let reason = run(&connection, &sql).expect_err(&sql);
+        assert_eq!(
+            reason,
+            format!(
+                "the {clause} clause is not allowed on UPDATE or DELETE statements within triggers"
+            ),
+            "{sql}"
+        );
+    }
+    // A `SELECT` in a body may carry one, as it may in SQLite.
+    run_all(
+        &connection,
+        &["CREATE TRIGGER tr AFTER INSERT ON s BEGIN SELECT a FROM h INDEXED BY h_a; END"],
     );
 }

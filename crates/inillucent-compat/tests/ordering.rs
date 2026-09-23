@@ -511,8 +511,11 @@ const GENERATED: &[Generated] = &[
     // `(s COLLATE NOCASE, rowid)` - so the `id` tie-break comes out of the
     // index too. The tie-break is needed because NOCASE makes `a` and `A`
     // equal, and an order with ties is not an order two engines must agree on.
+    // `INDEXED BY` names the walk rather than relying on the planner choosing
+    // it, which it could not do before task-2078 made the clause force the
+    // index; the plan check below still asserts no sort was added.
     Generated {
-        sql: "SELECT hex(s) FROM n ORDER BY s COLLATE NOCASE, id",
+        sql: "SELECT hex(s) FROM n INDEXED BY n_s ORDER BY s COLLATE NOCASE, id",
         every_string: false,
         walked: true,
     },

@@ -107,6 +107,7 @@ pub(super) fn in_list_union_path(
         consumed,
         needed,
         levers,
+        ..
     } = *context;
     // Every leading key column pinned by an equality, in key order. The `IN`
     // is looked for on the column after them.
@@ -286,6 +287,7 @@ pub(super) fn keyset_range_union_path(
         consumed,
         needed,
         levers,
+        ..
     } = *context;
     // **A range is an outermost-term path only**, the same rule and the same
     // reason [`super::rowid_path`]'s range half follows: the shallowest

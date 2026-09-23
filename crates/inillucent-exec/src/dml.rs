@@ -75,7 +75,7 @@ pub use delete::{delete, delete_at};
 pub(crate) use delete::{remove_row, remove_with_triggers};
 pub(crate) use insert::{declarations_are_met, outer_unwind, replace_row};
 pub use insert::{insert, insert_at};
-pub use keys::{keys_query, keys_query_joined, module_keys_query};
+pub use keys::{hint_target, keys_query, keys_query_joined, module_keys_query};
 pub(crate) use target::{
     count_row, count_view_row, highest_rowid, key_columns, layout_of, missing_tree, read_row,
     row_exists, sources_for, Borrowed, Stored, Upsert, WriteRequest,

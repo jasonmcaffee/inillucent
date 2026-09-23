@@ -563,22 +563,7 @@ SQLite's own rule. The last clause may omit its target and is then the catch-all
 | A rowid reference in a WITHOUT ROWID table | yes | **yes** |
 | A WITHOUT ROWID table with no primary key | yes | **yes** |
 
-### CREATE INDEX - 11 of 12, and one half
-
-`INDEXED BY` is the half. The clause parses, and a name that is not an index on
-the table is refused - which is the part that matters most, because a misspelled
-hint that is silently ignored is a plan doing something other than what was
-asked. What it does not yet do is force the named index: the planner still picks
-the one it costs cheapest. `NOT INDEXED` does take every index away, as of
-task-2066.
-
-Measured on a 600 row table with an index on each of two columns, against the
-pinned 3.53.4 shell. `SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND
-b = 100` plans as `SEARCH h USING INDEX h_a (a=?)` there and as `SEARCH h USING
-INDEX h_b (b=?)` here. The rows are the same; the route to them is not.
-`inillucent-compat::planner::indexed_by_names_an_index_and_does_not_yet_force_it`
-asserts this and fails when it is fixed.
-
+### CREATE INDEX - 13 of 13
 
 | feature | SQLite 3.53.4 | inillucent |
 |---|---|---|
@@ -593,7 +578,7 @@ asserts this and fails when it is fixed.
 | DROP INDEX | yes | **yes** |
 | REINDEX | yes | **yes** |
 | NOT INDEXED | yes | **yes** |
-| INDEXED BY | yes | **the name is checked, the index is not forced** |
+| INDEXED BY | yes | **yes** |
 | ANALYZE writes sqlite_stat1 | yes | **yes** |
 
 ### Views and triggers - 15 of 15

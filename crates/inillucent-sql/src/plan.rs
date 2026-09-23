@@ -359,17 +359,23 @@ impl AccessPath {
                 covering,
                 ..
             } => {
-                if equalities.is_empty() && low.is_none() && high.is_none() {
-                    return format!(
-                        "SCAN {table} USING COVERING INDEX {}",
-                        String::from_utf8_lossy(index_name)
-                    );
-                }
                 let kind = if covering.is_some() {
                     "COVERING INDEX"
                 } else {
                     "INDEX"
                 };
+                // A walk with nothing to seek used to be covering by
+                // construction, so this line said so unconditionally. A
+                // partial index and an `INDEXED BY` are walked whole while a
+                // lookup per entry fetches the row, and SQLite says `USING
+                // INDEX` for that: `SELECT * FROM h INDEXED BY h_a` is
+                // `SCAN h USING INDEX h_a` in the pinned 3.53.4 shell.
+                if equalities.is_empty() && low.is_none() && high.is_none() {
+                    return format!(
+                        "SCAN {table} USING {kind} {}",
+                        String::from_utf8_lossy(index_name)
+                    );
+                }
                 let detail = index_seek_detail(
                     index_name,
                     info,
@@ -762,17 +768,14 @@ impl Levers {
     }
 }
 
-/// Plans a bound SELECT with some optimizations switched off.
+/// Returns the conjuncts a path for an inner or comma joined term may seek on.
 ///
-/// The levers travel with the recursion rather than being read from anywhere
-/// global, so a subquery is planned under the same arm as the statement that
-/// contains it. An arm that applied to the outer block and not the inner one
-/// would measure a mixture and report it as one number.
+/// The statement's `WHERE`, and the `ON` of every term that is not the
+/// null-extendable side of an outer join. [`plan_select_with`] plans with these,
+/// and [`unanswerable_index_hint`] proves a forced index with them, so the two
+/// cannot reach different verdicts about the same statement.
 /// @param select - the bound statement
-/// @param levers - which optimizations are on
-pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
-    let mut select = select;
-    let compound_arms = core::mem::take(&mut select.compounds);
+fn statement_terms(select: &BoundSelect) -> Vec<BoundExpr> {
     let mut terms = Vec::new();
     if let Some(filter) = &select.filter {
         split_conjunction(filter, &mut terms);
@@ -785,6 +788,100 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
             split_conjunction(constraint, &mut terms);
         }
     }
+    terms
+}
+
+/// Returns the conjuncts of an outer join term's own `ON`, which are the only
+/// ones its path may seek on. `plan_select_with` says why.
+/// @param source - the null-extendable term
+fn outer_terms(source: &BoundSource) -> Vec<BoundExpr> {
+    let mut terms = Vec::new();
+    if let Some(constraint) = &source.constraint {
+        split_conjunction(constraint, &mut terms);
+    }
+    terms
+}
+
+/// Returns the name of an `INDEXED BY` index that cannot answer its term.
+///
+/// **This is the refusal `choose_path` has nowhere to put.** It returns an
+/// `AccessPath` and has a dozen callers, so the binder asks this instead,
+/// once per block, before anything is planned. SQLite's answer to such a
+/// statement is `no query solution`, and the cases are few, because a named
+/// b-tree index can always be walked from end to end: the pinned 3.53.4 shell
+/// plans `INDEXED BY h_a` over `WHERE c = 3`, with nothing on `a` at all, as
+/// `SCAN h USING INDEX h_a`. What cannot be walked is a partial index whose
+/// predicate the statement does not imply, because it would lose the rows the
+/// predicate leaves out. `CREATE INDEX h_part ON h(c) WHERE c > 3` refuses
+/// `SELECT * FROM h INDEXED BY h_part WHERE a = 1` there, and here.
+///
+/// An index a module owns is answerable only by the nearest neighbour probe,
+/// and a virtual table has no index this clause can name.
+/// @param select - one bound block, with its sources attached
+pub fn unanswerable_index_hint(select: &BoundSelect) -> Option<Vec<u8>> {
+    let mut shared: Option<Vec<BoundExpr>> = None;
+    for (position, source) in select.sources.iter().enumerate() {
+        let crate::bind::IndexChoice::Only(wanted) = &source.index_hint else {
+            continue;
+        };
+        if !matches!(source.rows, SourceRows::Table) {
+            continue;
+        }
+        let table = &source.table;
+        let Some((at, index)) = table
+            .indexes
+            .iter()
+            .enumerate()
+            .find(|(_, index)| &index.folded == wanted)
+        else {
+            continue;
+        };
+        let answerable = if table.module.is_some() {
+            false
+        } else if index.origin == crate::catalog_view::IndexOrigin::Module {
+            let id = source.id;
+            matches!(
+                vector_path(id, position, source, select),
+                Some(AccessPath::VectorProbe { index: ref chosen, .. }) if chosen == &index.name
+            )
+        } else if is_outer(source.join) {
+            index_usable(source, at, index, &outer_terms(source))
+        } else {
+            let terms = shared.get_or_insert_with(|| statement_terms(select));
+            index_usable(source, at, index, terms)
+        };
+        if !answerable {
+            return Some(index.name.clone());
+        }
+    }
+    None
+}
+
+/// Reports whether one b-tree index may be read for a term at all.
+///
+/// Every index may, except a partial one whose predicate the terms do not
+/// imply; `index_path` says why that one would lose rows.
+/// @param source - the term
+/// @param at - the index's position in the table's list
+/// @param index - the index
+/// @param terms - the conjuncts the term's path may seek on
+fn index_usable(source: &BoundSource, at: usize, index: &IndexInfo, terms: &[BoundExpr]) -> bool {
+    let computed = source.index_exprs.iter().find(|held| held.position == at);
+    index.partial_sql.is_none() || implies(computed, terms)
+}
+
+/// Plans a bound SELECT with some optimizations switched off.
+///
+/// The levers travel with the recursion rather than being read from anywhere
+/// global, so a subquery is planned under the same arm as the statement that
+/// contains it. An arm that applied to the outer block and not the inner one
+/// would measure a mixture and report it as one number.
+/// @param select - the bound statement
+/// @param levers - which optimizations are on
+pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
+    let mut select = select;
+    let compound_arms = core::mem::take(&mut select.compounds);
+    let terms = statement_terms(&select);
     // The order the terms are visited in is chosen before their paths are, and
     // then the paths are chosen in that order - because a path may use a value
     // from a term visited earlier, and which terms those are is exactly what the
@@ -833,10 +930,7 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
             match source.table.module.clone() {
                 Some(_) => choose_path(level, &ids, source, &select, &terms, &mut consumed, levers),
                 None => {
-                    let mut on_terms = Vec::new();
-                    if let Some(constraint) = &source.constraint {
-                        split_conjunction(constraint, &mut on_terms);
-                    }
+                    let on_terms = outer_terms(source);
                     let mut on_consumed = vec![false; on_terms.len()];
                     let chosen = choose_path(
                         level,
@@ -1903,11 +1997,30 @@ fn choose_path(
     // b-tree paths because none of them apply: an index a module owns has no
     // key to seek and no range to walk, and the shape it answers - a distance
     // ordered ascending with a `LIMIT` - is one no other path can improve on.
+    let forced = match &source.index_hint {
+        crate::bind::IndexChoice::Only(wanted) => Some(wanted.as_slice()),
+        _ => None,
+    };
     if let Some(path) = vector_path(id, position, source, select) {
-        return path;
+        // `INDEXED BY` a b-tree index rules the probe out like every other
+        // path; `INDEXED BY` the probe's own index is the one way to keep it.
+        let named = match &path {
+            AccessPath::VectorProbe { index, .. } => table
+                .indexes
+                .iter()
+                .find(|held| &held.name == index)
+                .map(|held| held.folded.as_slice()),
+            _ => None,
+        };
+        if forced.is_none() || forced == named {
+            return path;
+        }
     }
     if let Some(module) = table.module.clone() {
         return virtual_path(id, position, ids, source, select, module, terms, consumed);
+    }
+    if forced.is_some() {
+        return forced_path(id, position, ids, source, select, terms, consumed, levers);
     }
     // Every candidate is built against a *copy* of the consumed list, because a
     // path that is not chosen must not leave its predicates marked as handled.
@@ -1929,7 +2042,7 @@ fn choose_path(
     // says that is what makes the digest a fact about the rows - which was not
     // true while the hint was dropped, because a corrupt index would then be
     // read in place of the table it was meant to be checked against.
-    if source.index_hint != crate::ast::IndexHint::NotIndexed {
+    if source.index_hint != crate::bind::IndexChoice::NotIndexed {
         let mut trial = consumed.to_vec();
         let needed = select.columns_read(id);
         if let Some(path) = index_path(
@@ -1972,6 +2085,46 @@ fn choose_path(
         }
         None => AccessPath::TableScan { root: table.root },
     }
+}
+
+/// Chooses the path for a term written `INDEXED BY name`: that index, read the
+/// cheapest way it can be.
+///
+/// **Nothing else is a candidate**, not the table scan and not the rowid, which
+/// is SQLite's rule and was measured against the pinned 3.53.4 shell:
+/// `SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND b = 100` searches
+/// `h_a` there even though `ANALYZE` prefers `h_b`, and until task-2078 it
+/// searched `h_b` here. When nothing in the statement seeks the index it is
+/// walked end to end, which is what `SCAN h USING INDEX h_a` means.
+///
+/// The binder has already refused a statement the index cannot answer, through
+/// [`unanswerable_index_hint`], so the table scan at the bottom is only reached
+/// by a caller that built a `BoundSource` without the binder. It returns every
+/// row, which is the answer that cannot be wrong.
+/// @param id - the term's statement-wide id
+/// @param position - its place in the visiting order
+/// @param ids - every term's id in visiting order
+/// @param source - the term
+/// @param select - the whole statement, for the columns it reads
+/// @param terms - the conjuncts the path may seek on
+/// @param consumed - which conjuncts an earlier path already answers
+/// @param levers - which optimizations are on
+fn forced_path(
+    id: usize,
+    position: usize,
+    ids: &[usize],
+    source: &BoundSource,
+    select: &BoundSelect,
+    terms: &[BoundExpr],
+    consumed: &mut [bool],
+    levers: Levers,
+) -> AccessPath {
+    let needed = select.columns_read(id);
+    index_path(id, position, ids, source, terms, consumed, &needed, levers).unwrap_or(
+        AccessPath::TableScan {
+            root: source.table.root,
+        },
+    )
 }
 
 /// Returns what a sort would cost this term, or nothing when no path could
@@ -2176,7 +2329,7 @@ pub fn write_path_with(
         return path;
     }
     let source = BoundSource {
-        index_hint: crate::ast::IndexHint::None,
+        index_hint: crate::bind::IndexChoice::Any,
         id: source_id,
         rows: SourceRows::Table,
         table: std::rc::Rc::new(table.clone()),
@@ -2333,6 +2486,10 @@ fn index_path(
     levers: Levers,
 ) -> Option<AccessPath> {
     let table = &source.table;
+    let forced = match &source.index_hint {
+        crate::bind::IndexChoice::Only(wanted) => Some(wanted.as_slice()),
+        _ => None,
+    };
     let context = CandidateContext {
         id,
         position,
@@ -2342,6 +2499,7 @@ fn index_path(
         consumed,
         needed,
         levers,
+        forced: forced.is_some(),
     };
     let mut best: Option<(f64, AccessPath, Vec<usize>)> = None;
     for (at, index) in table.indexes.iter().enumerate() {
@@ -2351,12 +2509,15 @@ fn index_path(
         if index.origin == crate::catalog_view::IndexOrigin::Module {
             continue;
         }
+        if forced.is_some_and(|wanted| wanted != index.folded.as_slice()) {
+            continue;
+        }
         // The expressions this index needs, when the binder could bind them.
         // `None` for every ordinary index, and for one whose schema text did
         // not bind - which leaves a partial index unusable and an expression
         // key unmatched, both the conservative answer.
         let computed = source.index_exprs.iter().find(|held| held.position == at);
-        let usable = index.partial_sql.is_none() || implies(computed, terms);
+        let usable = index_usable(source, at, index, terms);
         if !usable && index.partial_sql.is_some() {
             // **A partial index only holds the rows its predicate accepts.**
             // Using one over a query that does not imply the predicate would
@@ -2422,6 +2583,9 @@ pub(crate) struct CandidateContext<'a> {
     pub(crate) needed: &'a ColumnUse,
     /// The planner's tuning knobs.
     pub(crate) levers: Levers,
+    /// The term was written `INDEXED BY`, so the one index left must produce a
+    /// path even when nothing seeks it: a walk of every entry.
+    pub(crate) forced: bool,
 }
 
 /// Folds one more index candidate into whichever is cheapest so far.
@@ -2466,6 +2630,7 @@ fn index_candidate(
         consumed,
         needed,
         levers,
+        forced,
     } = *context;
     let mut equalities = Vec::new();
     let mut used = Vec::new();
@@ -2505,7 +2670,17 @@ fn index_candidate(
     }
     let mut low = None;
     let mut high = None;
-    if let Some(key_column) = index.columns.get(key) {
+    // **A range is an outermost-term path only**, the rule `rowid_path` and
+    // `seek_union` already follow and this candidate did not. The physical
+    // pass refuses an inner index seek with a bound, with or without an
+    // equality before it, so `SELECT count(*) FROM s, h WHERE h.b > 595`
+    // over an index on `b` was planned as `SEARCH h ... (b>?)` for the inner
+    // term and then refused with exit code 3, on the release build and
+    // without any hint. The pinned 3.53.4 shell answers it. Leaving the bound
+    // unconsumed makes it a residual over the pair, which answers. task-2078
+    // found it because `INDEXED BY` on an inner term reaches this every time.
+    let inner = position != 0;
+    if let Some(key_column) = index.columns.get(key).filter(|_| !inner) {
         if let Some(column) = key_column.column {
             let collation = collation_of(&key_column.collation);
             for (term_index, term) in terms.iter().enumerate() {
@@ -2588,6 +2763,7 @@ fn index_candidate(
         && high.is_none()
         && covering.is_none()
         && !partial_walk
+        && !(forced && usable)
     {
         // Nothing to seek to and nothing to save by reading the entries: this
         // index has no part in answering the query.

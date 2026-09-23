@@ -82,6 +82,18 @@ pub(crate) fn no_such_index(name: &[u8], span: Span) -> ParseError {
     )
 }
 
+/// Returns SQLite's "no query solution", for an `INDEXED BY` whose index
+/// cannot answer the statement; `plan::unanswerable_index_hint` says which.
+///
+/// @param span - where to point the diagnostic, which is nowhere for both
+///   callers because SQLite's own message has no position
+pub(crate) fn no_query_solution(span: Span) -> ParseError {
+    ParseError::new(
+        ParseErrorKind::Refused("no query solution".to_string()),
+        span,
+    )
+}
+
 /// Returns a "no such column" failure in SQLite's wording.
 pub(crate) fn no_such_column(name: &[u8], span: Span) -> ParseError {
     ParseError::new(

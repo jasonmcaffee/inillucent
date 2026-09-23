@@ -335,6 +335,8 @@ impl crate::ImportedDatabase {
                     statement.filter.as_ref(),
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
+                    &statement.index_hint,
+                    &statement.index_exprs,
                 )?
                 .0
                 .describe(),
@@ -345,6 +347,8 @@ impl crate::ImportedDatabase {
                     statement.filter.as_ref(),
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
+                    &statement.index_hint,
+                    &statement.index_exprs,
                 )?
                 .0
                 .describe(),
@@ -519,6 +523,8 @@ impl crate::ImportedDatabase {
                     statement.filter.as_ref(),
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
+                    &statement.index_hint,
+                    &statement.index_exprs,
                 )?;
                 Ok(Cached::Delete(statement, CachedQuery::new(plan, prepared)))
             }
@@ -546,6 +552,8 @@ impl crate::ImportedDatabase {
     /// @param filter - the statement's `WHERE`
     /// @param limit - the statement's `LIMIT`
     /// @param offset - the statement's `OFFSET`
+    /// @param hint - `INDEXED BY` or `NOT INDEXED` on the target
+    /// @param index_exprs - the target's bound index expressions
     fn keys_plan(
         &self,
         table: &TableInfo,
@@ -553,13 +561,16 @@ impl crate::ImportedDatabase {
         filter: Option<&inillucent_sql::bind::BoundExpr>,
         limit: Option<&inillucent_sql::bind::BoundExpr>,
         offset: Option<&inillucent_sql::bind::BoundExpr>,
+        hint: &inillucent_sql::bind::IndexChoice,
+        index_exprs: &[inillucent_sql::dml::BoundIndexExprs],
     ) -> DbResult<(PhysicalPlan, physical::Prepared)> {
         let layout = self
             .schema
             .layouts
             .get(&table.root)
             .ok_or_else(|| refusal("no layout imported for the table being written"))?;
-        let select = dml::keys_query(table, source, filter, limit, offset, layout)?;
+        let mut select = dml::keys_query(table, source, filter, limit, offset, layout)?;
+        dml::hint_target(&mut select, hint, index_exprs);
         let mut plan = plan_select_with(select, self.pragmas.levers());
         // **The one place `Levers::INDEXED_WRITE` has to be applied by hand.**
         // `plan_select_with` is the ordinary read planner, shared with every
@@ -615,6 +626,8 @@ impl crate::ImportedDatabase {
                 statement.filter.as_ref(),
                 statement.limit.as_ref(),
                 statement.offset.as_ref(),
+                &statement.index_hint,
+                &statement.index_exprs,
             );
         }
         let layout = self
@@ -627,7 +640,7 @@ impl crate::ImportedDatabase {
             .iter()
             .map(|assignment| assignment.value.clone())
             .collect();
-        let select = dml::keys_query_joined(
+        let mut select = dml::keys_query_joined(
             &statement.table,
             statement.source,
             statement.filter.as_ref(),
@@ -637,6 +650,7 @@ impl crate::ImportedDatabase {
             &statement.from,
             &assigned,
         )?;
+        dml::hint_target(&mut select, &statement.index_hint, &statement.index_exprs);
         let plan = plan_select_with(select, self.pragmas.levers());
         let prepared = physical::prepare_any(&plan, self)?;
         Ok((plan, prepared))

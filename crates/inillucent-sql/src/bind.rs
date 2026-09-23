@@ -17,9 +17,9 @@ mod refusal;
 // The refusals live in `bind/refusal.rs` and are named here so every call
 // site reads as it did. See that file for why they moved.
 pub(crate) use refusal::{
-    ambiguous_column, compound_order_unmatched, no_such_collation, no_such_column,
-    no_such_column_quoted, no_such_function, no_such_index, no_such_table, order_out_of_range,
-    schema_refused, unsupported, wrong_arguments,
+    ambiguous_column, compound_order_unmatched, no_query_solution, no_such_collation,
+    no_such_column, no_such_column_quoted, no_such_function, no_such_index, no_such_table,
+    order_out_of_range, schema_refused, unsupported, wrong_arguments,
 };
 mod having;
 mod literal;
@@ -1016,11 +1016,52 @@ pub struct BoundSource {
     /// `SELECT count(*) FROM h NOT INDEXED WHERE a = 3 AND b = 100` planned as
     /// `SCAN h` there and as `SEARCH h USING INDEX h_b (b=?)` here.
     ///
-    /// `NOT INDEXED` is honoured now. `INDEXED BY` is still only checked for a
-    /// name that exists, because forcing one means refusing the statement when
-    /// the named index cannot answer it, and `choose_path` returns an
-    /// `AccessPath` rather than a `Result`.
-    pub index_hint: crate::ast::IndexHint,
+    /// Both are honoured now. `INDEXED BY` was the second half, in task-2078:
+    /// the same statement with `INDEXED BY h_a` planned as
+    /// `SEARCH h USING INDEX h_a (a=?)` there and as `h_b` here, and it is
+    /// held as the index's folded name rather than as the parser's name id
+    /// because the planner has no syntax tree to look the id up in.
+    pub index_hint: IndexChoice,
+}
+
+/// Which indexes the planner may use for one FROM term.
+///
+/// SQLite's two clauses are opposite restrictions and the planner reads them
+/// in one place, `choose_path`. `NOT INDEXED` takes every index away and leaves
+/// the rowid. `INDEXED BY` takes everything *else* away, the rowid and the
+/// table scan included: the pinned 3.53.4 shell plans
+/// `SELECT * FROM h INDEXED BY h_a WHERE id = 5` as `SCAN h USING INDEX h_a`,
+/// a walk of the whole index, with a rowid seek sitting unused beside it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum IndexChoice {
+    /// Nothing was written, so every path is a candidate.
+    #[default]
+    Any,
+    /// `NOT INDEXED`: no index, and the rowid is still allowed.
+    NotIndexed,
+    /// `INDEXED BY name`: that index and nothing else, by its folded name.
+    Only(Vec<u8>),
+}
+
+/// Refuses a block, or one of its compound arms, that forces an index which
+/// cannot answer it.
+///
+/// Here rather than in the planner because this is the last point with a
+/// `Result` to put the refusal in, and every block reaches it: a nested query,
+/// a view body and a CTE body are all bound through `bind_select`. The block's
+/// sources and its `ORDER BY` and `LIMIT` are attached by now, which the
+/// nearest neighbour probe needs.
+/// The refusal points at nothing, because SQLite's does not: the pinned 3.53.4
+/// shell prints `no query solution` with no caret under the statement.
+/// @param bound - the block, with its sources attached
+fn refuse_unanswerable_hints(bound: &BoundSelect) -> Result<(), ParseError> {
+    let arms = core::iter::once(bound).chain(bound.compounds.iter().map(|(_, arm)| arm));
+    for arm in arms {
+        if crate::plan::unanswerable_index_hint(arm).is_some() {
+            return Err(no_query_solution(Span::default()));
+        }
+    }
+    Ok(())
 }
 
 /// One aggregate the statement computes.
@@ -1796,6 +1837,7 @@ impl<'a> Binder<'a> {
             .iter()
             .filter_map(|id| self.sources.get(*id).cloned())
             .collect();
+        refuse_unanswerable_hints(&bound)?;
         Ok(bound)
     }
 
@@ -2142,6 +2184,17 @@ impl<'a> Binder<'a> {
         Err(no_such_index(self.ast.text(name), span))
     }
 
+    /// Turns a hint as the parser wrote it into the form the planner reads.
+    ///
+    /// @param hint - the hint as written
+    pub(crate) fn index_choice(&self, hint: ast::IndexHint) -> IndexChoice {
+        match hint {
+            ast::IndexHint::None => IndexChoice::Any,
+            ast::IndexHint::NotIndexed => IndexChoice::NotIndexed,
+            ast::IndexHint::IndexedBy(name) => IndexChoice::Only(self.ast.folded(name).to_vec()),
+        }
+    }
+
     /// Binds one FROM term, registering it as a source of the current block.
     ///
     /// A table, a CTE reference, a view and a parenthesised subquery all end up
@@ -2167,8 +2220,9 @@ impl<'a> Binder<'a> {
                 self.check_index_hint(indexed_by, span)?;
                 // The hint belongs to the term that was just pushed, and this
                 // is the only place that knows both.
+                let choice = self.index_choice(indexed_by);
                 if let Some(source) = self.sources.last_mut() {
-                    source.index_hint = indexed_by;
+                    source.index_hint = choice;
                 }
                 if let Some(arguments) = arguments {
                     self.bind_table_arguments(&arguments, span)?;
@@ -2313,7 +2367,7 @@ impl<'a> Binder<'a> {
         };
         let id = self.sources.len();
         self.sources.push(BoundSource {
-            index_hint: crate::ast::IndexHint::None,
+            index_hint: crate::bind::IndexChoice::Any,
             id,
             rows: SourceRows::Table,
             table,
@@ -2424,7 +2478,16 @@ impl<'a> Binder<'a> {
         nested.collations = self.collations;
         nested.trusted_schema = self.trusted_schema;
         nested.call_site = function::CallSite::Schema;
-        nested.sources = vec![alone.clone()];
+        // **The term sits at its own id, not at zero (task-2078).** A column is
+        // resolved by looking its term up in `sources` by statement-wide id,
+        // and this list used to hold the one term at position zero. For the
+        // first FROM term those agree. For every later one the lookup found
+        // nothing, the expression did not bind, and the index was left out
+        // without a word: `CREATE INDEX h_part ON h(c) WHERE c > 3` served
+        // `FROM h, s WHERE h.c > 3` and not `FROM s, h WHERE h.c > 3`. The
+        // positions below the term's are filled with copies of it, and the
+        // scope names only the term's own id, so nothing can resolve to them.
+        nested.sources = vec![alone.clone(); alone.id.saturating_add(1)];
         nested.scopes = vec![vec![alone.id]];
         nested.bind_expr(expr).ok()
     }
@@ -2533,7 +2596,7 @@ impl<'a> Binder<'a> {
         let table = subquery_table(&alias, &columns, &bound);
         let id = self.sources.len();
         self.sources.push(BoundSource {
-            index_hint: crate::ast::IndexHint::None,
+            index_hint: crate::bind::IndexChoice::Any,
             id,
             rows: SourceRows::Subquery(Box::new(bound)),
             table: std::rc::Rc::new(table),

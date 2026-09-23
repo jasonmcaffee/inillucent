@@ -482,7 +482,7 @@ fn keys_for_update(
     params: &Params,
 ) -> DbResult<Vec<Row>> {
     let layout = layout_for(target, &statement.table)?;
-    let select = dml::keys_query(
+    let mut select = dml::keys_query(
         &statement.table,
         statement.source,
         statement.filter.as_ref(),
@@ -490,6 +490,7 @@ fn keys_for_update(
         statement.offset.as_ref(),
         &layout,
     )?;
+    dml::hint_target(&mut select, &statement.index_hint, &statement.index_exprs);
     run_select(&select, target, params)
 }
 
@@ -504,7 +505,7 @@ fn keys_for_delete(
     params: &Params,
 ) -> DbResult<Vec<Row>> {
     let layout = layout_for(target, &statement.table)?;
-    let select = dml::keys_query(
+    let mut select = dml::keys_query(
         &statement.table,
         statement.source,
         statement.filter.as_ref(),
@@ -512,6 +513,7 @@ fn keys_for_delete(
         statement.offset.as_ref(),
         &layout,
     )?;
+    dml::hint_target(&mut select, &statement.index_hint, &statement.index_exprs);
     run_select(&select, target, params)
 }
 

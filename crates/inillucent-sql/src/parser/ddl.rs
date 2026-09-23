@@ -696,7 +696,46 @@ impl Parser<'_> {
                 Span::at(self.cursor()),
             ));
         }
+        self.refuse_trigger_index_hint(&statement)?;
         Ok(statement)
+    }
+
+    /// Refuses `INDEXED BY` and `NOT INDEXED` on the target of an `UPDATE` or
+    /// `DELETE` in a trigger body, in SQLite's words.
+    ///
+    /// Both used to be accepted and stored, and `INDEXED BY` was not even
+    /// checked for an index that exists, because a trigger body is only bound
+    /// when the trigger fires: `CREATE TRIGGER t AFTER INSERT ON s BEGIN DELETE
+    /// FROM h INDEXED BY nope; END` created a trigger here, and the pinned
+    /// 3.53.4 shell refuses it with the message below. A `SELECT` in a body
+    /// may still carry either clause, as it may there.
+    /// @param statement - one statement of the trigger body
+    fn refuse_trigger_index_hint(&self, statement: &Statement) -> Result<(), ParseError> {
+        let target = match statement {
+            Statement::Update(update) => update.target,
+            Statement::Delete(delete) => delete.target,
+            _ => return Ok(()),
+        };
+        let Some(term) = self.ast.from_term(target) else {
+            return Ok(());
+        };
+        let clause = match term.source {
+            crate::ast::FromSource::Table {
+                indexed_by: crate::ast::IndexHint::IndexedBy(_),
+                ..
+            } => "INDEXED BY",
+            crate::ast::FromSource::Table {
+                indexed_by: crate::ast::IndexHint::NotIndexed,
+                ..
+            } => "NOT INDEXED",
+            _ => return Ok(()),
+        };
+        Err(ParseError::new(
+            ParseErrorKind::Refused(format!(
+                "the {clause} clause is not allowed on UPDATE or DELETE statements within triggers"
+            )),
+            Span::default(),
+        ))
     }
 
     /// Parses `CREATE VIRTUAL TABLE`, whose module arguments are opaque text.
