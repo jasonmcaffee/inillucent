@@ -1239,7 +1239,7 @@ tests = [
   "inillucent-compat::windows_match_the_oracle",
   "inillucent-compat::ordered_statements_match_the_oracle",
   "inillucent-compat::a_windowed_select_answers_through_the_cached_path_too",
-  "inillucent-compat::every_probed_construct_answers_as_the_table_says",
+  "inillucent-compat::the_cases_about_reading_rows_answer_as_the_table_says",
 ]
 
 [[capability]]
@@ -2035,7 +2035,7 @@ phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 # equivalent: the reference's fifth-order sine, and the sweep's tie-breaking.
 status = "pass"
 tests = [
-  "inillucent-compat::every_probed_construct_answers_as_the_table_says",
+  "inillucent-compat::the_cases_about_the_built_in_functions_answer_as_the_table_says",
   "inillucent-compat::the_function_register_names_what_the_engine_answers",
   "inillucent-compat::the_module_register_names_what_the_engine_answers",
   "inillucent-scalar::geopoly::tests::a_square_round_trips_through_both_forms",

@@ -792,12 +792,12 @@ fn commit_hash(root: &Path) -> String {
         .args(["status", "--porcelain"])
         .output()
     {
-        Ok(status) => match anything_but_the_history_changed(&String::from_utf8_lossy(
-            &status.stdout,
-        )) {
-            true => format!("{text}-dirty"),
-            false => text,
-        },
+        Ok(status) => {
+            match anything_but_the_history_changed(&String::from_utf8_lossy(&status.stdout)) {
+                true => format!("{text}-dirty"),
+                false => text,
+            }
+        }
         _ => text,
     }
 }
@@ -951,8 +951,10 @@ mod tests {
         ));
         // A line too short to hold a path is unreadable, and unreadable is
         // dirty rather than clean.
-        assert!(anything_but_the_history_changed("??
-"));
+        assert!(anything_but_the_history_changed(
+            "??
+"
+        ));
     }
 
     /// The date arithmetic has to be right, or every row is stamped wrongly and

@@ -159,8 +159,8 @@ sha256 = "0c6c4ace63ffcb8104de467d93ae011623a00d0418c5bb2dcdd2a3cd97a49944"
 [[amendment]]
 path = "crates/inillucent-core/src/bm25.rs"
 ticket = "task-2068"
-reason = "The postings reader took n_terms as a raw u64 out of the segment header and passed it to Vec::with_capacity and HashMap::with_capacity before reading a single term, with no ceiling and no check against the bytes remaining. Both now grow as the terms arrive, which costs a few reallocations on a real index and nothing on a hostile length - that fails at the first read_str instead. Reached from an ordinary SELECT over an inillucent_search table, like the hnsw.rs change beside it. No scoring changes: the same terms and postings are read in the same order. task-2066 section 4.1.12."
-sha256 = "61bd60b87942c59907326f644855c737994c57b508481ef22a364263ce7aee30"
+reason = "the postings are flat arrays with an overflow map: one byte array for the terms, one for the postings, a start per term, and a binary search instead of a hash. 306.2 MiB resident to 209.4 for 211.1 on disk on a 185,078 chunk index."
+sha256 = "5385963e4c128250c4694a9ca371df1318afa2f5eeeb400c9bc6d53e5112b660"
 
 [[amendment]]
 path = "crates/inillucent-core/src/distance.rs"
@@ -195,14 +195,14 @@ sha256 = "ef2b935a4f7ec6a35b8755f758e11eb863dc37fb28f7abeda781f3b9154c2e0d"
 [[amendment]]
 path = "crates/inillucent-core/src/hnsw.rs"
 ticket = "task-2068"
-reason = "The graph reader sized three allocations from header fields of a .rdb segment, which is a page somebody else could have written: vec![0u8; n_nodes] and Vec::with_capacity on n_layers and on each layer's count, all before a byte of the body had been shown to be there. binio's module comment states the rule and read_records is what follows it - the buffer never grows past what has arrived plus one step - so node_top is read through read_pod_vec and the two counts no longer reserve. A claimed length the file cannot satisfy now costs one megabyte and fails with UnexpectedEof instead of going through handle_alloc_error, which aborts the process rather than returning an error. Reached from an ordinary SELECT over an inillucent_search table. No ranking, no distance and no graph shape changes: the same bytes are read into the same structures, only the allocation is bounded. task-2066 section 4.1.12."
-sha256 = "f9caa093ecc852a622b1b08afbeed5c88b267454b13b487db850b1da0ec4b69d"
+reason = "the neighbour list is read through binio::read_pod_vec rather than reserved from a raw u32 off disk; a fuzz target found 14 GB asked for from a 21 byte input."
+sha256 = "a783de8198752d17fa1d349e043f47fd41d71fb25dffd0b91d7dc8527be8774c"
 
 [[amendment]]
 path = "crates/inillucent-core/src/index.rs"
-ticket = "task-2006"
-reason = "task-2000 design 9: the two legs of a hybrid search run under rayon::join, because they touch disjoint structures - the graph and the postings - and the hybrid rows on the card fell to about the slower leg, 5.125 ms to 4.629 for a title as the query. And thirty_appends_stay_close_to_a_clean_rebuild pins build_threads: 1: it measures how far an incremental insert's graph drifts from a rebuilt one, and under the parallel default neither graph is the same graph twice - run on its own it passes either way, run inside the suite with two dozen test binaries each asking for every core it measured recall 0.8975 against a 0.90 bar, which is two graphs differing rather than the appends drifting."
-sha256 = "6d1eacf81f83db597fd68b7b04d866859538393586cb02704f69d377fcb6a47f"
+ticket = "task-2068"
+reason = "make_text_resident, for a caller that reads every chunk once - inillucent-migrate digests a whole corpus and should not pay a positional read each."
+sha256 = "2da11e58aeb70de253f1f22fc2d67094574d53654d839341f9104e73e2ea061e"
 
 [[amendment]]
 path = "crates/inillucent-core/src/install.rs"
@@ -224,9 +224,9 @@ sha256 = "194dc2057506af2b35c24b0a846baad8ae6848c42f4761268e1eeb51e3c9bd02"
 
 [[amendment]]
 path = "crates/inillucent-core/src/persist.rs"
-ticket = "task-1953"
-reason = "task-1946 H4: seven test call sites carry the refusal the entry points now return."
-sha256 = "1ef665261d50913cfb5336aa6fe9390d299a004b219b8e41d3072c5af1e48389"
+ticket = "task-2068"
+reason = "a load counts where the text section begins and files the arena there rather than reading it; write_to still writes the text inline, so an index written by any build opens under either."
+sha256 = "96aa68a5a91c85fdad287b5d2bc23e5b20a116580945961f6dd31370bc81c167"
 
 [[amendment]]
 path = "crates/inillucent-core/src/quantize.rs"
@@ -248,9 +248,9 @@ sha256 = "17e49794567b07924cf7ac27d97d8cea6b3e5725de7cec2ab2cf4489ced3f47f"
 
 [[amendment]]
 path = "crates/inillucent-core/src/store.rs"
-ticket = "task-2001"
-reason = "task-2001: a tombstoned document is one document row, not one row per chunk. add_chunks kept a chunk that arrived already deleted out of doc_lookup, so the next chunk of the same document could not find it and opened another row; 53 tombstoned documents holding 183 chunks became 183 rows and n_documents answered 38,977 for a corpus of 38,847. A second derived map, tombstoned_lookup, holds the tombstoned documents, and which map answers is the incoming chunk's own state. find_document still reads only the live map, so task-1775's rule that a live append cannot attach to a dead row is unchanged, and both maps are serde(skip) so no format on disk moved. Verified on the graded corpus: the same cache and the same build command print 38847 documents with every other build statistic identical. Six tests, five of which fail on the old code."
-sha256 = "785bf751e93d400dd22a64362b7829c9b8ec31dbd17822f8844120257d0f0dae"
+ticket = "task-2068"
+reason = "the chunk text is a TextArena that a load can leave in store.bin and read a range at a time. 156.0 MiB of a 580.2 MiB open. The file format is unchanged."
+sha256 = "10053a29c722596ec38eb5ce45ae0f7027ca007e5a07f203723fbbcc5de9a9de"
 
 [[amendment]]
 path = "crates/inillucent-core/src/tokenize.rs"
@@ -260,9 +260,9 @@ sha256 = "b6116086d1a456cf215a5ac2858f5c8c5d58a03393455fa882c2add94db49bcb"
 
 [[amendment]]
 path = "crates/inillucent-core/src/vectors.rs"
-ticket = "task-1932"
-reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
-sha256 = "6784023d2abb05e4d0a5ddf644c92aaf0656a03f937b82fdbb058f52bd30da8f"
+ticket = "task-2068"
+reason = "read_exact_at is pub(crate) so the filed text arena can use the same positional read the filed vectors do."
+sha256 = "dfa1613a5b921453856c3822f6add1db9a8245400860a07c9c5918895cf69b23"
 
 [[amendment]]
 path = "inillucent-scorecard.json"
