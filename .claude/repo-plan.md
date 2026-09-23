@@ -666,9 +666,12 @@ they are touching do not collide; two that have not, do.
 - **Before chasing a gate ratio that slipped, read this engine's own time in the same row.** The
   `ours ns` and `theirs ns` columns are both printed. task-2074 reported `join.range` falling from
   0.90x to 0.84x and `read.join`'s lower bound going under 3.00x; this engine's time for it was
-  33.0 to 33.6 ms on every build across 27 quiet passes, while SQLite's arm drifted from 24.8 to
+  33.0 to 33.6 ms on every build across 27 quiet passes, and 27.2 to 27.6 ms pinned to the performance
+  cores, while SQLite's arm drifted from 24.8 to
   31.6 ms inside one window, and the lower bound followed SQLite. A round also reads before it
-  writes, so no write change can reach a read workload's leaves at all. (task-2082)
+  writes, so no write change can reach a read workload's leaves at all. And pin the gate before you
+  compare it with anything: unpinned, the scheduler put this engine on the efficiency cores and SQLite
+  on the performance cores (task-2064), and task-2085 makes the gates pin themselves. (task-2082)
 - **Three in four of the `transaction` family's updates match no row.** `Bind::Scatter` picks rowids
   up to `main_table`'s row count and `side_table` holds a quarter of that, so those statements measure
   a lookup past the end of `side_table`'s last leaf - the leaf `write.insert.autocommit` appended 100
