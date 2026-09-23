@@ -17,7 +17,7 @@
 //! fresh page allocation the way the old one did. `reads`, `hits` and `writes`
 //! below are the three that carried over.
 //!
-//! Usage: `cargo run --release -p inillucent-compat --bin inillucent-writeprofile [-- --sweep]`
+//! Usage: `cargo run --release -p inillucent-compat --bin inillucent-writeprofile [-- --sweep | --spread <rows> <pool MiB>]`
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -70,14 +70,25 @@ const SWEEP_PRIMES: [i64; 10] = [
 ///
 /// `--sweep` runs the index count sweep alone, which is what a before and after
 /// of a leaf format change wants: the other cases take a minute and measure
-/// something else.
+/// something else. `--spread <rows> <pool MiB>` runs the every other row
+/// delete of `story_large_table_nightly` alone (task-2077), with the pool
+/// defaulting to that story's 8 MiB.
 fn main() -> ExitCode {
     let sweep_only = std::env::args()
         .skip(1)
         .any(|argument| argument == "--sweep");
-    let outcome = match sweep_only {
-        true => index_sweep(),
-        false => run(),
+    let numbers: Vec<usize> = std::env::args()
+        .skip_while(|argument| argument != "--spread")
+        .skip(1)
+        .filter_map(|number| number.parse().ok())
+        .collect();
+    let spread = numbers
+        .first()
+        .map(|rows| (*rows as i64, numbers.get(1).copied().unwrap_or(8)));
+    let outcome = match (spread, sweep_only) {
+        (Some((rows, pool_mib)), _) => spread_sweep(rows, pool_mib),
+        (None, true) => index_sweep(),
+        (None, false) => run(),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -193,6 +204,182 @@ fn whole_table_delete(rows: u32, page_size: usize) -> Result<(), String> {
         after.hits.saturating_sub(before.hits),
         after.writes.saturating_sub(before.writes),
     );
+    Ok(())
+}
+
+/// Returns a fresh database path in a directory of its own, for one spread arm.
+///
+/// A directory removed whole rather than a file: a database is a file plus log
+/// segments named after it, and a segment left by an earlier run of the same
+/// arm beside a fresh file would be read as part of it. `scratch` above removes
+/// the file and three suffixes, which does not cover the segments.
+///
+/// @param tag - the arm, so two arms never share a file
+fn spread_scratch(tag: &str) -> PathBuf {
+    let directory = workspace_root()
+        .join("_agent_output/writeprofile")
+        .join(tag);
+    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::create_dir_all(&directory);
+    directory.join("spread.db")
+}
+
+/// Builds the table `story_large_table_nightly` deletes half of, at one page
+/// size and one pool.
+///
+/// The same columns, the same values and the same index created before the
+/// load, written five hundred rows a statement in one transaction. The pool is
+/// opened at its default frame count and narrowed with `PRAGMA cache_size`,
+/// which is how the story narrows it.
+///
+/// @param path - where the database goes
+/// @param rows - how many rows to write
+/// @param page_size - the page size the file is built at
+/// @param pool_bytes - how many bytes `PRAGMA cache_size` lets the pool keep
+/// @param indexed - whether `big_d ON big(d)` exists
+fn build_big(
+    path: &std::path::Path,
+    rows: i64,
+    page_size: usize,
+    pool_bytes: usize,
+    indexed: bool,
+) -> Result<Database, String> {
+    let database = Database::open_at(path, page_size, inillucent_engine::DEFAULT_FRAMES as usize)
+        .map_err(|error| error.message().to_string())?;
+    let connection = database.session();
+    let mut script = format!(
+        "PRAGMA cache_size = -{}; CREATE TABLE big(a INTEGER PRIMARY KEY, b TEXT, d INTEGER);",
+        pool_bytes / 1024
+    );
+    if indexed {
+        script.push_str("CREATE INDEX big_d ON big(d);");
+    }
+    script.push_str("BEGIN;");
+    connection
+        .execute_batch(&script)
+        .map_err(|error| error.message().to_string())?;
+    let mut at = 1i64;
+    while at <= rows {
+        let end = (at + 499).min(rows);
+        let values: Vec<String> = (at..=end)
+            .map(|key| {
+                let d = match key % 7 {
+                    0 => "NULL".to_string(),
+                    _ => format!("{}", key % 1013),
+                };
+                format!("({key}, 'row-{key}-padding-padding', {d})")
+            })
+            .collect();
+        connection
+            .execute_batch(&format!("INSERT INTO big VALUES {}", values.join(", ")))
+            .map_err(|error| error.message().to_string())?;
+        at = end + 1;
+    }
+    connection
+        .execute_batch("COMMIT")
+        .map_err(|error| error.message().to_string())?;
+    Ok(database)
+}
+
+/// Returns the plan the engine chose for a statement, one step per line joined.
+///
+/// @param connection - the database
+/// @param sql - the statement
+fn plan_of(connection: &inillucent_engine::connect::Connection<'_>, sql: &str) -> String {
+    let rows = connection
+        .query(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap_or_default();
+    rows.iter()
+        .filter_map(|row| match row.last() {
+            Some(OwnedDatum::Text(text)) => Some(String::from_utf8_lossy(text).to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+/// Times `DELETE FROM big WHERE a % 2 = 0`, the delete task-2077 is about, and
+/// prints the cost per deleted row beside what the pool and the tree did.
+///
+/// **Two pools, because they separate two costs.** A pool that holds the whole
+/// file takes page traffic out of the comparison, so any difference left
+/// between the page sizes is work done inside a leaf. A pool the file is past
+/// adds the traffic back. task-2077 found the first equal at both sizes (2.4
+/// and 2.1 microseconds a row, 5.5 and 5.6 with the index) and the second
+/// 176,503 reads at 32 KiB against 9,875 at 4 KiB, which is what named the
+/// cause: the delete visited the table in the order the covering index
+/// returned the keys.
+///
+/// @param rows - how many rows the table holds
+/// @param page_size - the page size
+/// @param pool_bytes - how many bytes the pool keeps
+/// @param indexed - whether the table carries `big_d`
+fn spread_delete(
+    rows: i64,
+    page_size: usize,
+    pool_bytes: usize,
+    indexed: bool,
+) -> Result<(), String> {
+    let tag = format!(
+        "spread-{page_size}-{rows}-{}-{}",
+        pool_bytes >> 20,
+        u8::from(indexed)
+    );
+    let path = spread_scratch(&tag);
+    let database = build_big(&path, rows, page_size, pool_bytes, indexed)?;
+    let connection = database.session();
+    let sql = "DELETE FROM big WHERE a % 2 = 0";
+    let plan = plan_of(&connection, sql);
+    let before = database.cache_stats();
+    let stats_before = database.write_stats();
+    let started = Instant::now();
+    // Prepared and stepped, which is how `story_large_table_nightly` and an
+    // application run it; `execute` reaches the delete by another path.
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| error.message().to_string())?;
+    while statement
+        .step()
+        .map_err(|error| error.message().to_string())?
+    {}
+    drop(statement);
+    let changed = connection
+        .changes()
+        .map_err(|error| error.message().to_string())?;
+    let elapsed = started.elapsed();
+    let after = database.cache_stats();
+    let stats = subtract_stats(database.write_stats(), stats_before);
+    let per_row = elapsed.as_secs_f64() * 1e6 / (changed.max(1) as f64);
+    println!(
+        "spread page {page_size:>6} rows {rows:>7} pool {:>4} MiB index {}  delete {:>8.1} ms  {per_row:>7.2} us/row  \
+         reads {:>7}  hits {:>9}  writes {:>7}  cooled {:>7}  evicted {:>7}  rewarms {:>7}  merges {:>4}  [{plan}]",
+        pool_bytes >> 20,
+        u8::from(indexed),
+        elapsed.as_secs_f64() * 1e3,
+        after.reads.saturating_sub(before.reads),
+        after.hits.saturating_sub(before.hits),
+        after.writes.saturating_sub(before.writes),
+        after.cooled.saturating_sub(before.cooled),
+        after.evicted.saturating_sub(before.evicted),
+        after.rewarms.saturating_sub(before.rewarms),
+        stats.merges,
+    );
+    Ok(())
+}
+
+/// Runs the spread delete at both page sizes, with and without the index, in a
+/// pool that holds the file and in one the file is past.
+///
+/// @param rows - how many rows each table holds
+/// @param past_mib - the pool the table is past, in mebibytes
+fn spread_sweep(rows: i64, past_mib: usize) -> Result<(), String> {
+    for pool_mib in [512usize, past_mib] {
+        for indexed in [false, true] {
+            for page_size in [4_096usize, 32_768] {
+                spread_delete(rows, page_size, pool_mib << 20, indexed)?;
+            }
+        }
+    }
     Ok(())
 }
 

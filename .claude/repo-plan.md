@@ -624,3 +624,19 @@ they are touching do not collide; two that have not, do.
   same sweep in process with the write counters. A run whose calibration drift is far from 1.0 is
   worth taking again after a warm up: the box settles for a minute after the other agents pause, and
   the calibration loop is only about 4 ms long, so its drift is noisy on its own. (task-2074)
+- **A write that is slow only past the pool is usually an order problem, and the pool's read count
+  says so.** `inillucent-writeprofile --spread <rows> <pool MiB>` builds the table of
+  `story_large_table_nightly` at both page sizes and prints `reads`, `writes`, `cooled`, `evicted`
+  and `rewarms` for `DELETE FROM big WHERE a % 2 = 0`, once with a pool that holds the file and once
+  past it. Equal cost in the first and a gap in the second means page traffic, not leaf work. The
+  32 KiB delete was 5.4 times the 4,096 byte cost per row because the keys came from the covering
+  index in `(d, a)` order; it read one page per deleted row. (task-2077)
+- **A leaf whose parent is pinned cannot be cooled, so a descent that loads leaf after leaf of one
+  root can fill the pool.** `take_frame` then hands out frames past `PRAGMA cache_size` while any are
+  free, and reports "every frame in the buffer pool is pinned" when none are. A pass that reads
+  every row of a table before changing any of it hits this; `vacuum_on_vfs` (64 frames) is the test
+  that catches it. (task-2077)
+- **A test binary launched directly has no `cargo` parent.** Running the prebuilt
+  `target/.../deps/story_large_table_nightly-*.exe` keeps a build out of a quiet window, but a check
+  that looks for cargo to see whether a measurement is running will miss it. List processes by name
+  and CPU, without truncating the list. (task-2077)

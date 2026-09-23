@@ -1425,6 +1425,13 @@ covers = ["inillucent-pool", "inillucent-tree", "inillucent-exec", "inillucent-e
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "delete_order"
+tier = "engine"
+covers = ["inillucent-pool", "inillucent-tree", "inillucent-exec", "inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "tlp_differential"
 tier = "engine"
 covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]

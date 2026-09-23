@@ -82,9 +82,28 @@
 //! the two lines are measured on the same box under the same load and can be
 //! read side by side. "scan" is the 25 TLP and NoREC cases, "after" is the ten
 //! cases and both sorts over what the delete left, and "reopen" includes
-//! `PRAGMA integrity_check`.
+//! `PRAGMA integrity_check`. "delete reads" is how many pages the pool read
+//! from the file during the delete, which the story also asserts on (see
+//! [`DELETE_READS_PER_PAGE`]).
 //!
-//! Measured on 2026-09-23 in a quiet window (task-2075): every other agent on
+//! **After task-2077**, measured on 2026-09-23 in a quiet window: both other
+//! agents in this repository paused, CPU at 5% at the start, the debug build
+//! the nightly tier runs, the prebuilt test binary run twice back to back and
+//! the second run kept. The two runs agreed to within 1% on every delete.
+//!
+//! | arm | page | rows | file | build | scan | sort | delete half | delete reads | after | reopen | total |
+//! |---|---|---|---|---|---|---|---|---|---|---|---|
+//! | `default` | 32,768 | 1,613,193 | 69.4 MiB | 239.8 s | 173.6 s | 8.7 s | 69.8 s | 2,641 | 38.6 s | 17.9 s | 548 s |
+//! | `sqlite-page` | 4,096 | 2,046,001 | 91.6 MiB | 154.2 s | 209.9 s | 12.1 s | 116.0 s | 37,407 | 51.6 s | 32.3 s | 576 s |
+//!
+//! The delete is now 86.5 microseconds a deleted row at 32,768 and 113.4 at
+//! 4,096, against 908 and 169 before. The 32 KiB delete went from 5.4 times
+//! the 4,096 byte cost per row to 0.76 times it. The cause was the order the
+//! delete visited the trees, not work inside a leaf: see `delete_unwatched` in
+//! `crates/inillucent-exec/src/dml/delete.rs` and
+//! `crates/inillucent-compat/tests/delete_order.rs`.
+//!
+//! **Before task-2077**, measured on 2026-09-23 in a quiet window (task-2075): every other agent on
 //! the box paused, CPU at 17% from browsers and terminals at the start, the
 //! debug build the nightly tier runs, one arm after the other:
 //!
@@ -96,7 +115,7 @@
 //! Per row, the build is 220 microseconds at 32,768 and 103 at 4,096, and the
 //! delete is 908 microseconds a deleted row at 32,768 and 169 at 4,096: **5.4
 //! times as expensive at the engine's own page size**, on a table with fewer
-//! rows. That is task-2077. The sorts cost about the same at both sizes, and
+//! rows. That was task-2077. The sorts cost about the same at both sizes, and
 //! the 4,096 byte arm pays in the reopen and the checks after the delete,
 //! which have about ten times as many pages to visit (23,450 against 2,221).
 //!
@@ -635,6 +654,39 @@ fn delete_half(connection: &Connection, rows: i64, arm: &Arm) -> Vec<i64> {
     live
 }
 
+/// How many pages the delete may read, per page of the file.
+///
+/// **The delete reads each leaf about once, or it reads about one page per
+/// row, and nothing in between** (task-2077). The keys come from `SCAN big
+/// USING COVERING INDEX big_d`, in `(d, a)` order, and at 32,768 bytes a leaf
+/// holds fewer rows than `d` takes to repeat, so looked up in that order every
+/// key is in a different leaf. Removing the rows in the table's order with
+/// each row's entry in `big_d` beside it visits the index out of order
+/// instead: this story read 285,098 pages of a 2,221 page file that way, and
+/// 2,641 once the rows went in the table's order and the index entries after
+/// them in the index's order (release build). The bound is wide on purpose:
+/// it is a count, so it catches that change of kind on any machine, and it
+/// does not notice anything smaller.
+const DELETE_READS_PER_PAGE: u64 = 4;
+
+/// The delete read each leaf about once rather than once per deleted row.
+///
+/// @param connection - the database, to ask its page count
+/// @param reads - how many pages the pool read during the delete
+/// @param arm - the arm, for the message
+fn the_delete_read_each_leaf_about_once(connection: &Connection, reads: u64, arm: &Arm) {
+    let pages = scalar(connection, "PRAGMA page_count")
+        .parse::<u64>()
+        .unwrap_or(0);
+    assert!(
+        pages > 0 && reads <= pages.saturating_mul(DELETE_READS_PER_PAGE),
+        "`{}`: deleting half the table read {reads} pages of a {pages} page file, more than \
+         {DELETE_READS_PER_PAGE} a page, so the delete is visiting the table or `big_d` in an \
+         order other than the one the tree holds (task-2077)",
+        arm.name
+    );
+}
+
 /// The file is sound and says what it held, after it is closed and reopened.
 ///
 /// @param path - the database file
@@ -674,6 +726,8 @@ struct Costs {
     sort: Duration,
     /// The delete of every even key and the checks on what it left.
     delete: Duration,
+    /// How many pages the pool read from the file during that delete.
+    delete_reads: u64,
     /// TLP, NoREC and both sorts over the half that is left.
     after: Duration,
     /// Closing, reopening and `PRAGMA integrity_check`.
@@ -689,7 +743,7 @@ struct Costs {
 fn print_costs(arm: &Arm, rows: i64, file_bytes: u64, costs: &Costs) {
     let seconds = |spent: Duration| format!("{:.1} s", spent.as_secs_f64());
     println!(
-        "cost | {} | {} | {rows} | {:.1} MiB | {} | {} | {} | {} | {} | {} |",
+        "cost | {} | {} | {rows} | {:.1} MiB | {} | {} | {} | {} | {} | {} | {} |",
         arm.name,
         arm.page_size,
         file_bytes as f64 / (1024.0 * 1024.0),
@@ -697,6 +751,7 @@ fn print_costs(arm: &Arm, rows: i64, file_bytes: u64, costs: &Costs) {
         seconds(costs.scan),
         seconds(costs.sort),
         seconds(costs.delete),
+        costs.delete_reads,
         seconds(costs.after),
         seconds(costs.reopen),
     );
@@ -725,8 +780,11 @@ fn the_story_at(arm: Arm) {
     the_sorts_hold(&connection, &everything, &arm);
     let sort = started.elapsed();
     let started = Instant::now();
+    let reads_before = database.cache_stats().reads;
     let live = delete_half(&connection, rows, &arm);
+    let delete_reads = database.cache_stats().reads.saturating_sub(reads_before);
     let delete = started.elapsed();
+    the_delete_read_each_leaf_about_once(&connection, delete_reads, &arm);
     let started = Instant::now();
     let left = i64::try_from(live.len()).unwrap_or(0);
     the_partitions_hold(&connection, left, rows, 0x2075, CASES_AFTER_DELETE, &arm);
@@ -744,6 +802,7 @@ fn the_story_at(arm: Arm) {
         scan,
         sort,
         delete,
+        delete_reads,
         after,
         reopen,
     };

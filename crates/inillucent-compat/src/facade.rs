@@ -136,6 +136,16 @@ impl Database {
         Database::import(staged)
     }
 
+    /// Returns what the page cache has been asked to do, across every
+    /// connection opened from this handle.
+    ///
+    /// For a story that grades how many pages a statement read, which is a
+    /// count and so means the same thing on a busy machine as on an idle one
+    /// (task-2077).
+    pub fn cache_stats(&self) -> inillucent_engine::connect::CacheStats {
+        self.engine.cache_stats()
+    }
+
     /// Imports a SQLite file, accepting a busy timeout there is nothing to wait
     /// for.
     ///
