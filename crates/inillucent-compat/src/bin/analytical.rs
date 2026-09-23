@@ -347,34 +347,36 @@ fn run(
         }
     }
 
-    if !members.is_empty() {
-        // The family figure is `perf::family_interval`, the statistic the
-        // scorecard and every other gate use, because a gate measured by a
-        // different statistic than the scorecard reports is a gate on a
-        // different number. The first version of this harness took the median
-        // and read 5.21x where the scorecard's statistic said 3.88x on the same
-        // samples. Until task-2093 this pooled every workload's every round into
-        // one list, and a resample of that list draws the workloads in random
-        // proportions, and with `scan.aggregate` at 53.82x and `scan.distinct`
-        // at 1.71x (the full gate, pinned, task-2086) the interval measured the
-        // gap between those two workloads.
-        let (family, low, high) = inillucent_compat::perf::family_interval(&members, SEED);
-        let samples: usize = members.iter().map(|entry| entry.log_ratios().len()).sum();
-        println!();
-        println!(
-            "  read.analytical: {family:.2}x  (95% interval {low:.2}x .. {high:.2}x over {samples} paired samples)"
-        );
-        println!("  Phase 1 gate: lower bound at least 5.00x at medium scale");
-        if low < 5.0 {
-            println!("  VERDICT: MISSED");
-            passed = false;
-        } else {
-            println!("  VERDICT: MET");
-        }
-    } else {
-        passed = false;
+    Ok(report_family(&members) && passed)
+}
+
+/// Prints the family figure and the Phase 1 verdict, and returns whether it was met.
+///
+/// @param members - the workloads that agreed with SQLite and produced a sample
+fn report_family(members: &[&Paired]) -> bool {
+    if members.is_empty() {
+        return false;
     }
-    Ok(passed)
+    // The family figure is `perf::family_interval`, the statistic the
+    // scorecard and every other gate use, because a gate measured by a
+    // different statistic than the scorecard reports is a gate on a
+    // different number. The first version of this harness took the median
+    // and read 5.21x where the scorecard's statistic said 3.88x on the same
+    // samples. Until task-2093 this pooled every workload's every round into
+    // one list, and a resample of that list draws the workloads in random
+    // proportions, and with `scan.aggregate` at 53.82x and `scan.distinct`
+    // at 1.71x (the full gate, pinned, task-2086) the interval measured the
+    // gap between those two workloads.
+    let (family, low, high) = inillucent_compat::perf::family_interval(members, SEED);
+    let samples: usize = members.iter().map(|entry| entry.log_ratios().len()).sum();
+    println!();
+    println!(
+        "  read.analytical: {family:.2}x  (95% interval {low:.2}x .. {high:.2}x over {samples} paired samples)"
+    );
+    println!("  Phase 1 gate: lower bound at least 5.00x at medium scale");
+    let met = low >= 5.0;
+    println!("  VERDICT: {}", if met { "MET" } else { "MISSED" });
+    met
 }
 
 /// What a digesting run accumulated, shared with the caller.
