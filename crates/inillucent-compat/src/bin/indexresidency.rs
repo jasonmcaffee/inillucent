@@ -18,7 +18,22 @@
 //! function `load` calls, in the same order, so what is measured is the same
 //! work rather than a re-implementation of it.
 //!
-//! Usage: `inillucent-indexresidency <index directory> [--resident-vectors]`
+//! Usage: `inillucent-indexresidency <index directory> [--resident-vectors] [--through-load]`
+//!
+//! ## `--through-load`, and why the part table cannot answer for it
+//!
+//! The part table reads the four files with the same public readers `load`
+//! calls, in the same order, which is what lets it say what each part cost. It
+//! reads the store with `Store::read_from` - the resident reader - because that
+//! is the function whose cost it is attributing. So it cannot see a decision
+//! `load` makes and the readers do not: since task-2066 §4.3.8, `load` leaves
+//! the chunk text in `store.bin` and reads a range per result, and the part
+//! table goes on reporting what holding it costs.
+//!
+//! `--through-load` answers the other question - what a process that opens this
+//! index actually holds - by calling `persist::load` and sampling once. It
+//! reports one number rather than four, because an open is one call and nothing
+//! inside it is separable by sampling.
 
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -48,11 +63,20 @@ const VECTOR_HEADER_BYTES: u64 = 8 + 4 + 1 + 8;
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let Some(directory) = arguments.next() else {
-        eprintln!("usage: inillucent-indexresidency <index directory> [--resident-vectors]");
+        eprintln!(
+            "usage: inillucent-indexresidency <index directory> [--resident-vectors] \
+             [--through-load]"
+        );
         return ExitCode::from(2);
     };
-    let resident_vectors = arguments.any(|flag| flag == "--resident-vectors");
-    match run(Path::new(&directory), resident_vectors) {
+    let flags: Vec<String> = arguments.collect();
+    let resident_vectors = flags.iter().any(|flag| flag == "--resident-vectors");
+    let through = flags.iter().any(|flag| flag == "--through-load");
+    let answered = match through {
+        true => through_load(Path::new(&directory), resident_vectors),
+        false => run(Path::new(&directory), resident_vectors),
+    };
+    match answered {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
             eprintln!("indexresidency: {failure}");
@@ -245,6 +269,94 @@ fn run(directory: &Path, resident_vectors: bool) -> Result<(), String> {
         lexical.n_terms()
     );
     drop(graph);
+    Ok(())
+}
+
+/// Opens the index the way a process does, and reports what it holds.
+///
+/// One number rather than four. `run` takes the index apart to say what each
+/// part costs; this takes the path an application takes, which is the number a
+/// person sizing a machine needs. The two disagree by whatever `load` decides
+/// that the readers do not - as of task-2066 §4.3.8, whether the chunk text is
+/// held or left in the file.
+///
+/// @param directory - the index directory
+/// @param resident_vectors - hold the vectors on the heap
+fn through_load(directory: &Path, resident_vectors: bool) -> Result<(), String> {
+    let generation = generation(directory)?;
+    println!("  index      : {}", directory.display());
+    println!("  generation : {}", generation.display());
+    println!(
+        "  vectors    : {}",
+        match resident_vectors {
+            true => "held on the heap",
+            false => "left in the file, which is the default",
+        }
+    );
+
+    let before = ProcessCost::now();
+    let index = inillucent_core::persist::load_with(directory, Some(resident_vectors))
+        .map_err(|failure| format!("opening the index: {failure}"))?;
+    let after = ProcessCost::now();
+
+    let on_disk: u64 = [
+        "store.bin",
+        "vectors.bin",
+        "graph.bin",
+        "lexical.bin",
+        "config.bin",
+    ]
+    .iter()
+    .map(|name| file_size(&generation, name))
+    .sum();
+
+    println!("\n## what an open holds");
+    println!(
+        "  {:<46} {:>12.1} {:>14.1} {:>14.1}",
+        "on disk / resident / peak (MiB)",
+        mebibytes(on_disk),
+        mebibytes(after.working_set.saturating_sub(before.working_set)),
+        mebibytes(after.peak_working_set)
+    );
+
+    // **Every chunk is read before the last sample**, because a filed arena
+    // costs nothing until something asks it for text and a number taken before
+    // anything did would say an index of any size is free. This is the same
+    // corpus a migration walks, so it is the upper bound rather than what a
+    // search pays.
+    let mut bytes = 0usize;
+    for chunk in 0..index.store().n_chunks() as u32 {
+        bytes = bytes.saturating_add(index.store().content(chunk).len());
+    }
+    let after_reading = ProcessCost::now();
+    println!(
+        "  {:<46} {:>12} {:>14.1} {:>14.1}",
+        "after reading every chunk's text once",
+        "-",
+        mebibytes(after_reading.working_set.saturating_sub(before.working_set)),
+        mebibytes(after_reading.peak_working_set)
+    );
+
+    // **And the same index with the text held, in the same process.** Two
+    // builds compared against each other would be comparing two compilations as
+    // well as two decisions; one process answering both ways leaves the arena as
+    // the only thing that differs.
+    let mut held = index;
+    held.make_text_resident();
+    let after_holding = ProcessCost::now();
+    println!(
+        "  {:<46} {:>12} {:>14.1} {:>14.1}",
+        "with the chunk text held instead",
+        "-",
+        mebibytes(after_holding.working_set.saturating_sub(before.working_set)),
+        mebibytes(after_holding.peak_working_set)
+    );
+
+    println!(
+        "\n  {} chunks, {} bytes of chunk text",
+        held.store().n_chunks(),
+        bytes
+    );
     Ok(())
 }
 

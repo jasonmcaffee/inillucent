@@ -148,17 +148,25 @@ written count against what the *runner* last reported, so a document that agreed
 with a stale run passed (task-1969, 4.14). The test count per tier is a property
 of a run rather than of the map and is not checked here.
 
+**The test counts below were taken from one full run rather than maintained by
+hand** (task-2066). Nothing reads them, so they had drifted: `differential` said
+334 where the run reported 349, `durability` 220 where it reported 234, and
+`unit` 1,430 where it reported 1,446. They are what a `--changed` selection of
+225 of the 228 targets reported, plus `numeric_text`'s three, which that
+selection predated. Read them as the size of a tier rather than as a number to
+check a run against.
+
 | tier | targets | tests | what it is for |
 |---|---:|---:|---|
 | `smoke` | 1 | 10 | the ten-second answer: a real file opened, written, reopened, read |
-| `unit` | 31 | 1,430 | every crate's own `#[cfg(test)]` modules |
-| `engine` | 67 | 439 | SQL and storage behaviour over real database files |
-| `differential` | 33 | 334 | graded against the pinned SQLite 3.53.4 |
-| `durability` | 33 | 220 | crashes, injected faults, corruption and concurrency |
-| `e2e` | 36 | 423 | the public surfaces an application binds to, end to end |
+| `unit` | 31 | 1,446 | every crate's own `#[cfg(test)]` modules |
+| `engine` | 67 | 445 | SQL and storage behaviour over real database files |
+| `differential` | 34 | 349 | graded against the pinned SQLite 3.53.4 |
+| `durability` | 33 | 234 | crashes, injected faults, corruption and concurrency |
+| `e2e` | 36 | 432 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 8 | the cost guards — **runs alone**, see §5 |
-| `retrieval` | 7 | 569 | the embedding and retrieval engine, and its graded harness |
-| `tooling` | 15 | 137 | the checks that keep the repository's own rules true |
+| `retrieval` | 7 | 570 | the embedding and retrieval engine, and its graded harness |
+| `tooling` | 15 | 145 | the checks that keep the repository's own rules true |
 | `nightly` | 3 | 6 | the long forms, run on a schedule rather than on a change |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than

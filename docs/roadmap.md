@@ -244,6 +244,74 @@ the doclist already is; the store the same way, a block per chunk; and the graph
 lists as fixed width pages. Each with its number on the performance page, and the acceptance
 unchanged - under 512 MiB resident, p50 within 1.5x and p99 within 2x, identical top k.
 
+### Landings 2 and 3, as far as no format change takes them (task-2066 §4.3.8)
+
+Both were done as *filings* rather than as blocks behind the buffer pool, which is less than the
+paragraph above asks for and needed no change to what is written on disk. An index written by any
+build opens under this one and the other way round.
+
+**The postings stopped paying per term.** They were a `HashMap<String, Vec<Posting>>` beside a second
+`Vec<String>` of the same terms in sorted order, so each of the 1,705,097 terms was charged for three
+times over: a string in the map and a string in the list, a `Vec` header and its own heap block
+however few postings the term had, and a hash map slot with its stored hash and its load factor. They
+are flat arrays now - one byte array for the terms, one array for the postings, a start per term, and
+a binary search instead of a hash - with an overflow map that takes appends and is folded back in
+once it holds an eighth of the postings.
+
+**The chunk text is read from the file**, the way `vectors.bin` already was. A search reading ten
+results reads ten ranges; a process that opens the index and searches nothing reads none. It needed
+no format change because the offset a load has to know is one the reader can count rather than one
+the file has to carry.
+
+Measured with `inillucent-indexresidency` on a **185,078 chunk, 494,293 term** index built for this
+from the public corpus cache - a third of the corpus above, so read these as a ratio rather than as a
+replacement for that table. Same index, same binary built twice, each figure taken twice and agreeing
+to 0.2 MiB:
+
+| part | on disk MiB | resident before | resident after |
+|---|---:|---:|---:|
+| `lexical.bin`, the BM25 postings | 211.1 | 306.2 | **209.4** |
+| `store.bin`, the chunks and their dictionaries | 171.7 | 189.4 | 189.4 |
+| `graph.bin`, the HNSW adjacency | 26.3 | 45.7 | 45.6 |
+| `vectors.bin` | 542.2 | 0.0 | 0.0 |
+| total | 951.4 | 541.3 | **444.3** |
+
+**The postings are 31.6% smaller resident and the whole index 17.9% smaller**, and the postings are
+now 0.99x their own file where they were 1.45x it. What was being paid for was per term rather than
+per posting, so the saving follows the term count: at the 1,705,097 terms of the corpus in the table
+above, the same ratio puts 890.3 MiB at about 610.
+
+**`store.bin` does not move in that table, and that is the table's limit rather than the change's.**
+`indexresidency` reads the four parts directly with the same public readers `load` calls, which is
+what lets it attribute a cost to each one - and it reads the store with `Store::read_from`, the
+resident reader, because that is the function whose cost it is reporting. The filing is a decision
+`persist::load` makes and the readers do not.
+
+`inillucent-indexresidency --through-load` answers the other question: what a process that opens this
+index holds. One number rather than four, because an open is one call. It samples three times in the
+same process, so the arena is the only thing that differs between the readings rather than two
+compilations being compared:
+
+| | resident MiB | peak MiB |
+|---|---:|---:|
+| after `persist::load` | **424.2** | 436.1 |
+| after reading every chunk's text once | 424.3 | 436.1 |
+| with the chunk text held instead | 580.2 | 584.2 |
+
+Run twice, agreeing to 0.2 MiB. **The text costs 156.0 MiB of a 580.2 MiB open, which is 26.9% of
+it**, and 163,556,613 bytes of chunk text is 156.0 MiB - so the difference is the arena and nothing
+else. Reading every chunk once adds 0.1 MiB, which is what says the filed arena streams rather than
+accumulates.
+
+The two filings together take an open of this index from 677.0 MiB to 424.2 MiB, **37.3%**.
+
+**The acceptance is not met and is not claimed.** Under 512 MiB resident at the default pool is the
+bar and this index is under it at 424.2 MiB, but the corpus in the table above is three times its
+size and nothing here has been run against that one. The graph, landing 3, is untouched. And p50,
+p99 and identical top k were not re-measured: the postings change is a change to how they are laid
+out in memory rather than to what they hold, and `inillucent-core`'s 282 cases say the same postings
+come back, but that is an argument and the acceptance asks for a measurement.
+
 ## 4. Threads
 
 Access from several **processes** works: the same SHARED, RESERVED, PENDING and EXCLUSIVE protocol
