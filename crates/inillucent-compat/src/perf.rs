@@ -641,6 +641,59 @@ pub fn weighted_headline(
     (centre, low.exp(), high.exp())
 }
 
+/// Returns a family's centre and 95% bootstrap interval, resampling rounds.
+///
+/// Each round contributes one value: the mean of that round's log ratios over
+/// the family's workloads. The bootstrap then resamples those per-round means.
+/// That is the statistic [`weighted_headline`] already uses for every family
+/// inside the headline, so a family is now graded by the same number it
+/// contributes to the headline.
+///
+/// **Why not one list of every workload's every round (task-2086).** That is
+/// what every gate did until task-2086, and it makes the interval measure how
+/// far apart the family's workloads are rather than how precisely they were
+/// measured. A resample of the pooled list draws the workloads in random
+/// proportions, and when the workloads differ that proportion moves the mean
+/// more than any timing noise does. `read.join` is the case that exposed it:
+/// on the nine pinned passes task-2082 took, `join.selective` read about 21x
+/// with its own interval 20.3x to 21.2x and `join.range` read 0.87x with its
+/// own interval 0.86x to 0.89x, and the pooled family interval printed beside
+/// them was 2.8x to 6.5x. The family's lower bound missed a 3.00x bar on every
+/// build because the two workloads are a factor of 24 apart. The family's
+/// composition is fixed by the plan, so the proportion of each workload is not
+/// a random quantity and the interval should not treat it as one.
+///
+/// A family whose workloads ran a different number of rounds is cut to the
+/// shortest, so every per-round mean has every workload in it. A pair with a
+/// zero or negative time is left out of its round's mean.
+/// @param members - the workloads in the family, each with its paired timings
+/// @param seed - the seed the resampling uses
+pub fn family_interval(members: &[&Paired], seed: u64) -> (f64, f64, f64) {
+    let depth = members
+        .iter()
+        .map(|paired| paired.pairs.len())
+        .min()
+        .unwrap_or(0);
+    let per_round: Vec<f64> = (0..depth)
+        .filter_map(|round| {
+            let logs: Vec<f64> = members
+                .iter()
+                .filter_map(|paired| {
+                    let (ours, theirs) = paired.pairs.get(round).copied()?;
+                    (ours > 0.0 && theirs > 0.0).then(|| (theirs / ours).ln())
+                })
+                .collect();
+            (!logs.is_empty()).then(|| logs.iter().sum::<f64>() / logs.len() as f64)
+        })
+        .collect();
+    if per_round.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let centre = per_round.iter().sum::<f64>() / per_round.len() as f64;
+    let (low, high) = bootstrap(&per_round, seed);
+    (centre.exp(), low.exp(), high.exp())
+}
+
 /// Returns one round's weighted mean log ratio.
 ///
 /// A family with several workloads contributes the mean of its workloads, so a
@@ -1651,6 +1704,61 @@ mod tests {
             .collect();
         let (wide_low, wide_high) = bootstrap(&loose, 7);
         assert!(wide_high - wide_low > high - low);
+    }
+
+    /// Builds a workload whose every round has the given speedup, nudged by a
+    /// small repeating amount so the rounds are not identical.
+    ///
+    /// @param name - the workload name
+    /// @param speedup - SQLite's time over this engine's, before the nudge
+    fn steady_workload(name: &str, speedup: f64) -> Paired {
+        Paired {
+            workload: name.to_string(),
+            family: "read.join".to_string(),
+            pairs: (0..30)
+                .map(|round| {
+                    let nudge = 1.0 + ((round % 5) as f64 - 2.0) * 0.005;
+                    (1.0, speedup * nudge)
+                })
+                .collect(),
+            agreed: true,
+            disagreement: String::new(),
+        }
+    }
+
+    /// Two workloads measured to within 1% give a family interval about as
+    /// narrow as theirs, however far apart the two are (task-2086).
+    ///
+    /// These are `read.join`'s pinned figures from task-2082. A single list of
+    /// all sixty rounds gave 2.8x to 6.5x for the same two workloads; this
+    /// asserts the interval stays within 3% of the centre, and the pooled
+    /// figure is computed beside it so the test fails if the two ever agree.
+    #[test]
+    fn a_family_interval_measures_noise_not_the_gap_between_workloads() {
+        let selective = steady_workload("join.selective", 21.0);
+        let range = steady_workload("join.range", 0.875);
+        let members = [&selective, &range];
+        let (centre, low, high) = family_interval(&members, 7);
+        let expected = (21.0_f64 * 0.875).sqrt();
+        assert!((centre / expected - 1.0).abs() < 0.01, "{centre} {expected}");
+        assert!(low > centre * 0.97 && high < centre * 1.03, "{low} {centre} {high}");
+        assert!(low > 3.0, "{low}");
+        let pooled: Vec<f64> = members.iter().flat_map(|paired| paired.log_ratios()).collect();
+        let (pooled_low, _) = bootstrap(&pooled, 7);
+        assert!(pooled_low.exp() < 3.0, "{}", pooled_low.exp());
+    }
+
+    /// A family whose workloads ran different numbers of rounds is cut to the
+    /// shortest, and a family with no rounds reports zeros.
+    #[test]
+    fn a_family_interval_uses_the_rounds_every_workload_has() {
+        let long = steady_workload("join.selective", 4.0);
+        let mut short = steady_workload("join.range", 1.0);
+        short.pairs.truncate(10);
+        let (centre, _, _) = family_interval(&[&long, &short], 7);
+        assert!((centre - 2.0).abs() < 0.02, "{centre}");
+        short.pairs.clear();
+        assert_eq!(family_interval(&[&long, &short], 7), (0.0, 0.0, 0.0));
     }
 
     /// The verdicts are the thresholds the TDD names.

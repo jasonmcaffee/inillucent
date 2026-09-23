@@ -599,6 +599,12 @@ fn bind_one(
 /// The geometric mean rather than the median, so the point estimate is the same
 /// statistic the interval brackets. A median beside a bootstrapped mean can sit
 /// outside its own interval, which reads like an arithmetic error and is one.
+///
+/// The interval is `perf::family_interval`: one value per round, the mean of
+/// that round's log ratios over the family's workloads, with the rounds
+/// resampled. Until task-2086 it bootstrapped one list of every workload's every
+/// round, and a resample of that list draws the workloads in random
+/// proportions, so the interval measured the gap between the workloads.
 /// @param measured - every workload of one scale
 /// @param family - the family to aggregate
 fn family_interval(measured: &[Paired], family: &str) -> Option<(f64, f64, f64, usize)> {
@@ -609,18 +615,17 @@ fn family_interval(measured: &[Paired], family: &str) -> Option<(f64, f64, f64, 
     if members.is_empty() {
         return None;
     }
-    let logs: Vec<f64> = members
+    let agreed: Vec<&Paired> = members
         .iter()
-        .filter(|paired| paired.agreed)
-        .flat_map(|paired| paired.log_ratios())
+        .copied()
+        .filter(|paired| paired.agreed && !paired.pairs.is_empty())
         .collect();
-    let mean = if logs.is_empty() {
-        0.0
-    } else {
-        logs.iter().sum::<f64>() / logs.len() as f64
-    };
-    let (low, high) = inillucent_compat::perf::bootstrap(&logs, SEED);
-    Some((mean.exp(), low.exp(), high.exp(), logs.len()))
+    let samples = agreed.iter().map(|paired| paired.log_ratios().len()).sum();
+    if agreed.is_empty() {
+        return Some((1.0, 1.0, 1.0, samples));
+    }
+    let (centre, low, high) = inillucent_compat::perf::family_interval(&agreed, SEED);
+    Some((centre, low, high, samples))
 }
 
 /// Renders the scorecard a person reads.

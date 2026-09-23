@@ -225,20 +225,20 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
         if !settings.families.iter().any(|name| name == family) {
             continue;
         }
-        // The family figure is the arithmetic mean of the paired log ratios,
-        // exponentiated - the geometric mean - pooled over every workload in
-        // the family. That is `family_interval` in `scorecard.rs`, character
-        // for character, and it is written that way here rather than more
-        // conveniently because a gate measured by a different statistic than
-        // the scorecard reports is a gate on a different number. Phase 1's
-        // first harness took the median and read 5.21x where the scorecard's
-        // statistic said 3.88x on the same samples.
-        let ratios: Vec<f64> = measured
+        // The family figure is `perf::family_interval`, the one the scorecard
+        // and the other gates use, because a gate measured by a different
+        // statistic than the scorecard reports is a gate on a different
+        // number. Phase 1's first harness took the median and read 5.21x where
+        // the scorecard's statistic said 3.88x on the same samples. Until
+        // task-2086 that statistic pooled every workload's every round into
+        // one list, which made the interval measure the gap between the
+        // workloads; it now resamples rounds, each round the mean of the
+        // family's workloads.
+        let members: Vec<&Paired> = measured
             .iter()
-            .filter(|entry| entry.family == family && entry.agreed)
-            .flat_map(|entry| entry.log_ratios())
+            .filter(|entry| entry.family == family && entry.agreed && !entry.pairs.is_empty())
             .collect();
-        if ratios.is_empty() {
+        if members.is_empty() {
             println!(
                 "  {family:<18} {:>9} {:>9} {:>9} {bar:>7.2}x  NO DATA",
                 "-", "-", "-"
@@ -246,9 +246,7 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
             met_every_family = false;
             continue;
         }
-        let point = (ratios.iter().sum::<f64>() / ratios.len() as f64).exp();
-        let (low, high) = inillucent_compat::perf::bootstrap(&ratios, SEED);
-        let (low, high) = (low.exp(), high.exp());
+        let (point, low, high) = inillucent_compat::perf::family_interval(&members, SEED);
         let met = low >= bar;
         println!(
             "  {family:<18} {point:>8.2}x {low:>8.2}x {high:>8.2}x {bar:>7.2}x  {}",
