@@ -16,12 +16,12 @@ in [the glossary](glossary.md), one sentence each. Every pragma is in [Pragmas](
 416 SQL scripts were run through `inillucent-shell` and through a pinned `sqlite3` 3.53.4, each over
 its own fresh database, and every byte of both output streams was compared.
 
-- **403 of 416 produce SQLite's exact bytes** - 96.9% of the total, and 98.3% of the 410 cases that
+- **404 of 416 produce SQLite's exact bytes** - 97.1% of the total, and 98.5% of the 410 cases that
   have a SQLite answer to compare against.
 - **0 are refused here that SQLite answers**, and 0 are accepted here that SQLite rejects. Window
   functions were the last twelve cases to close: all eleven window-only functions, every frame unit,
   every bound and every `EXCLUDE` clause now match the pinned SQLite exactly.
-- **7 answer differently, and 6 are vector search features SQLite has no equivalent for**, so there
+- **6 answer differently, and 6 are vector search features SQLite has no equivalent for**, so there
   is no SQLite output for them to match.
 
 208 of those cases are also a checked in test, `crates/inillucent-compat/tests/semantics.rs`, so a

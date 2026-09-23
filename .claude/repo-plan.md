@@ -697,3 +697,11 @@ they are touching do not collide; two that have not, do.
   and on Windows a mask set from outside is replaced unless the run passes `--cores any`. A new timing program calls
   `inillucent_compat::affinity::pin_from_arguments` at the top of `main` and starts its reference
   arm through `affinity::spawn_on_same_cores`. (task-2085)
+- **The correlated workloads get faster with more cores, so a pinned run reads them slower.** On
+  2026-09-23 `correlated.exists` took 59.69 ms on the eight performance cores, 46.35 ms on the sixteen
+  efficiency cores and 38.74 ms with all twenty four. Every other workload was fastest on the
+  performance cores. Compare the `read.correlated` rows only between runs that name the same mask.
+  (task-2064)
+- **`perfhistory` rows record `dirty` whenever the working tree has any edit**, documents included,
+  so a history row taken while a doc rewrite is open reads `<sha>-dirty` although the engine is
+  clean. Commit or stash the documents first if the row should name a clean commit. (task-2064)

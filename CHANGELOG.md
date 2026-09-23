@@ -193,13 +193,39 @@ half of the file SQLite has no equivalent of, and the half a format change is mo
 `tests/interop/retrieval.sql` asks it now, of an `approximate` table over twelve vectors compacted
 into a stored generation, and 0.1.1 through 0.1.7 answer every question identically to this build.
 
-**Known not to do.** Seven of the thirty measured workloads are still slower
-than SQLite: compiling `SELECT 1` on every call, building an FTS5 index, a
-2,000 row insert batch, a join over an index range, an autocommit `UPDATE` of
-one row, a range scan of the join's shape, and `json_extract`. The resident set
-is 10% more than SQLite's against a bar asking for 5% less, and the allocator is
-measured out of the difference: a trivial binary's floor is 3.62 MiB with it and
-3.62 MiB without.
+**Measured against SQLite 3.53.4 on 2026-09-23 (task-2064)**, four consecutive
+30-round runs at 100,000 rows in a quiet window, with both engines pinned to the
+performance cores:
+
+| | 2026-09-20 | 2026-09-23 |
+|---|---:|---:|
+| weighted over the ten families | 4.53x | **4.97x** |
+| 95% lower bound | 4.21x | **4.62x** |
+| the `write` family | 2.12x | **3.04x** |
+| 2,000 inserts in one transaction | 0.72x | **1.47x** |
+| processor time, ratio to SQLite's | 0.400 | **0.500** |
+| peak resident set | 40.76 MiB | **40.76 MiB** |
+
+**The benchmark was measuring the two engines on different cores.** The machine
+has 8 performance cores and 16 efficiency cores, and unpinned, Windows ran the
+gate process, which is this engine's arm, on the efficiency cores and the SQLite
+child on the performance cores. The same run unpinned reads 4.40x. The published
+figure pins both; `docs/performance.md` has the evidence, and since task-2085 the
+gates pin themselves.
+
+**The processor ratio got worse** because the plan gained four correlated
+subquery workloads, which this engine answers once per outer row and SQLite as a
+join: 182 ms of each round against under half a millisecond.
+
+**Known not to do.** Six of the thirty weighted workloads are still slower than
+SQLite: compiling `SELECT 1` on every call, a join over an index range, building
+an FTS5 index, a range scan of the join's shape, `json_extract`, and an
+autocommit `UPDATE` of one row. A correlated subquery is 9,395% to 118,020%
+slower than SQLite, depending on the shape. The resident set is 9.5% more than
+SQLite's against a bar asking for 5% less, and the allocator is measured out of
+the difference: a trivial binary's floor is 3.62 MiB with it and 3.62 MiB
+without. At 600,000 rows this engine spends 30% more processor than SQLite on the
+whole plan while finishing it 434% faster.
 
 **Eleven correctness fixes the audit before release found, and nine smaller
 differences from SQLite beside them.**

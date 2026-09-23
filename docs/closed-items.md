@@ -6,8 +6,8 @@ happened to it here.
 
 ## Memory
 
-**40.76 MiB against SQLite's 37.21, which is 9.5% more**, on the same 128 MiB budget, while running
-353% faster and spending 60% less processor. It came down three times, from 102% more, then 43%, then
+**40.76 MiB against SQLite's 37.22, which is 9.5% more**, on the same 128 MiB budget, while running
+397% faster and spending 50% less processor (2026-09-23). It came down three times, from 102% more, then 43%, then
 14%. The last step was task-2000's design 2: a bulk index build used to write each page into a buffer
 pool frame that then had to be written out and evicted, and it writes into the file directly now, so
 `schema.index` - which is what sets this plan's high water mark - raises it by 10.73 MiB rather than
@@ -21,6 +21,173 @@ reservation to size down - its free lists start empty and a full class hands its
 system allocator - so the question task-2000's design 10 asked, whether two to three of these mebibytes
 were the allocator's arena, is answered no. [Where the memory goes](performance.md#memory) attributes
 every megabyte. Closed by decision: this is where it stays.
+
+## `write.insert.batch` is faster than SQLite
+
+**It reads 1.47x on 2026-09-23, 7.0 µs a row against SQLite's 10.2**, where this was roadmap item 2
+under the title "`write.insert.batch` is about 67% slower than SQLite". task-2074 closed it: a leaf's
+delta area keeps a directory in key order and is sized by the page's free space rather than capped at
+32 rows, and a compaction whose rows fit the page's existing column widths splices them in. The `write`
+family went from 2.12x on 2026-09-20 to 3.04x. [Performance](performance.md#what-moved-since-2026-09-20)
+has the run. What follows is the item as it stood when it was open, kept for the measurements in it.
+**About 0.60x**: 2,000 inserts in one transaction. It was 72% slower, then 43%, and it sits inside a
+family that clears its bar, so it blocks nothing.
+
+**task-2074 took the cost of an index from about 5.2 µs a row to about 2.0, on the index count
+sweep.** The sweep is the measurement this item lacked: the gate's `main_table` has two secondary
+indexes, so a change aimed at index maintenance measured there is one point of a curve.
+`inillucent-writeprofile --sweep` inserts 5,000 rows in one transaction into a 100,000 row table
+carrying 0, 2, 5 and 10 indexes, and `inillucent-perfhistory --only insert.indexes` asks SQLite the
+same of a 20,000 row table. Two changes, measured separately in one quiet window, fastest of five
+interleaved rounds, microseconds a row:
+
+| indexes | before | the delta area sized by the free gap | and the compaction splice |
+|---:|---:|---:|---:|
+| 0 | 7.93 | 5.04 | 5.14 |
+| 2 | 18.28 | 10.47 | **9.12** |
+| 5 | 33.45 | 17.16 | **15.50** |
+| 10 | 73.06 | 39.97 | **37.20** |
+| cost per index at 2 | 5.17 | 2.71 | **1.99** |
+| compactions at 10 indexes | 1,624 | 423 | 423, 391 of them spliced |
+
+Against SQLite, net of process startup, the wall ratio at 2 indexes went from 0.08x to 0.19x and at
+10 indexes from 0.43x to **1.28x** - the first arm of this workload this engine wins. Rows `before`,
+`directory` and `directory-and-splice` in `tests/performance-history.tsv`.
+
+- **The delta area has a directory in key order and no count limit.** It compacted every 32 rows
+  whatever the leaf held, which the audit had priced as "the two indexes are 69% of this workload"
+  (task-2066, C1). With a directory a lookup is a binary search, so the area can take the whole free
+  gap: 1,624 compactions became 423. The audit predicted 18 to 20% of the workload; it was 43% at two
+  indexes, because the compaction count fell by 3.7x rather than the 8x the audit assumed and every
+  compaction became cheaper as well.
+- **A compaction splices its delta rows into the packed page when the rows fit its widths**, instead
+  of reading, pricing and writing every kept row again (task-2066, C2). It is 7% to 15% on top of the
+  first change at two indexes and more, and nothing without an index: a table's own tree appends at
+  its right edge and rarely compacts.
+
+Both are page format changes, so the file format is 2. This build reads format 1;
+`docs/relational-architecture.md` section 5a says how, and what the earlier releases answer for a
+format 2 file.
+
+**The 0.72x this item carried until now was measured by a gate that was not asking both arms the same
+question.** `inillucent-writegate` never ran a workload's own `pre`, and `sqlite_bench.c` runs one
+before it starts its clock - so on `txn.batched` and `txn.large`, which both carry
+`UPDATE side_table SET note = 'note ' || id`, SQLite did work this engine skipped. task-2029 fixed it
+in `aa140c7`, and every workload agrees again. Measured after that fix, four runs alternating between
+this build and a control, at a 32 KiB page: `write.insert.batch` reads **0.56x and 0.63x**, and the
+`write` family 1.67x and 1.80x against its 1.50x bar.
+
+**This item has now named the wrong cause twice, and the second time the measurement says which
+number was the misleading one.** The first text blamed `locate()`'s walk of each leaf's unsorted delta
+area; that was counted and came to under eight per cent. The second blamed the split record's log
+volume, which is real and is not what the workload waits for.
+
+`inillucent-writelogattrib` on the medium fixture at the gate's own geometry, a 32 KiB page, 2,000
+inserts into `main_table` with its two secondary indexes, and then the identical run with both indexes
+dropped:
+
+| | with both indexes | without either | the two indexes |
+|---|---:|---:|---:|
+| wall | 50.43 ms | 15.47 ms | **34.96 ms, 69%** |
+| applying the changes to pages | 46.37 ms | 11.77 ms | 34.60 ms |
+| log written | 1,563.9 KiB | 1,163.4 KiB | 400.5 KiB |
+| leaf compactions | 181 | 58 | 123 |
+| splits | 9 | 8 | 1 |
+
+| where the log goes | records | bytes | share |
+|---|---:|---:|---:|
+| `Structural` (a split) | 9 | 864.7 KiB | **55%** |
+| `InsertRow` | 6,000 | 687.5 KiB | 44% |
+| `CompactLeaf` | 181 | 11.3 KiB | 0.7% |
+| `AllocPage` and the commit | 10 | 0.4 KiB | 0.03% |
+
+A split costs **98,384 bytes** at this page size - three whole pages for one row that would not fit -
+so a logical split record would take 55% off the log's volume. **It would take about 2% off the
+workload's time**, because the log is written once and synced once at the commit and the bytes are not
+what the workload is waiting for. The time is the 34.96 ms of index maintenance: 8.7 µs for each of
+the four thousand index row insertions, against 2.4 µs for each of the two thousand table rows.
+
+**And the third measurement says which part of the index maintenance it is.** `WriteStats` gained
+`room_nanos`, the time inside `make_room` - compacting a leaf, or splitting one - because the rows
+above say how many there were and not what they took. It read 23.97 ms of a 44.17 ms transaction
+then, 54% of it.
+
+**Making room is now 10.57 ms of 29.60, and it has been split into the four passes it actually is**
+(task-2024). `LeafRef::live_source` is `live_order` and then `materialise` - deciding which rows
+survive, then reading every one of them - and `compact_image` reports its sizing pass and its encode
+apart. Medians of five runs, 32 KiB page, the same fixture:
+
+| | with both indexes | without either |
+|---|---:|---:|
+| wall | 29.60 ms | 14.30 ms |
+| **making room** | **10.57 ms** | 4.12 ms |
+| building the image | 7.77 | 1.59 |
+| - the merge, which rows are live | 1.98 | 0.50 |
+| - reading every one of them | 1.90 | 0.33 |
+| - the sizing pass | 1.16 | 0.12 |
+| - the encode | 2.22 | 0.35 |
+
+**Only one of those four does not grow with the page size, and it is the one a splice cannot
+remove.** At an 8 KiB page the merge is 1.89 ms against 1.98 here - it is per delta row, and a delta
+area holds at most thirty-two whatever the page holds - while reading the rows, sizing the page and
+encoding it all roughly double, because a 32 KiB leaf keeps four times as many rows. An attribution
+of this stage taken at 8 KiB therefore understates it by about half, and the gate runs at 32 KiB.
+
+**2.84 ms of it came off by asking the sizing pass a simpler question.** `pack_all_rows` wants one
+bit - do *all* the live rows fit one page - and `fit_widths` answered it by pricing the leaf a row at
+a time, resolving the whole candidate layout and recomputing the page size on every row, because its
+other caller stops at the first row that does not fit. `fit_all_widths` observes every column's shape
+in one pass, resolves once and compares once: 4.00 ms to 1.16, and the transaction 33.91 to 29.60.
+The two cannot disagree, because the price of a run of rows never falls as rows are added - so a leaf
+that fits whole had every prefix of it fit, and the layout the incremental loop ends on is `resolve`
+over the shapes of all the rows. `fit_all_widths_agrees_with_fit_widths` asserts the page bytes and
+not only the verdict.
+
+**What that is worth at the gate**, once task-2029 made the gate measure again. Four runs at a 32 KiB
+page, alternating between this build and a control with the sizing pass put back, so that drift in
+the box shows up in both:
+
+| | control | this build |
+|---|---|---|
+| `write.insert.batch`, this engine's arm | 38.34 ms, 36.95 ms | **33.14 ms, 32.93 ms** |
+| the same workload's ratio | 0.46x, 0.58x | **0.56x, 0.63x** |
+| the `write` family | 1.54x, 1.74x | **1.67x, 1.80x** |
+
+**Read this engine's own arm rather than the ratio.** The box was not quiet - another ticket held
+both GPUs and the local model server throughout - and it shows in the SQLite arm, which drifted from
+18.49 ms to 21.33 ms across the four runs while this engine's arm varied by 3.8% in the control and
+0.6% here. On its own arm the change is **12.2% faster**, 37.65 ms to 33.04 ms as medians, which is
+the same figure `inillucent-writelogattrib` reports for the same workload off the gate.
+
+**What is left for a splice is the encode, 2.22 ms of 29.60.** A compaction that spliced its delta
+rows into the column-major image rather than re-encoding every kept row still has to decide which
+rows survive, and still has to settle the slot widths: `compact_image` narrows a column when the
+widest value in it was tombstoned, and `CompactLeaf` carries an empty image and a `from_lsn` so that
+recovery re-derives those bytes rather than copying them. A splice that chose different widths would
+produce a correct page that is not the same page, and nothing would say so, because the checksum is
+computed over whatever was produced. Settling the widths means observing every value, and
+`live_source`'s own measurement says reading values straight through the mini-columns instead of
+materialising them once is *slower* - `txn.large` 4.1 ms to 5.7. So the splice's ceiling is 7% of the
+transaction, before its own memcpys, offset rewrites and class-array shifts cost anything, against a
+second row source on the hottest write path and its own crash campaign.
+
+**And two things outside making room are now larger than that ceiling.** Timed with temporary
+per-write timers, which cost about 27% of the wall themselves and so give shares rather than
+absolutes, the apply time of the same transaction divides as: making room 38%, **locating the key
+16%**, placing the row with its log and undo records 14%, **the room check 10%**, encoding the row
+3%, the descent 2%. The room check is `LeafMut::room_for`, which reads - and it is reached through
+`Pool::modify`, which takes the page mutably and marks the frame dirty, once per row written.
+
+What this item carries is the number rather than a guess: the delta walk was under eight per cent,
+the split record is 55% of the bytes and about 2% of the time, making room is 36% of the transaction,
+and inside it the encode a splice would replace is 7%.
+
+And the earlier delta walk measurement, kept because it is what closed the first guess: **8,329 calls,
+119,645 entries walked, 5.1 ms**, 14.4 entries a call, against 66.8 ms of apply time at an 8 KiB page.
+Under eight per cent, and that is the whole walk rather than what a fingerprint block would save - a
+probe that matches still decodes, and the block itself costs a hash per insert and 64 bytes a leaf.
+`crates/inillucent-compat/src/bin/writelogattrib.rs`'s own header already recorded that a previous fix
+to that decode "did not move the gate ratio"; this is the number behind that sentence.
 
 ## What task-2000 closed
 
@@ -97,7 +264,7 @@ order swapped every round:
 
 The 200 row range scan does not move, and the sequential arms' 11 to 14% was noise: 17 of 40 rounds
 went the other way. Its cost is per entry across 200 probes, which no per statement saving can
-reach; that is [roadmap item 1](roadmap.md#1-extension-misses-its-bar-on-the-lower-bound).
+reach; that is [roadmap item 1](roadmap.md#1-the-extension-and-join-families-either-side-of-their-bars).
 Building this surfaced four defects that were live in `build_statement` and invisible only because
 nothing reused a chain: `Statement::run` never re-ran `subquery::fold`, so a second execution of a
 statement whose source key reads a subquery refused; it formatted an `EXPLAIN` string and threw it
@@ -111,7 +278,7 @@ first two are fixed; the last two are excluded from reuse by the verdict.
 classed free list in place of the system allocator the two platforms run the same absolute speed,
 38.97 ms against 38.20, and it is SQLite's own arm that moves across platforms rather than this
 engine's. [Linux](performance.md#linux) has the measurement and the caveat: nothing since the
-allocator change has been measured on Linux, so the Linux figure is older than the 321% Windows
+allocator change has been measured on Linux, so the Linux figure is older than the 397% Windows
 headline. Re-measuring wants a Linux machine that is not also running the Windows arm; both inside
 one box would measure the contention and not the platform.
 
@@ -147,7 +314,7 @@ The remaining cost was the manifest re-read from disk on every query, which coul
 because a module had no hook that said "another connection may have committed since you last
 looked". That hook exists now: `VirtualTable::committed_elsewhere` and `schema_changed`
 (task-1932). Re-attempting the format with a cached manifest is what
-[roadmap item 1](roadmap.md#1-extension-misses-its-bar-on-the-lower-bound) names for
+[roadmap item 1](roadmap.md#1-the-extension-and-join-families-either-side-of-their-bars) names for
 the `extension` family.
 
 ## The old engine is deleted

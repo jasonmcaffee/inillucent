@@ -1,6 +1,6 @@
 # inillucent
 
-**An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 353% faster than
+**An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 397% faster than
 SQLite does, and it holds vector search and keyword search in the same file. A local AI agent can
 query a body of written material by meaning and by exact term without standing up PostgreSQL,
 pgvector and an embedding server.**
@@ -17,14 +17,15 @@ tables, a full text index and a vector index, and all three commit and roll back
 
 |  |  |  |
 |---|---|---|
-| **353% faster than SQLite 3.53.4** | the same ten workload families at 100,000 rows | [Performance](docs/performance.md) |
-| **60% less processor time** | 461 ms against SQLite's 1,168 for the same plan | [Performance](docs/performance.md) |
-| **403 of 416 SQL cases byte for byte, none refused** | every case run through both engines and compared byte by byte. Of the thirteen that differ, six are vector search features SQLite has no equivalent for | [SQL support](docs/sql.md) |
+| **397% faster than SQLite 3.53.4** | the same ten workload families at 100,000 rows, both engines on the same cores | [Performance](docs/performance.md) |
+| **50% less processor time** | 555 ms against SQLite's 1,082 for the same plan | [Performance](docs/performance.md) |
+| **404 of 416 SQL cases byte for byte, none refused** | every case run through both engines and compared byte by byte. Of the twelve that differ, six are vector search features SQLite has no equivalent for | [SQL support](docs/sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading identical vectors | [Retrieval quality](docs/retrieval-quality.md) |
-| **10% more memory than SQLite** | 40.9 MiB against 37.2. The one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
+| **9.5% more memory than SQLite** | 40.8 MiB against 37.2. The one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
 
-[Performance](docs/performance.md) carries every figure with its 95% interval, and names the seven
-workloads that are slower than SQLite along with what each one costs.
+[Performance](docs/performance.md) carries every figure with its 95% interval, and names the six
+weighted workloads that are slower than SQLite along with what each one costs, and the correlated
+subqueries, which are far slower.
 
 ---
 
@@ -351,19 +352,22 @@ each cost and how each was fixed:
   supported.
 - **The file format is this engine's own.** SQLite files are imported, not opened. A SQLite
   application moves its data across once with `inillucent migrate`.
-- **Seven of the thirty workloads are slower than SQLite**: compiling `SELECT 1` on every call (104%
-  slower), building an FTS5 index (45% slower), a 2,000 row insert batch (39% slower), a join over an
-  index range (15% slower), an autocommit `UPDATE` of one row (6% slower), the same shape as a plain
-  range scan (3% slower) and `json_extract` (1% slower).
+- **Six of the thirty weighted workloads are slower than SQLite**: compiling `SELECT 1` on every call
+  (75% slower), a join over an index range (18% slower), building an FTS5 index (5% slower), the
+  same shape as a plain range scan (4% slower), `json_extract` (3% slower) and an autocommit `UPDATE`
+  of one row (2% slower).
   [Performance](docs/performance.md#the-workloads-that-are-slower) says what each one costs and what
   is being done about it. The autocommit `UPDATE` joined that list by getting seven times faster - it
   was 669% slower - and 2,000 updates in one transaction used to lead it at 1,011% slower and are now
-  297% *faster*.
+  280% *faster*.
+- **A correlated subquery is run once per outer row**, where SQLite turns it into a join. Over 400
+  outer rows a correlated `EXISTS` takes 59.69 ms against SQLite's 0.29 ms (21,332% slower) and a
+  correlated `IN` 118.19 ms against 0.10 ms. Write it as a join on this engine.
 - **On Linux the same binary measured 53% faster** where Windows measured 279% at the time. That
   difference was traced to what SQLite pays the operating system on each platform rather than to
   anything this engine does differently there, and the finding is in
-  [Performance](docs/performance.md#linux). The Linux arm has not been re-measured since the Windows
-  headline reached 321%.
+  [Performance](docs/performance.md#linux). The Linux arm has not been re-measured since, and the Windows
+  headline has moved to 397%.
 - **Publishing a retrieval generation costs the whole corpus.** Adding content folds each new row
   into the published generation. Writing the generation still reads and writes the full index,
   however few rows changed, because a generation is one serialised structure. A build from scratch,

@@ -3,7 +3,7 @@
 > **These are the `release` gate's own output files, taken on the engine that came
 > before the rearchitecture, and they are kept as that run's record. They are not the current
 > numbers and they are not edited by hand.** The engine measured here was slower than SQLite on
-> every family; the shipping engine is **326% faster** weighted over the same ten families, with
+> every family; the shipping engine is **397% faster**, measured 2026-09-23, weighted over the same ten families, with
 > no family below the contract's 1.00x floor. The current run is
 > [docs/performance.md](../../docs/performance.md) and
 > [docs/feature-comparison.md](../../docs/feature-comparison.md).
