@@ -755,3 +755,10 @@ they are touching do not collide; two that have not, do.
   `sqlite3FpDecode`.** `real_to_text` and every `printf` real conversion go through it. Do not use
   Rust's `{:e}` or `{:.N}` to print a value SQLite would print. Those are correctly rounded, and
   SQLite's last digit sometimes is not. `numeric_text.rs` fails on any difference. (task-2080)
+- **A test that holds a file from a second process waits for that process to say so, never for a
+  fixed time.** `process_concurrency.rs` slept 1.5 s after writing `BEGIN; INSERT` to a shell and
+  then expected a second writer to be refused. Under the runner's full parallel load the shell had
+  not run the `INSERT` yet, the second writer took the file first, and the case reported the engine
+  admitting two writers. Send a `SELECT '<marker>'` after the statements and read the shell's output
+  until it appears: `held_after` in `process_concurrency.rs` and `Fed::until` in `busy_timeout.rs`
+  both do this. A `BEGIN` alone holds nothing, so the marker goes after the first write. (task-2090)

@@ -184,6 +184,94 @@ fn shell_script(shell: &Path, database: &Path, script: &str) -> Ran {
     }
 }
 
+/// How long a held writer may take to acknowledge its script before the case
+/// gives up on it.
+///
+/// **Generous, because it is only ever reached when something is wrong.** The
+/// wait ends the moment the marker arrives, so a slow box costs time and not a
+/// verdict. Two minutes covers a shell starting under the runner's full parallel
+/// load, which is where the fixed 1.5 s this replaced ran out (task-2090).
+const HOLDER_ACKNOWLEDGES_WITHIN: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Starts `inillucent-shell` on a file, sends it a script, and returns once the
+/// shell has printed a marker `SELECT` placed after the script, with the input
+/// still open so the shell keeps its connection and any open transaction.
+///
+/// **A marker rather than a sleep (task-2090).** Both cases that hold a file
+/// against another process used to write their script and sleep 1.5 s, and
+/// nothing checked that the shell had run it. Under the runner's full load a
+/// shell that had not yet started let the second writer in, and the case
+/// reported that as the engine admitting two writers. The shell prints the
+/// marker's row before it reads the next line, so the marker arriving means
+/// every statement before it has finished.
+///
+/// The read happens on a thread so the deadline can end it: a shell that
+/// stopped at a failing statement closes its output and the thread ends with
+/// no marker, and a shell that hangs is killed, which closes the pipe and ends
+/// the thread the same way.
+///
+/// @param shell - the built `inillucent-shell`
+/// @param database - the file to open
+/// @param script - the statements to run first, newline separated
+/// @param marker - the text the closing `SELECT` prints
+fn held_after(shell: &Path, database: &Path, script: &str, marker: &str) -> std::process::Child {
+    let mut child = Command::new(shell)
+        .arg(database.to_string_lossy().replace('\\', "/"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("the holder did not start: {error}"));
+    {
+        let pipe = child.stdin.as_mut().expect("the holder takes input");
+        let _ = pipe.write_all(format!("{script}SELECT '{marker}';\n").as_bytes());
+        let _ = pipe.flush();
+    }
+    let out = child.stdout.take().expect("the holder has an output");
+    let wanted = marker.to_string();
+    let (tell, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tell.send(read_until(out, &wanted));
+    });
+    match heard.recv_timeout(HOLDER_ACKNOWLEDGES_WITHIN) {
+        Ok(said) if said.contains(marker) => child,
+        outcome => {
+            let _ = child.kill();
+            let finished = child.wait_with_output();
+            let complained = finished
+                .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
+                .unwrap_or_default();
+            panic!(
+                "the holder did not acknowledge its script within {HOLDER_ACKNOWLEDGES_WITHIN:?}; \
+                 it printed {:?} and complained:\n{complained}",
+                outcome.unwrap_or_default()
+            )
+        }
+    }
+}
+
+/// Reads a child's output until a marker appears or the output closes, and
+/// returns what was read.
+///
+/// A byte at a time, because the child writes nothing after the marker until
+/// it is sent more input, so a buffered read would wait for bytes that never
+/// come.
+///
+/// @param out - the child's standard output
+/// @param marker - the text to stop at
+fn read_until(mut out: std::process::ChildStdout, marker: &str) -> String {
+    use std::io::Read;
+    let mut said = Vec::new();
+    let mut byte = [0u8; 1];
+    while !String::from_utf8_lossy(&said).contains(marker) {
+        match out.read(&mut byte) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => said.push(byte[0]),
+        }
+    }
+    String::from_utf8_lossy(&said).to_string()
+}
+
 /// Two writers, one process per statement, lose nothing, under both modes.
 #[test]
 fn two_writer_processes_lose_nothing_one_statement_each() {
@@ -610,22 +698,14 @@ fn a_readonly_process_reads_while_a_writer_holds_the_file() {
     assert_eq!(ran.code, 0, "seeding the file:\n{}", ran.said());
 
     // A writer that opens the file, writes, and then sits on its own standard
-    // input with the connection open. The parent reads while it is there.
-    let mut writer = Command::new(&shell)
-        .arg(database.to_string_lossy().replace('\\', "/"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("the writer did not start: {error}"));
-    {
-        let pipe = writer.stdin.as_mut().expect("the writer takes input");
-        let _ = pipe
-            .write_all(b"INSERT INTO note (who, n) VALUES ('a', 2);\nSELECT count(*) FROM note;\n");
-        let _ = pipe.flush();
-    }
-    // Long enough for the child to have opened the file and run its statement.
-    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    // input with the connection open. The parent reads once the writer has
+    // said its insert ran.
+    let mut writer = held_after(
+        &shell,
+        &database,
+        "INSERT INTO note (who, n) VALUES ('a', 2);\n",
+        "writer-has-written",
+    );
 
     let started = std::time::Instant::now();
     let read = run(
@@ -675,20 +755,15 @@ fn a_refusal_names_the_holder_and_the_operation() {
     let database = prepared(&binary, &directory);
 
     // A writer inside an open transaction, which is the one state that holds
-    // the file against another writer for longer than a statement.
-    let mut writer = Command::new(&shell)
-        .arg(database.to_string_lossy().replace('\\', "/"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("the writer did not start: {error}"));
-    {
-        let pipe = writer.stdin.as_mut().expect("the writer takes input");
-        let _ = pipe.write_all(b"BEGIN;\nINSERT INTO note (who, n) VALUES ('a', 1);\n");
-        let _ = pipe.flush();
-    }
-    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    // the file against another writer for longer than a statement. The second
+    // writer starts only once the first has said its insert ran, so a second
+    // writer let in below is let in past a transaction that holds the file.
+    let mut writer = held_after(
+        &shell,
+        &database,
+        "BEGIN;\nINSERT INTO note (who, n) VALUES ('a', 1);\n",
+        "transaction-is-open",
+    );
 
     let refused = run(
         &binary,
