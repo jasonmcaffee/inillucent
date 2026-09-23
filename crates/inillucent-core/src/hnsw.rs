@@ -545,9 +545,22 @@ impl Hnsw {
         // `UnexpectedEof`.
         let node_top = crate::binio::read_pod_vec::<u8>(r, n_nodes)?;
 
-        // The same argument for the two counts below, which is why neither
-        // reserves either. A `Vec` that grows as rows arrive is bounded by the
-        // rows that actually arrive.
+        // The same argument for the three counts below, and the neighbour list
+        // is the one that was still reserving (task-2066 section 4.4.7). The
+        // comment here used to say "the two counts below, which is why neither
+        // reserves either" while the line building a neighbour list called
+        // `Vec::with_capacity(degree)` on a raw `u32` read out of the file -
+        // 17 GB for `0xFFFFFFFF`, which is `handle_alloc_error` and an abort
+        // rather than a refusal, reachable from an ordinary `SELECT` over an
+        // `inillucent_search` table. It is the same defect section 4.1.12
+        // fixed for `n_nodes`, one field along, and the comment was already
+        // claiming it was fixed.
+        //
+        // Found by the `segment_header` fuzz target on its first run, in a
+        // twenty-one byte input. `read_pod_vec` is the bounded reader this
+        // comment names: the buffer never grows past what has arrived plus one
+        // step, so a length the source cannot satisfy costs one megabyte and
+        // then fails with `UnexpectedEof`.
         let mut layers = Vec::new();
         for _ in 0..n_layers {
             r.read_exact(&mut buf4)?;
@@ -556,12 +569,7 @@ impl Hnsw {
             for _ in 0..count {
                 r.read_exact(&mut buf4)?;
                 let degree = u32::from_le_bytes(buf4) as usize;
-                let mut neighbours = Vec::with_capacity(degree);
-                for _ in 0..degree {
-                    r.read_exact(&mut buf4)?;
-                    neighbours.push(u32::from_le_bytes(buf4));
-                }
-                layer.push(neighbours);
+                layer.push(crate::binio::read_pod_vec::<u32>(r, degree)?);
             }
             layers.push(layer);
         }
@@ -1686,6 +1694,64 @@ fn search_layer_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A neighbour count no file can satisfy is refused, not allocated.**
+    ///
+    /// The stable counterpart of the `segment_header` fuzz target, and the
+    /// input is the one it found: twenty-one bytes, with `degree` at
+    /// `0xFFFFFFFF`. `Vec::with_capacity(degree)` asked for 14,361,296,892
+    /// bytes and libfuzzer stopped the process; `handle_alloc_error` would have
+    /// done the same to a caller running an ordinary `SELECT` over an
+    /// `inillucent_search` table (task-2066 sections 4.1.12 and 4.4.7).
+    ///
+    /// The bytes are written out rather than described, because the case is the
+    /// input: a header that is plausible up to the field that is not.
+    #[test]
+    fn a_neighbour_count_no_file_can_satisfy_is_refused() {
+        let mut blob: Vec<u8> = Vec::new();
+        blob.extend_from_slice(&1u32.to_le_bytes()); // one layer
+        blob.extend_from_slice(&0u32.to_le_bytes()); // no nodes
+        blob.extend_from_slice(&u32::MAX.to_le_bytes()); // no entry point
+        blob.extend_from_slice(&1u32.to_le_bytes()); // one node in the layer
+        blob.extend_from_slice(&u32::MAX.to_le_bytes()); // and it claims 2^32-1 neighbours
+
+        let mut reader = blob.as_slice();
+        // `Hnsw` is not `Debug`, so the refusal is taken out by hand rather
+        // than with `expect_err`.
+        let refused = match Hnsw::read_graph(&mut reader, HnswParams::default()) {
+            Err(refused) => refused,
+            Ok(_) => panic!("a neighbour count of 2^32-1 must be refused"),
+        };
+        assert_eq!(
+            refused.kind(),
+            std::io::ErrorKind::UnexpectedEof,
+            "the refusal was not about the file running out: {refused}"
+        );
+
+        // The control: the same header with a count the bytes can satisfy
+        // reads back, so the arm above is about the count rather than about a
+        // reader that refuses every graph.
+        let mut good: Vec<u8> = Vec::new();
+        good.extend_from_slice(&1u32.to_le_bytes());
+        good.extend_from_slice(&0u32.to_le_bytes());
+        good.extend_from_slice(&u32::MAX.to_le_bytes());
+        good.extend_from_slice(&1u32.to_le_bytes());
+        good.extend_from_slice(&2u32.to_le_bytes());
+        good.extend_from_slice(&7u32.to_le_bytes());
+        good.extend_from_slice(&9u32.to_le_bytes());
+        let mut reader = good.as_slice();
+        let graph = Hnsw::read_graph(&mut reader, HnswParams::default())
+            .expect("a graph whose counts the bytes satisfy reads back");
+        assert_eq!(
+            graph
+                .layers
+                .first()
+                .and_then(|layer| layer.first())
+                .cloned(),
+            Some(vec![7u32, 9]),
+            "the control graph did not read back its neighbours"
+        );
+    }
     use crate::filter::Filter;
     use crate::store::ChunkInput;
 

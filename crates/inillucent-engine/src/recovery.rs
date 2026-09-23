@@ -708,6 +708,7 @@ pub(crate) fn open_file_as(
         let said = error.detail().unwrap_or_default().to_string();
         error.with_detail(format!("opening the file before redo: {said}"))
     })?;
+    database.refuse_a_page_count_that_cannot_be_addressed()?;
 
     // **Recovery.** The log is replayed into the file before anything is read
     // out of it, which is what makes this an open rather than a reader of

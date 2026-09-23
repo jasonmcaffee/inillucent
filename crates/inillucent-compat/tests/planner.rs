@@ -730,3 +730,186 @@ fn an_anchored_pattern_on_an_indexed_column_seeks() {
         "a pattern with a leading wildcard selects no range: {unanchored}"
     );
 }
+
+/// **`NOT INDEXED` takes every index away and leaves the rowid.**
+///
+/// The clause was parsed, the name it did not carry was validated, and then
+/// nothing passed it to the planner: `BoundSource` did not hold it, so
+/// `choose_path` chose as though it had not been written (task-2066 section
+/// 4.4.14). Measured against the pinned 3.53.4 shell on this fixture:
+/// `SELECT count(*) FROM h NOT INDEXED WHERE a = 3 AND b = 100` planned as
+/// `SCAN h` there and as `SEARCH h USING INDEX h_b (b=?)` here.
+///
+/// **What made it more than a plan difference.**
+/// `crates/inillucent-cli/src/diagnose.rs` reads every table
+/// `SELECT * FROM "t" NOT INDEXED` to build its integrity digest, and says in
+/// its own comment that the clause is what makes the digest a fact about the
+/// rows. While the hint was dropped, a table whose index disagreed with it
+/// could be digested through the index - so the check that exists to find that
+/// disagreement was reading the wrong copy.
+///
+/// Both halves are asserted, because the fix is a subtraction and a subtraction
+/// that goes too far is silent: SQLite leaves the INTEGER PRIMARY KEY usable
+/// under `NOT INDEXED`, and a version of this that removed the rowid path too
+/// would turn every keyed lookup in a digest into a full scan.
+#[test]
+fn not_indexed_removes_the_indexes_and_keeps_the_rowid() {
+    let path = scratch("not-indexed");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.session().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE h (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER)",
+            "CREATE INDEX h_a ON h (a)",
+            "CREATE INDEX h_b ON h (b)",
+        ],
+    );
+    run_all(&connection, &["BEGIN"]);
+    for row in 1..=600 {
+        let sql = format!("INSERT INTO h VALUES ({row}, {}, {row})", row % 7);
+        run_all(&connection, &[sql.as_str()]);
+    }
+    run_all(&connection, &["COMMIT", "ANALYZE"]);
+
+    // Without the clause, an index is chosen. This is the control: if the
+    // planner would have scanned anyway, the arm below proves nothing.
+    let chosen = plan(
+        &connection,
+        "SELECT count(*) FROM h WHERE a = 3 AND b = 100",
+    );
+    assert!(
+        chosen.iter().any(|line| line.contains("USING INDEX")),
+        "the control query did not use an index, so this fixture cannot show that \
+         `NOT INDEXED` takes one away:\n{chosen:?}"
+    );
+
+    // With it, no index at all.
+    let refused = plan(
+        &connection,
+        "SELECT count(*) FROM h NOT INDEXED WHERE a = 3 AND b = 100",
+    );
+    assert!(
+        refused.iter().all(|line| !line.contains("USING INDEX")),
+        "`NOT INDEXED` was written and an index was used anyway:\n{refused:?}"
+    );
+    assert!(
+        refused.iter().any(|line| line.contains("SCAN h")),
+        "`NOT INDEXED` did not fall back to a scan:\n{refused:?}"
+    );
+
+    // And the INTEGER PRIMARY KEY is still a seek, which is SQLite's rule.
+    let keyed = plan(&connection, "SELECT * FROM h NOT INDEXED WHERE id = 5");
+    assert!(
+        keyed
+            .iter()
+            .any(|line| line.contains("INTEGER PRIMARY KEY")),
+        "`NOT INDEXED` took the rowid away as well, which SQLite does not:\n{keyed:?}"
+    );
+
+    // The rows are the same either way, which is the thing a plan change must
+    // never move.
+    let with_hint = run(
+        &connection,
+        "SELECT count(*) FROM h NOT INDEXED WHERE a = 3 AND b = 100",
+    )
+    .expect("the hinted query runs");
+    let without = run(
+        &connection,
+        "SELECT count(*) FROM h WHERE a = 3 AND b = 100",
+    )
+    .expect("the plain query runs");
+    assert_eq!(
+        with_hint, without,
+        "`NOT INDEXED` changed the answer rather than the route to it"
+    );
+}
+
+/// **`INDEXED BY` is checked for a name that exists and is then ignored.**
+///
+/// A known difference, recorded as §1.3 of the testing standard requires: a
+/// difference a document knows about and no test asserts can be closed, or
+/// widened, with nothing going red.
+///
+/// Measured against the pinned 3.53.4 shell on the same fixture as the case
+/// above:
+///
+/// | statement | sqlite | inillucent |
+/// |---|---|---|
+/// | `... FROM h WHERE a = 3 AND b = 100` | `SEARCH h USING INDEX h_b (b=?)` | the same |
+/// | `... FROM h INDEXED BY h_a WHERE a = 3 AND b = 100` | `SEARCH h USING INDEX h_a (a=?)` | `SEARCH h USING INDEX h_b (b=?)` |
+///
+/// **Why it is recorded rather than fixed here.** Forcing an index means
+/// refusing the statement when the named one cannot answer it - SQLite answers
+/// `no query solution` - and `choose_path` returns an `AccessPath` rather than
+/// a `Result`, so the refusal has nowhere to go without changing the signature
+/// of the path chooser and everything that calls it. `NOT INDEXED` needed
+/// neither, because taking a candidate away always leaves the scan.
+///
+/// The answer is the same either way, so this is a performance difference and
+/// not a wrong result. **When it is fixed, this test fails**, and the row in
+/// `docs/feature-comparison.md` moves with it.
+#[test]
+fn indexed_by_names_an_index_and_does_not_yet_force_it() {
+    let path = scratch("indexed-by");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.session().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE h (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER)",
+            "CREATE INDEX h_a ON h (a)",
+            "CREATE INDEX h_b ON h (b)",
+        ],
+    );
+    run_all(&connection, &["BEGIN"]);
+    for row in 1..=600 {
+        let sql = format!("INSERT INTO h VALUES ({row}, {}, {row})", row % 7);
+        run_all(&connection, &[sql.as_str()]);
+    }
+    run_all(&connection, &["COMMIT", "ANALYZE"]);
+
+    // The name is checked, which is the half that works and is worth keeping:
+    // a misspelled hint is a plan that quietly does something else.
+    let misspelled = run(
+        &connection,
+        "SELECT count(*) FROM h INDEXED BY h_nowhere WHERE a = 3",
+    )
+    .expect_err("an index that does not exist is refused");
+    assert!(
+        misspelled.contains("h_nowhere"),
+        "the refusal did not name the index that does not exist: {misspelled}"
+    );
+
+    let unhinted = plan(
+        &connection,
+        "SELECT count(*) FROM h WHERE a = 3 AND b = 100",
+    );
+    let hinted = plan(
+        &connection,
+        "SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND b = 100",
+    );
+    assert_eq!(
+        hinted, unhinted,
+        "`INDEXED BY h_a` changed the plan, so the hint now reaches the planner - \
+         which is the fix this case is waiting for. Assert the forced index instead, \
+         and move the `INDEXED BY` row in docs/feature-comparison.md."
+    );
+
+    // And the rows are right whichever index is walked, which is why this is a
+    // performance difference rather than a wrong answer.
+    // `b` is the row number and `a` is that number modulo seven, so `b = 101`
+    // is the one row whose `a` is 3. The plan queries above use `b = 100`
+    // because that is the pair the measurement in this comment was taken with,
+    // and a plan does not depend on whether a row matches.
+    let answered = run(
+        &connection,
+        "SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND b = 101",
+    )
+    .expect("the hinted query runs");
+    assert_eq!(
+        answered,
+        vec!["int:1".to_string()],
+        "the hinted query answered something other than the one matching row"
+    );
+}

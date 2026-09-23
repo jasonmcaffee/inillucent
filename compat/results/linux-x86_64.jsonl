@@ -678,7 +678,8 @@
 {"test_id": "inillucent-compat::every_output_mode_matches", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::every_page_is_reachable_from_the_index", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::every_page_size_and_encoding_reads_the_same_rows", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
-{"test_id": "inillucent-compat::every_probed_construct_answers_as_the_table_says", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "inillucent-compat::the_cases_about_reading_rows_answer_as_the_table_says", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "inillucent-compat::the_cases_about_the_built_in_functions_answer_as_the_table_says", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::every_published_production_has_evidence", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::every_record_re_encodes_to_the_bytes_sqlite_wrote", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::every_result_field_the_skills_show_is_one_the_shell_writes", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

@@ -563,7 +563,22 @@ SQLite's own rule. The last clause may omit its target and is then the catch-all
 | A rowid reference in a WITHOUT ROWID table | yes | **yes** |
 | A WITHOUT ROWID table with no primary key | yes | **yes** |
 
-### CREATE INDEX - 12 of 12
+### CREATE INDEX - 11 of 12, and one half
+
+`INDEXED BY` is the half. The clause parses, and a name that is not an index on
+the table is refused - which is the part that matters most, because a misspelled
+hint that is silently ignored is a plan doing something other than what was
+asked. What it does not yet do is force the named index: the planner still picks
+the one it costs cheapest. `NOT INDEXED` does take every index away, as of
+task-2066.
+
+Measured on a 600 row table with an index on each of two columns, against the
+pinned 3.53.4 shell. `SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND
+b = 100` plans as `SEARCH h USING INDEX h_a (a=?)` there and as `SEARCH h USING
+INDEX h_b (b=?)` here. The rows are the same; the route to them is not.
+`inillucent-compat::planner::indexed_by_names_an_index_and_does_not_yet_force_it`
+asserts this and fails when it is fixed.
+
 
 | feature | SQLite 3.53.4 | inillucent |
 |---|---|---|
@@ -577,7 +592,8 @@ SQLite's own rule. The last clause may omit its target and is then the catch-all
 | Composite index | yes | **yes** |
 | DROP INDEX | yes | **yes** |
 | REINDEX | yes | **yes** |
-| INDEXED BY and NOT INDEXED | yes | **yes** |
+| NOT INDEXED | yes | **yes** |
+| INDEXED BY | yes | **the name is checked, the index is not forced** |
 | ANALYZE writes sqlite_stat1 | yes | **yes** |
 
 ### Views and triggers - 15 of 15
@@ -679,7 +695,7 @@ SQLite's own rule. The last clause may omit its target and is then the catch-all
 | Operator precedence | yes | **yes** |
 | String comparison and BINARY collation | yes | **yes** |
 
-### Collations - 5 of 5
+### Collations - 5 of 5, and one measured difference
 
 | feature | SQLite 3.53.4 | inillucent |
 |---|---|---|
@@ -688,6 +704,25 @@ SQLite's own rule. The last clause may omit its target and is then the catch-all
 | COLLATE in ORDER BY | yes | **yes** |
 | A unique index under NOCASE | yes | **yes** |
 | PRAGMA collation_list | yes | **yes** |
+| NOCASE over text holding a NUL | stops at the NUL | **compares past it** |
+
+**The NUL row, measured.** SQLite's `NOCASE` is `sqlite3StrNICmp`, a C string
+walk whose loop condition includes `*a != 0`: it stops at the first NUL in the
+left operand, compares the two bytes at that position, and a tie there falls
+through to the byte lengths. So `x'0061'` sorts before `x'000079'` there and
+after it here, where the comparison reads every byte.
+
+It is recorded rather than matched because `Collation::NoCase` is declared order
+preserving in keys, which is what lets an index on `s COLLATE NOCASE` answer an
+`ORDER BY` by walking rather than by sorting: the key encoder lowercases the
+bytes and their natural order is the collation's order. SQLite's rule is not
+reachable that way - under it `x'0061'` sorts before `x'000079'` while their
+lowercased bytes sort the other way - so matching it means either dropping that
+optimisation for every `NOCASE` index or keeping two orders that disagree with
+each other. The difference is reachable only through `CAST(x'..' AS TEXT)` or a
+bound parameter holding a NUL, because no SQL string literal can carry one.
+`inillucent-compat::ordering::nocase_stops_at_an_embedded_nul_in_sqlite_and_not_here`
+asserts both sides and fails if either moves.
 
 `PRAGMA collation_list` reports five: `decimal`, `BINARY`, `NOCASE`, `RTRIM` and `uint`. `decimal`
 compares two numeric strings by value rather than by bytes, and `uint` compares a string of digits by

@@ -310,6 +310,41 @@ impl crate::ImportedDatabase {
         Ok(())
     }
 
+    /// Refuses an `ADD COLUMN` that would take a table past `Limit::Column`.
+    ///
+    /// **The one place a column list grows where the parser cannot count it**
+    /// (task-2066 section 4.2, item 21). `parser::ddl::parse_create_table`
+    /// charges what a `CREATE TABLE` declares, which is the whole list; an
+    /// `ADD COLUMN` declares one column and the answer depends on the table it
+    /// is added to. Without this a table is walked past the limit one
+    /// statement at a time, and the failure when it finally comes is
+    /// "the mini-columns do not fit in one page", which is the right refusal
+    /// for a reason a caller cannot act on.
+    ///
+    /// @param at - which attached database the table is in
+    /// @param folded - the table's folded name
+    fn refuse_a_column_past_the_limit(&self, at: usize, folded: &[u8]) -> DbResult<()> {
+        let held = self
+            .schema
+            .tables
+            .iter()
+            .find(|table| table.database == at && table.folded == folded)
+            .map(|table| table.columns.len())
+            .unwrap_or(0);
+        let limit = self
+            .pragmas
+            .limits()
+            .borrow()
+            .get(inillucent_base::limits::Limit::Column);
+        match held as i64 >= limit {
+            true => Err(refusal(format!(
+                "too many columns on {}",
+                String::from_utf8_lossy(folded)
+            ))),
+            false => Ok(()),
+        }
+    }
+
     /// Runs an `ALTER TABLE`.
     ///
     /// Every rewrite is a rewrite of *stored text*, and the catalog is then
@@ -339,6 +374,7 @@ impl crate::ImportedDatabase {
             )));
         }
         if let AlterKind::AddColumn { risk, .. } = action {
+            self.refuse_a_column_past_the_limit(at, &folded)?;
             if let Some(message) = risk.refusal() {
                 if self.table_has_a_row(at, &folded)? {
                     return Err(refusal(message));

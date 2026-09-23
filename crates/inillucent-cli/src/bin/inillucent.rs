@@ -410,7 +410,7 @@ fn dispatch(command: &'static Command, invocation: &Invocation) -> ExitCode {
         database,
         OpenMode::of(invocation.readonly),
         invocation.root.clone(),
-        command.writes,
+        command.writes.may_create(),
     ) {
         Ok(context) => context,
         Err(failure) => return report(&failure, invocation.json, command.name),

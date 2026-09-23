@@ -31,3 +31,13 @@
 # skip past seven files that did not change stops reading the one that did, and
 # a dirty tree is refused by both `packaging/ship.ps1` and `cargo publish`.
 /tests/crash/** text eol=lf
+
+# The fuzzing corpus is bytes (task-2066, "Done means"). `fuzz/corpus/<target>/`
+# holds the inputs libfuzzer kept because they reached new coverage, and each
+# one is whatever byte string reached it - SQL text, a page image, a segment
+# header, a run of bytes that is none of those. Left as text, `core.autocrlf`
+# on the Windows machine releases are cut on rewrites every `0x0a` in them to
+# `0x0d 0x0a` on checkout, and the corpus stops being the input that found the
+# coverage. It would not fail visibly: the fuzzer would run happily on the
+# rewritten bytes and reach less than it did.
+fuzz/corpus/** -text

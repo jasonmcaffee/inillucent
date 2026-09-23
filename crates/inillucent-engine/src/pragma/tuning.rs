@@ -309,18 +309,20 @@ impl crate::ImportedDatabase {
     /// other meta field.
     ///
     /// @param argument - the value it was given, when it was given one
+    /// @param at - the attached database the pragma was qualified with
     pub(crate) fn pragma_user_version(
         &mut self,
         argument: Option<&PragmaArgument>,
+        at: Option<usize>,
     ) -> DbResult<Outcome> {
         let Some(argument) = argument else {
             return Ok(named_integer(
                 "user_version",
-                i64::from(self.storage.database.user_version()),
+                i64::from(self.file_of(at)?.user_version()),
             ));
         };
         let value = argument_integer(argument) as i32;
-        self.storage.database.set_user_version(value);
+        self.file_of_mut(at)?.set_user_version(value);
         // **Checkpointed, because the meta page is not in the log.** Every
         // other write here is replayed from the WAL on the next open; a meta
         // field only reaches the file at a checkpoint, so one that was set and
@@ -333,18 +335,20 @@ impl crate::ImportedDatabase {
     /// Reads or writes the four bytes that say what application owns the file.
     ///
     /// @param argument - the value it was given, when it was given one
+    /// @param at - the attached database the pragma was qualified with
     pub(crate) fn pragma_application_id(
         &mut self,
         argument: Option<&PragmaArgument>,
+        at: Option<usize>,
     ) -> DbResult<Outcome> {
         let Some(argument) = argument else {
             return Ok(named_integer(
                 "application_id",
-                i64::from(self.storage.database.application_id()),
+                i64::from(self.file_of(at)?.application_id()),
             ));
         };
         let value = argument_integer(argument) as i32;
-        self.storage.database.set_application_id(value);
+        self.file_of_mut(at)?.set_application_id(value);
         self.checkpoint()?;
         Ok(Outcome::empty())
     }

@@ -93,6 +93,18 @@ pub fn sync_directory(_path: &DbPath) -> VfsResult<()> {
     Ok(())
 }
 
+/// Flushes a file the strongest way this platform can.
+///
+/// `FlushFileBuffers`, which is what `sync_all` calls and which Windows
+/// documents as reaching the disk. There is no second, stronger barrier the
+/// way Darwin's `F_FULLFSYNC` is stronger than its `fsync` - see
+/// `os::unix::full_sync`.
+///
+/// @param file - the file to flush
+pub fn full_sync(file: &File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
 /// Fills `output` with randomness from the system preferred generator.
 pub fn system_randomness(output: &mut [u8]) -> VfsResult<()> {
     if output.is_empty() {

@@ -27,6 +27,14 @@ impl crate::ImportedDatabase {
     /// empty path, which is what SQLite reports for the same thing.
     pub(crate) fn database_list(&self) -> Vec<Vec<OwnedDatum>> {
         let mut rows = Vec::new();
+        // **`temp` is listed once the session has made something temporary and
+        // not before, which is what the reference does** (task-2066 section
+        // 4.2, item 27). The audit read this as a missing row; the pinned
+        // oracle disagrees. `pragma.rs`'s `the_schema_pragmas_describe_the_schema`
+        // runs `SELECT seq, name FROM pragma_database_list` against SQLite
+        // 3.53.4 on a connection that has made no temporary object, and SQLite
+        // answers one row. Emitting `temp` unconditionally was tried here and
+        // that differential caught it.
         for (seq, at) in self.schema_numbers().into_iter().enumerate() {
             let (name, file) = match at {
                 crate::MAIN => (
@@ -59,9 +67,11 @@ impl crate::ImportedDatabase {
     /// reconstructs the pair.
     ///
     /// @param argument - the table named in the pragma
+    /// @param at - the attached database the pragma was qualified with
     pub(crate) fn pragma_foreign_key_list(
         &self,
         argument: Option<&PragmaArgument>,
+        at: Option<usize>,
     ) -> DbResult<Outcome> {
         let names = vec![
             "id".into(),
@@ -73,7 +83,7 @@ impl crate::ImportedDatabase {
             "on_delete".into(),
             "match".into(),
         ];
-        let Some(table) = self.named_table(argument) else {
+        let Some(table) = self.named_table(argument, at) else {
             return Ok(Outcome {
                 rows: Vec::new(),
                 names: std::rc::Rc::new(names),
@@ -131,10 +141,12 @@ impl crate::ImportedDatabase {
     ///
     /// @param argument - the table named in the pragma
     /// @param extended - whether this is the `xinfo` spelling
+    /// @param at - the attached database the pragma was qualified with
     pub(crate) fn pragma_table_info(
         &self,
         argument: Option<&PragmaArgument>,
         extended: bool,
+        at: Option<usize>,
     ) -> DbResult<Outcome> {
         // **The names come first and are answered even when nothing matched.**
         // A statement's result columns are a fact about the *pragma*, not about
@@ -148,7 +160,7 @@ impl crate::ImportedDatabase {
         if extended {
             names.push("hidden".to_string());
         }
-        let Some(table) = self.named_table(argument) else {
+        let Some(table) = self.named_table(argument, at) else {
             return Ok(Outcome {
                 rows: Vec::new(),
                 names: std::rc::Rc::new(names),
@@ -280,12 +292,19 @@ impl crate::ImportedDatabase {
             .collect()
     }
     /// Lists one table's indexes, newest first, as SQLite does.
-    pub(crate) fn pragma_index_list(&self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+    ///
+    /// @param argument - the table named in the pragma
+    /// @param at - the attached database the pragma was qualified with
+    pub(crate) fn pragma_index_list(
+        &self,
+        argument: Option<&PragmaArgument>,
+        at: Option<usize>,
+    ) -> DbResult<Outcome> {
         let names: Vec<String> = ["seq", "name", "unique", "origin", "partial"]
             .iter()
             .map(|held| (*held).to_string())
             .collect();
-        let Some(table) = self.named_table(argument) else {
+        let Some(table) = self.named_table(argument, at) else {
             return Ok(Outcome {
                 rows: Vec::new(),
                 names: std::rc::Rc::new(names),
@@ -355,10 +374,12 @@ impl crate::ImportedDatabase {
     ///
     /// @param argument - the index named in the pragma
     /// @param extended - whether this is the `xinfo` spelling
+    /// @param at - the attached database the pragma was qualified with
     pub(crate) fn pragma_index_info(
         &self,
         argument: Option<&PragmaArgument>,
         extended: bool,
+        at: Option<usize>,
     ) -> DbResult<Outcome> {
         let mut names: Vec<String> = ["seqno", "cid", "name"]
             .iter()
@@ -379,6 +400,9 @@ impl crate::ImportedDatabase {
         };
         let wanted = argument_text(argument).to_ascii_lowercase().into_bytes();
         let found = self.schema.tables.iter().find_map(|table| {
+            if !at.is_none_or(|named| table.database == named) {
+                return None;
+            }
             table
                 .indexes
                 .iter()
@@ -441,7 +465,12 @@ impl crate::ImportedDatabase {
     /// table looked like.
     ///
     /// @param argument - the table to narrow to, when one was given
-    pub(crate) fn pragma_table_list(&self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+    /// @param at - the attached database the pragma was qualified with
+    pub(crate) fn pragma_table_list(
+        &self,
+        argument: Option<&PragmaArgument>,
+        at: Option<usize>,
+    ) -> DbResult<Outcome> {
         let wanted = argument.map(|argument| argument_text(argument).to_ascii_lowercase());
         let matches = |folded: &[u8]| {
             wanted
@@ -456,6 +485,11 @@ impl crate::ImportedDatabase {
                 continue;
             }
             if !matches(&table.folded) {
+                continue;
+            }
+            // A qualified `PRAGMA aux.table_list` lists that database's tables
+            // and no others, which is what the qualifier is for.
+            if !at.is_none_or(|named| table.database == named) {
                 continue;
             }
             let kind: &[u8] = match table.kind {
@@ -551,13 +585,14 @@ impl crate::ImportedDatabase {
     pub(crate) fn named_table(
         &self,
         argument: Option<&PragmaArgument>,
+        at: Option<usize>,
     ) -> Option<&inillucent_sql::catalog_view::TableInfo> {
         let argument = argument?;
         let wanted = argument_text(argument).to_ascii_lowercase().into_bytes();
         self.schema
             .tables
             .iter()
-            .find(|table| table.folded == wanted)
+            .find(|table| table.folded == wanted && at.is_none_or(|named| table.database == named))
             .or(
                 if wanted == b"sqlite_schema" || wanted == b"sqlite_master" {
                     Some(&self.schema.schema_info)

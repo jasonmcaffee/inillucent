@@ -408,7 +408,6 @@ const EXTRA_MEMBERS: &[&str] = &[
     "root",
     "rows",
     "server",
-    "shell_reported_an_error",
     "source",
     "table",
     "tables",

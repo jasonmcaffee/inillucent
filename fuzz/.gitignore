@@ -1,0 +1,17 @@
+# What a fuzzing run produces, none of which is source.
+#
+# `artifacts/` is the input that crashed a target, and it is the one thing here
+# that is NOT committed. The way to keep a crashing input is the rule in
+# README.md: add it as a case in the stable counterpart, written out in the
+# test, so it is checked by every run of the ordinary suite rather than only
+# while somebody is fuzzing. A file sitting here is checked by nobody.
+#
+# `corpus/` IS committed, which task-2066's "Done means" asks for by name. It is
+# the inputs libfuzzer kept because they reached new coverage, and it is where
+# the next run starts from - a fuzzer given the corpus reaches in seconds what
+# it spent the previous campaign finding. It costs 3.7 MB after one
+# twenty-second campaign across sixteen targets, which is the price of not
+# starting from nothing every time.
+artifacts/
+coverage/
+target/

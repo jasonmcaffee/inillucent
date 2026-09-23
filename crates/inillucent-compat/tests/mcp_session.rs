@@ -356,6 +356,133 @@ fn a_malformed_line_does_not_end_the_session() {
     );
 }
 
+/// **A blank line does not end the session.**
+///
+/// `read_request` returned `Ok(0)` for an empty line and for the end of the
+/// stream alike, and `serve` reads `Ok(0)` as the end of input - so one stray
+/// newline from a client ended the session, the next request went unanswered,
+/// and the process exited 0 as though the client had hung up (task-2066
+/// section 4.2, item 27). JSON-RPC over a line protocol has no meaning for an
+/// empty line, and reading past it is what every other implementation does.
+///
+/// Three blank lines and one holding a carriage return, because a client on Windows
+/// sends the second and the fix has to treat it as the same nothing.
+#[test]
+fn a_blank_line_does_not_end_the_session() {
+    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
+        return;
+    };
+    let directory = area("blank-line");
+    let database = empty_database(&binary, &directory);
+    let mut session = Session::start_with(&server, &database, &[]);
+
+    session.write_line("");
+    session.write_line("   ");
+    session.write_line("\r");
+    let listed = session.call("tools/list", "{}");
+    assert!(
+        listed.contains("inillucent_query"),
+        "the server stopped answering after a blank line:
+{listed}"
+    );
+
+    // And again after a request, so the fix is about the read loop rather than
+    // about the state the handshake happened to be in.
+    session.write_line("");
+    let again = session.call("tools/list", "{}");
+    assert!(
+        again.contains("inillucent_query"),
+        "the server stopped answering after a blank line between requests:
+{again}"
+    );
+}
+
+/// **A method nobody implements is refused over the wire, and the session
+/// carries on.**
+///
+/// `mcp.rs`'s `an_unknown_method_is_refused` proves the refusal in process, by
+/// calling `handle` directly (task-2066 section 4.4.13). What that cannot say
+/// is whether the refusal survives the wire: whether it is framed as a
+/// JSON-RPC error rather than a tool result, whether it carries the request's
+/// own id back, and whether the server is still there afterwards. A client
+/// probing for a capability the server has not got - `resources/list` is the
+/// one every MCP client sends - would otherwise be a way to end the session.
+#[test]
+fn an_unknown_method_is_refused_over_the_wire_and_the_session_carries_on() {
+    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
+        return;
+    };
+    let directory = area("unknown-method");
+    let database = empty_database(&binary, &directory);
+    let mut session = Session::start_with(&server, &database, &[]);
+
+    let refused = session.call("resources/list", "{}");
+    assert!(
+        refused.contains("-32601"),
+        "an unknown method did not come back as a JSON-RPC method-not-found:\n{refused}"
+    );
+    assert!(
+        refused.contains("\"error\""),
+        "an unknown method came back as a result rather than an error:\n{refused}"
+    );
+    let listed = session.call("tools/list", "{}");
+    assert!(
+        listed.contains("inillucent_query"),
+        "the server stopped answering after an unknown method:\n{listed}"
+    );
+}
+
+/// **A protocol version the server does not speak is answered with the one it
+/// does, over the wire.**
+///
+/// `mcp.rs`'s `initialize_selects_the_supported_version` proves it in process.
+/// Over the wire it is the first thing a client sees, and getting it wrong ends
+/// the session before a single tool is called - so a client asking for a
+/// revision from the future has to be told which revision it is talking to
+/// rather than refused (task-2066 section 4.4.13).
+///
+/// The second half is what makes it an end to end case rather than a repeat:
+/// after the mismatch the session is used, because a handshake that answered
+/// correctly and then left the server unusable would pass the first assertion.
+#[test]
+fn a_protocol_version_mismatch_is_answered_with_the_supported_one() {
+    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
+        return;
+    };
+    let directory = area("version-mismatch");
+    let database = empty_database(&binary, &directory);
+    let mut session = Session::start_silent(&server, &database, &[]);
+
+    let answered = session.call(
+        "initialize",
+        "{\"protocolVersion\":\"2099-01-01\",\"capabilities\":{},\
+         \"clientInfo\":{\"name\":\"from-the-future\",\"version\":\"1\"}}",
+    );
+    assert!(
+        answered.contains("protocolVersion"),
+        "the handshake did not name a protocol version:\n{answered}"
+    );
+    assert!(
+        !answered.contains("2099-01-01"),
+        "the server echoed a revision it does not speak:\n{answered}"
+    );
+    assert!(
+        answered.contains("inillucent"),
+        "the handshake did not name the server:\n{answered}"
+    );
+
+    // The notification a handshake ends with. `start_silent` does not send it,
+    // because its own case is about what happens before it - and without it the
+    // server refuses the next method with -32002, correctly. The first version
+    // of this case read that refusal as a broken session.
+    session.notify("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+    let listed = session.call("tools/list", "{}");
+    assert!(
+        listed.contains("inillucent_query"),
+        "the session was unusable after a version mismatch:\n{listed}"
+    );
+}
+
 /// A deeply nested request is refused, and the next one is answered.
 ///
 /// **One request used to kill the server** (task-2066 §4.1.6). The command

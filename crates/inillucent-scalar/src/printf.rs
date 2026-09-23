@@ -351,8 +351,8 @@ fn real(spec: &Spec, argument: Option<&Value<'static>>) -> Vec<u8> {
     let value = argument.map_or(0.0, cast::real_value);
     let precision = spec.precision.unwrap_or(6);
     let body = match spec.conversion {
-        b'e' => format!("{value:.precision$e}"),
-        b'E' => format!("{value:.precision$e}").to_uppercase(),
+        b'e' => capped_exponential(value, precision, significant_digits(spec), false),
+        b'E' => capped_exponential(value, precision, significant_digits(spec), true),
         b'g' | b'G' => {
             // `%g` drops trailing zeros and chooses the shorter of fixed and
             // exponential. Rust has no `{:g}`, so the choice is made here on
@@ -362,9 +362,29 @@ fn real(spec: &Spec, argument: Option<&Value<'static>>) -> Vec<u8> {
             } else {
                 value.abs().log10().floor() as i32
             };
+            // **The cap belongs here too** (task-2066 section 4.4.14). Section
+            // 4.2 item 27 added `significant_digits` and wired it into `fixed`
+            // alone, so `%f` stopped at sixteen digits while `%e` and `%g` went
+            // on printing the decimal expansion of the nearest double -
+            // `printf('%.20g', 3.14159265358979)` was `3.1415926535897900074`
+            // here and `3.14159265358979` in SQLite. Capping the significant
+            // count before the branch below is all `%g` needs, because both of
+            // its arms are built from that count; the trailing zeros the cap
+            // leaves are then dropped by `trim_zeros`, which is how
+            // `printf('%.20g', 0.1)` becomes `0.1` rather than sixteen digits
+            // of it.
+            //
+            // **The cap does not move the choice between the two forms.** The
+            // branch below reads the precision the caller wrote and the cap
+            // applies to the digits inside each arm, which is SQLite's order
+            // and is not interchangeable: capping first sent
+            // `printf('%.20g', -5.177035921000167e17)` down the exponential
+            // arm, because 17 is not less than 16, and SQLite prints
+            // `-517703592100016700`.
             let significant = if precision == 0 { 1 } else { precision };
+            let cap = significant_digits(spec);
             if exponent < -4 || exponent >= significant as i32 {
-                let text = format!("{:.*e}", significant.saturating_sub(1), value);
+                let text = capped_exponential(value, significant.saturating_sub(1), cap, false);
                 let text = trim_zeros(&text, true);
                 if spec.conversion == b'G' {
                     text.to_uppercase()
@@ -375,10 +395,10 @@ fn real(spec: &Spec, argument: Option<&Value<'static>>) -> Vec<u8> {
                 let decimals = significant
                     .saturating_sub(1)
                     .saturating_sub(exponent.max(0) as usize);
-                trim_zeros(&format!("{value:.decimals$}"), false)
+                trim_zeros(&fixed(value, decimals, cap), false)
             }
         }
-        _ => fixed(value, precision),
+        _ => fixed(value, precision, significant_digits(spec)),
     };
     // Rust writes `1e2` where C writes `1.000000e+02`, so the exponent is
     // normalised rather than the whole number being re-rendered.
@@ -428,7 +448,7 @@ fn real(spec: &Spec, argument: Option<&Value<'static>>) -> Vec<u8> {
 /// value is exactly on the midpoint and rounds away; if they are all nines the
 /// first dropped digit is a nine and rounds away too. Every other case is
 /// decided by the first dropped digit alone.
-fn fixed(value: f64, precision: usize) -> String {
+fn fixed(value: f64, precision: usize, significant: usize) -> String {
     if !value.is_finite() {
         return format!("{value:.precision$}");
     }
@@ -446,6 +466,7 @@ fn fixed(value: f64, precision: usize) -> String {
     if first_dropped >= b'5' {
         carry(&mut digits);
     }
+    cap_significant(&mut digits, significant);
     let mut text = String::from_utf8_lossy(&digits).into_owned();
     if precision > 0 {
         while text.len() <= precision {
@@ -457,6 +478,101 @@ fn fixed(value: f64, precision: usize) -> String {
         text.insert(0, '-');
     }
     text
+}
+
+/// Renders `%e`, zeroing the digits past the significant ones.
+///
+/// See [`significant_digits`]. `%e` always writes one digit before the point,
+/// so a carry off the front of the rounding is one more power of ten rather
+/// than one more digit, and the exponent moves instead of the mantissa
+/// growing.
+///
+/// @param value - the number
+/// @param precision - how many digits after the point were asked for
+/// @param significant - how many of them may be the number's own
+/// @param upper - whether this is `%E`
+fn capped_exponential(value: f64, precision: usize, significant: usize, upper: bool) -> String {
+    let text = format!("{value:.precision$e}");
+    let Some((mantissa, exponent)) = text.split_once('e') else {
+        return text;
+    };
+    let negative = mantissa.starts_with('-');
+    let mut digits: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
+    let before = digits.len();
+    let mut carried = 0i32;
+    cap_significant(&mut digits, significant);
+    if digits.len() > before {
+        digits.truncate(before);
+        carried = 1;
+    }
+
+    let head = digits.first().copied().unwrap_or(b'0');
+    let tail = String::from_utf8_lossy(digits.get(1..).unwrap_or(&[])).to_string();
+    let power = exponent.parse::<i32>().unwrap_or(0).saturating_add(carried);
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    out.push(char::from(head));
+    if !tail.is_empty() {
+        out.push('.');
+        out.push_str(&tail);
+    }
+    out.push('e');
+    out.push_str(&power.to_string());
+    if upper {
+        out.to_uppercase()
+    } else {
+        out
+    }
+}
+
+/// How many significant digits this conversion may print.
+///
+/// **SQLite generates sixteen and fills the rest with zeros** (task-2066 section 4.2,
+/// item 27). `printf('%.20f', 1.0/3)` answered `0.33333333333333331483` here
+/// and `0.33333333333333330000` in SQLite, and the digits after the sixteenth
+/// are not a more precise answer - they are the decimal expansion of the
+/// nearest double, which is a fact about the binary format rather than about
+/// the number the caller wrote. `strftime('%J', ...)` printed one extra digit
+/// for the same reason.
+///
+/// The `!` flag raises it to twenty, which is `SQLITE_PRINTF_PRECISION_LIMIT`.
+/// The flag was parsed and never read on this path.
+///
+/// @param spec - the conversion as it was written
+fn significant_digits(spec: &Spec) -> usize {
+    match spec.characters {
+        true => 20,
+        false => 16,
+    }
+}
+
+/// Zeroes every digit past the significant ones, rounding at the cut.
+///
+/// See [`significant_digits`]. Leading zeros are not significant, so
+/// `0.000123...` counts from the `1`; a carry that runs off the front prepends
+/// a digit, which is one more integer digit and is what the caller's decimal
+/// point then sits one place to the right of.
+///
+/// @param digits - the rendered digits, most significant first
+/// @param limit - how many significant digits to keep
+fn cap_significant(digits: &mut Vec<u8>, limit: usize) {
+    let Some(first) = digits.iter().position(|digit| *digit != b'0') else {
+        return;
+    };
+    let cut = first.saturating_add(limit);
+    if cut >= digits.len() {
+        return;
+    }
+    let rounds_up = digits.get(cut).copied().unwrap_or(b'0') >= b'5';
+    let zeros = digits.len().saturating_sub(cut);
+    let mut kept: Vec<u8> = digits.get(..cut).unwrap_or_default().to_vec();
+    if rounds_up {
+        carry(&mut kept);
+    }
+    kept.extend(core::iter::repeat_n(b'0', zeros));
+    *digits = kept;
 }
 
 /// Adds one to a string of decimal digits, in place.

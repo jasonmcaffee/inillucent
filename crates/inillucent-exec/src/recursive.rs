@@ -4,13 +4,13 @@
 //! no base case is ordinary SQL - every counter and every series generator is
 //! written as one and bounded by a `LIMIT` outside it - so a producer that ran
 //! to completion before anything above it saw a row would refuse queries
-//! SQLite answers. The pass limit below is the guard against a recursion that
-//! settles neither way, not the mechanism that stops an ordinary one.
+//! SQLite answers. What guards against a recursion that settles neither way is
+//! the request's budget, charged per row as the rows are produced and checked
+//! between passes; it is not the mechanism that stops an ordinary one.
 //!
 //! Extracted from `physical.rs`, whose recorded size this pushed past. Nothing
 //! here changed in the move.
 
-use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
 use inillucent_sql::plan::PhysicalPlan;
 use inillucent_tree::datum::OwnedDatum;
@@ -18,9 +18,6 @@ use inillucent_value::collation::Collation;
 
 use crate::physical::{run_any, Params, TreeCatalog, WithQueue};
 use crate::setop::SetKeys;
-
-/// to a recursion that would not.
-pub(crate) const MAX_RECURSIVE_PASSES: usize = 1_000_000;
 
 /// Fills a recursive CTE and returns every row it produced.
 ///
@@ -73,7 +70,27 @@ pub(crate) fn run_recursive(
     // fixed for a virtual table's scan: a producer has to be
     // stoppable by the consumer above it rather than run to completion first.
     let enough = |answer: &Vec<Vec<OwnedDatum>>| limit.is_some_and(|want| answer.len() >= want);
-    for _ in 0..MAX_RECURSIVE_PASSES {
+    // **There is no pass count here, and there used to be one.** A million
+    // passes refused `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1
+    // FROM n) SELECT x FROM n LIMIT 1 OFFSET 2000000`, which SQLite answers in
+    // thirteen seconds and which a series generator past a million rows is
+    // written as; the audit measured the refusal at seventeen seconds with
+    // "a recursive CTE did not settle" (task-2066 section 4.2, item 22). A
+    // constant that refuses a query the reference answers is a compatibility
+    // defect, and the number it refuses at was not derived from anything.
+    //
+    // What stops a recursion that settles neither way is the request's own
+    // budget, which is a better guard than a pass count on both sides: it
+    // counts the bytes the recursion is actually holding rather than how many
+    // times round it has been, and it is armed on every served path - the MCP
+    // server, the command line and the driver all call `budget::arm`. The
+    // `materialise` call below charges each row as it is produced, and the
+    // `check` here answers a cancellation and the wall clock limit between
+    // passes, so a runaway stops at the first of memory, time or the caller
+    // hanging up. A library embedder that armed no budget gets what SQLite
+    // gives one, which is a query that runs until it is stopped.
+    loop {
+        inillucent_base::budget::check()?;
         if working.is_empty() || enough(&answer) {
             return Ok(answer);
         }
@@ -94,10 +111,10 @@ pub(crate) fn run_recursive(
             return Ok(answer);
         }
         // **The answer accumulates across passes (task-1932, H6).** A
-        // recursive CTE holds every row it has produced, and the pass count is
-        // bounded only by `MAX_RECURSIVE_PASSES` - a million - so a walk over a
-        // graph with a cycle the `UNION` does not close builds until memory
-        // runs out rather than until a budget says stop.
+        // recursive CTE holds every row it has produced, and nothing bounds
+        // the number of passes, so a walk over a graph with a cycle the
+        // `UNION` does not close builds until memory runs out rather than
+        // until a budget says stop.
         for row in &fresh {
             inillucent_base::budget::materialise(crate::ops::owned_row_bytes(row))?;
         }
@@ -107,9 +124,6 @@ pub(crate) fn run_recursive(
         }
         working = fresh;
     }
-    Err(misuse(
-        "a recursive CTE did not settle; it produced rows for a million passes",
-    ))
 }
 
 /// Returns the rows that are neither duplicates of each other nor already seen.

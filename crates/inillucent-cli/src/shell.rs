@@ -75,6 +75,14 @@ pub struct Shell {
     pub layout: Layout,
     /// Where output goes, when it is not standard output.
     output: Option<std::fs::File>,
+    /// The name of that file, for `.show` to report.
+    ///
+    /// **A second field rather than asking the `File`**, because a `File` does
+    /// not carry the path it was opened with on any platform this builds for.
+    /// Before it existed `.show` printed `output: stdout` while a `.output`
+    /// redirect was open, which is the one line of that report a person reads
+    /// when they cannot find where their rows went.
+    output_name: Option<String>,
     /// Whether `.once` set that file for one statement only.
     output_is_once: bool,
     /// Whether a failing statement stops the script.
@@ -349,6 +357,7 @@ impl Shell {
             active: 0,
             layout: Layout::default(),
             output: None,
+            output_name: None,
             output_is_once: false,
             bail: false,
             echo: false,
@@ -682,19 +691,30 @@ impl Shell {
         self.rows_since_redirect = 0;
         let Some(path) = path else {
             self.output = None;
+            self.output_name = None;
             self.output_is_once = false;
             return Ok(());
         };
         let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
         self.output = Some(file);
+        self.output_name = Some(path.to_string());
         self.output_is_once = once;
         Ok(())
+    }
+
+    /// Where output is going, as `.show` names it.
+    ///
+    /// `stdout` when nothing is redirecting, and the file name when `.output`
+    /// or `.once` is.
+    pub fn output_target(&self) -> &str {
+        self.output_name.as_deref().unwrap_or("stdout")
     }
 
     /// Returns output to the terminal after a `.once`.
     fn finish_once(&mut self) {
         if self.output_is_once {
             self.output = None;
+            self.output_name = None;
             self.output_is_once = false;
         }
         // `.excel` and `.www` hand the file to whatever the system opens that

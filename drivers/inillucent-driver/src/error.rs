@@ -204,6 +204,17 @@ impl Error {
             (None, None, PrimaryCode::Full) => Status::Full,
             (None, None, PrimaryCode::TooBig) => Status::TooBig,
             (None, None, PrimaryCode::Internal) => Status::Internal,
+            // **A path a confined process may not reach** (task-2066 section
+            // 4.2, item 27). `inillucent-vfs`'s `confine` refuses with
+            // `PrimaryCode::Perm`, and with no arm here it fell through to
+            // `Status::Syntax` - so an agent told a server started with
+            // `--root` that its `ATTACH` was a syntax error, while
+            // `agent-skills/inillucent-mcp/SKILL.md` tells it `invalid_state`
+            // is what a refused path looks like. `InvalidState` rather than a
+            // status of its own: the statement is fine and the state it asked
+            // about is not this process's to reach, which is the same shape
+            // every other `InvalidState` here has.
+            (None, None, PrimaryCode::Perm) => Status::InvalidState,
             // A missing object and a malformed statement are both reported by
             // the binder as a misuse, and SQLite's wording for the first is
             // stable and deliberate: `inillucent-sql`'s `no_such_table` exists
@@ -269,6 +280,25 @@ mod tests {
         let error = Error::from_engine(&engine, false);
         assert_eq!(error.status, Status::Syntax);
         assert_eq!(error.feature, None);
+    }
+
+    /// **A path a confined process may not reach is `invalid_state`, and it
+    /// used to be `syntax`.**
+    ///
+    /// `inillucent-vfs`'s `confine` refuses with `PrimaryCode::Perm` and there
+    /// was no arm for it, so the classification fell through to the default -
+    /// and an agent on a server started with `--root` was told its `ATTACH`
+    /// was a syntax error, while `agent-skills/inillucent-mcp/SKILL.md` tells
+    /// it `invalid_state` is what a refused path looks like (task-2066 section
+    /// 4.2, item 27).
+    #[test]
+    fn a_path_outside_the_root_is_invalid_state() {
+        let said = "\"C:/keys/id_rsa\" is outside the root this process is confined to";
+        let engine = DbError::primary(PrimaryCode::Perm).with_message(said);
+        let error = Error::from_engine(&engine, false);
+        assert_eq!(error.status, Status::InvalidState);
+        assert_eq!(error.message, said);
+        assert_eq!(error.feature, None, "it is refused, it is not unbuilt");
     }
 
     /// A component this machine has not got is its own status, and it is not

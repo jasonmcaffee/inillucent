@@ -27,6 +27,13 @@ inillucent-wal = { path = "../crates/inillucent-wal" }
 inillucent-remote = { path = "../crates/inillucent-remote" }
 inillucent-cli = { path = "../crates/inillucent-cli" }
 inillucent-search = { path = "../crates/inillucent-search" }
+# And the four task-2066 section 4.4.7 added: the whole statement path, the
+# `MATCH` grammar, the file `inillucent-migrate` is pointed at, and the segment
+# header section 4.1.12 sized allocations from.
+inillucent-engine = { path = "../crates/inillucent-engine" }
+inillucent-ext = { path = "../crates/inillucent-ext" }
+inillucent-sqlite-reader = { path = "../crates/inillucent-sqlite-reader" }
+inillucent-core = { path = "../crates/inillucent-core" }
 
 [[bin]]
 name = "varint"
@@ -97,5 +104,29 @@ doc = false
 [[bin]]
 name = "store"
 path = "fuzz_targets/store.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sql_text"
+path = "fuzz_targets/sql_text.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fts5_query"
+path = "fuzz_targets/fts5_query.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sqlite_file"
+path = "fuzz_targets/sqlite_file.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "segment_header"
+path = "fuzz_targets/segment_header.rs"
 test = false
 doc = false

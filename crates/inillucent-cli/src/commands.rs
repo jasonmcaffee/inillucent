@@ -126,6 +126,17 @@ pub enum ExplainMode {
     Off,
 }
 
+impl ExplainMode {
+    /// What `.show` calls this mode, which is what `.explain` accepts back.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExplainMode::Auto => "auto",
+            ExplainMode::On => "on",
+            ExplainMode::Off => "off",
+        }
+    }
+}
+
 /// `.nonce STRING`: the token that suspends safe mode for one command.
 ///
 /// @param shell - the shell

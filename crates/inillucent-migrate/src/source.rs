@@ -72,8 +72,14 @@ impl Source {
                 sha256: hasher.hex(),
             });
         }
-        let index = inillucent_core::persist::load(&path)
+        let mut index = inillucent_core::persist::load(&path)
             .map_err(|error| format!("cannot open the legacy index: {error}"))?;
+        // **A migration reads every chunk, so it holds the text** (task-2066
+        // §4.3.8). A load leaves the chunk text in `store.bin` and reads a range
+        // per result, which is what a search wants. This copies the whole corpus
+        // and digests it, so one positional read per chunk would be six hundred
+        // thousand reads for text the next line is going to touch anyway.
+        index.make_text_resident();
         Ok(Source {
             path,
             generation,

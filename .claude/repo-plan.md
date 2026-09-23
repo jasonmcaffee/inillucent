@@ -47,6 +47,18 @@ they are touching do not collide; two that have not, do.
 
 ## Notes for this repository
 
+- **Every sub agent of one session shares one scratchpad directory, and two agents naming a database
+  the same thing in it collide.** This looked like data loss and was investigated as one: while the
+  performance audit was building a 100,000 row fixture, its `main_table` disappeared and a table
+  named `b` it had never created was in the file, with log segment 7 older than segment 5. It was a
+  third sub agent running `rm -f t.rdb; inillucent create t.rdb; CREATE TABLE b (i, r, t, z)`
+  against the same path two minutes after the auditor's last write. The surviving schema matched
+  that statement character for character, and segment 7 outlived its database because `rm -f`
+  removed only the main file: the replacement started a fresh chain at one, and two chains were read
+  as one. Reproduced five times in fresh directories with six concurrent readers, and it is not an
+  engine defect. **Give each sub agent its own folder under the scratchpad, and prefix every scratch
+  database name with the agent's own tag.** (task-2066 section 5)
+
 <!-- Add what the next agent needs to know: the hot files, the parts that cannot be edited in
      parallel, the build that takes twenty minutes, the test that only passes on an idle box. -->
 

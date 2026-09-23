@@ -570,6 +570,18 @@ since has been measured on Linux.
 
 ## What is not measured here
 
+- **The API an application actually has.** Every figure on this page is the pipeline's: the gate
+  calls `plan`, `prepare` and `pipeline` directly, which is the shortest path to an answer and not
+  the one a caller has. `inillucent-fullgate --api connection` drives `Connection::prepare` and
+  `Statement::step` instead, and `--api both` runs the two in the same round so the difference is
+  paired rather than compared across two runs of the binary on a machine that moved in between
+  (task-2066 section 4.3.10). What sits between them is the plan cache lookup, the parameter count,
+  a `String` per result column per execution, and the dirty frame walk on release.
+- **A table larger than the buffer pool.** `story_large_table_nightly` builds one in the `nightly`
+  tier and scans, sorts and deletes half of it (task-2066 section 4.4.5). Nothing on this page is
+  measured at that size, and the families here all fit in the pool - so a number here says what the
+  engine does when its working set is resident, and that story says what it does when it is not.
+
 - **One scale.** These are the medium fixture, 100,000 rows. At 5,000 rows the headline is 3.46x, and
   at 600,000 it is 5.13x. Families behave differently at each, and `write` inverts: it is **45% slower
   than SQLite** at 5,000 rows (0.69x), 92% faster at 100,000 and **545% faster** at 600,000 (6.45x),

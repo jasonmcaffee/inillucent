@@ -142,6 +142,36 @@ fn reading<'a>(shell: &mut Shell, arguments: &[&'a str]) -> Option<Reading<'a>> 
     })
 }
 
+/// Reads a file as text, saying where it stopped being text.
+///
+/// **`read_to_string` answered "cannot open" for a file that opened fine**
+/// (task-2066 section 4.2, item 24). A cp1252 CSV holding `1,Café` is a
+/// file the reader can open, read and stat; what it cannot do is decode it,
+/// and a message about opening sends the reader to check permissions and the
+/// path. The same file with ASCII in it imports, which is what makes the
+/// wrong message expensive: the difference between the two runs is one byte
+/// of content and the message names neither content nor bytes.
+///
+/// The offset is the one `Utf8Error::valid_up_to` reports, which is the first
+/// byte of the sequence that does not decode, so it points at the character a
+/// person has to go and look at.
+///
+/// @param path - the file to read
+fn read_text(path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    String::from_utf8(bytes).map_err(|error| {
+        let at = error.utf8_error().valid_up_to();
+        let byte = error
+            .as_bytes()
+            .get(at)
+            .map(|held| format!("0x{held:02X}"))
+            .unwrap_or_else(|| "the end of the file".to_string());
+        format!(
+            "it is not valid UTF-8; byte {at} is {byte}, which does not begin a character.              This reads UTF-8 text only; convert the file first, with `iconv -f cp1252 -t utf-8`              or the encoding it was written in."
+        )
+    })
+}
+
 /// Reads a file into a table.
 pub fn import(shell: &mut Shell, arguments: &[&str]) {
     let Some(reading) = reading(shell, arguments) else {
@@ -154,9 +184,12 @@ pub fn import(shell: &mut Shell, arguments: &[&str]) {
     let Some(path) = crate::dot::confine_path(shell, named) else {
         return;
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        shell.complain(&format!("Error: cannot open \"{named}\""));
-        return;
+    let text = match read_text(&path) {
+        Ok(text) => text,
+        Err(why) => {
+            shell.complain(&format!("Error: cannot read \"{named}\": {why}"));
+            return;
+        }
     };
     let mut rows = parse(
         &text,

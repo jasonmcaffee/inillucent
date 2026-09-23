@@ -13,9 +13,9 @@
 
 /// Matches a `LIKE` pattern against a subject.
 ///
-/// `escape` is the one-character escape a `ESCAPE` clause named, if any. An
-/// escaped `%`, `_` or escape character matches itself literally.
-pub fn like(pattern: &[u8], subject: &[u8], escape: Option<u8>) -> bool {
+/// `escape` is the bytes of the single character escape an `ESCAPE` clause named,
+/// if any. An escaped `%`, `_` or escape character matches itself literally.
+pub fn like(pattern: &[u8], subject: &[u8], escape: Option<&[u8]>) -> bool {
     matches(pattern, subject, escape, true, true)
 }
 
@@ -30,7 +30,12 @@ pub fn like(pattern: &[u8], subject: &[u8], escape: Option<u8>) -> bool {
 /// @param subject - the text being matched
 /// @param escape - the `ESCAPE` character, when one was given
 /// @param fold_case - whether ASCII letters match either case
-pub fn like_folding(pattern: &[u8], subject: &[u8], escape: Option<u8>, fold_case: bool) -> bool {
+pub fn like_folding(
+    pattern: &[u8],
+    subject: &[u8],
+    escape: Option<&[u8]>,
+    fold_case: bool,
+) -> bool {
     matches(pattern, subject, escape, true, fold_case)
 }
 
@@ -45,7 +50,7 @@ pub fn glob(pattern: &[u8], subject: &[u8]) -> bool {
 fn matches(
     pattern: &[u8],
     subject: &[u8],
-    escape: Option<u8>,
+    escape: Option<&[u8]>,
     is_like: bool,
     fold_case: bool,
 ) -> bool {
@@ -85,13 +90,23 @@ fn matches(
                 }
             }
             Some(byte) => {
-                let escaped = escape == Some(byte);
-                let literal = if escaped {
-                    pattern.get(p.saturating_add(1)).copied()
-                } else {
-                    Some(byte)
+                // **The escape is a character, which may be more than one
+                // byte** (task-2066 section 4.2, item 27). It used to be a
+                // single `u8` taken from the first byte of whatever the caller
+                // wrote, so an accented escape character escaped on 0xC3 - the
+                // byte that begins half the accented characters there are -
+                // and a pattern holding any of them lost a character.
+                let mark = escape.filter(|mark| {
+                    pattern
+                        .get(p..)
+                        .is_some_and(|rest| !mark.is_empty() && rest.starts_with(mark))
+                });
+                let skip = mark.map_or(0usize, <[u8]>::len);
+                let literal = match mark {
+                    Some(_) => pattern.get(p.saturating_add(skip)).copied(),
+                    None => Some(byte),
                 };
-                let advance = if escaped { 2usize } else { 1usize };
+                let advance = skip.saturating_add(1);
                 if let (Some(literal), Some(actual)) = (literal, subject.get(s).copied()) {
                     if literal == actual || (is_like && fold_case && folds_to(literal, actual)) {
                         p = p.saturating_add(advance);
@@ -208,10 +223,10 @@ mod tests {
     /// An `ESCAPE` character makes a wildcard literal.
     #[test]
     fn like_honours_an_escape_character() {
-        assert!(like(b"100\\%", b"100%", Some(b'\\')));
-        assert!(!like(b"100\\%", b"100x", Some(b'\\')));
-        assert!(like(b"a\\_c", b"a_c", Some(b'\\')));
-        assert!(!like(b"a\\_c", b"abc", Some(b'\\')));
+        assert!(like(b"100\\%", b"100%", Some(b"\\".as_slice())));
+        assert!(!like(b"100\\%", b"100x", Some(b"\\".as_slice())));
+        assert!(like(b"a\\_c", b"a_c", Some(b"\\".as_slice())));
+        assert!(!like(b"a\\_c", b"abc", Some(b"\\".as_slice())));
     }
 
     /// `GLOB` is case-sensitive and has its own wildcards and classes.

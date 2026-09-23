@@ -604,6 +604,28 @@ impl VfsFile for SimFile {
                 let keep = input.len() / 2;
                 payload = input.get(..keep).unwrap_or(&[]);
             }
+            // **The write lands whole, one write further on than it was
+            // addressed, and says it succeeded** (task-2066 section 4.4.8).
+            // One length along rather than an arbitrary offset, because the
+            // engine writes a page at a time: that puts page N's bytes exactly
+            // where page N+1 belongs, which is the shape a drive's own
+            // remapping produces and the only one where both pages still pass
+            // their own checksum. Nothing is written where it was asked for,
+            // so the damage is two pages rather than one, which is also what
+            // the real fault does.
+            if failure == Failure::Misdirected {
+                let elsewhere = offset.saturating_add(input.len() as u64);
+                guard(&self.inode.image).write(self.state.config.model, elsewhere, input);
+                self.state.trace.record(
+                    current_actor().0,
+                    "write",
+                    &self.path.display(),
+                    elsewhere,
+                    input.len() as u64,
+                    "misdirected",
+                );
+                return Ok(());
+            }
             if failure == Failure::Crash {
                 self.state.powered_off.store(true, Ordering::SeqCst);
                 return Err(VfsError::new(

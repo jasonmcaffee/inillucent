@@ -29,6 +29,23 @@ ORDER  BY vector_distance_cos(v, ?1)
 LIMIT  10;
 ```
 
+**That query does not use the index.** `mode` defaults to `exact`, which is a linear scan over
+every row, and the HNSW graph the `CREATE INDEX` built is opt in. The scan is the correct answer by
+construction and it is the slow one, so the query a reader copies out of here should say which it
+wants:
+
+```sql
+SELECT id, body
+FROM   passage
+WHERE  mode = 'approximate'
+ORDER  BY vector_distance_cos(v, ?1)
+LIMIT  10;
+```
+
+Which of the two ought to be the default is a decision rather than a defect, and it is open
+(task-2066 section 4.3.8). Until it is made, every example on this page names the mode it is using
+rather than leaving a reader to find out from a benchmark.
+
 ### Writing a vector
 
 A `VECTOR(N)` column holds N finite 32-bit floats. Three spellings reach it, and they store the same

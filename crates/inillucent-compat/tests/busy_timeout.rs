@@ -48,6 +48,18 @@
 //! and without one it **is not** and the refusal names the holder and the
 //! budget. The sleeps decide when the contention ends; nothing reads a duration
 //! and compares it to a bound.
+//!
+//! ## The completion marker is sent after the holder lets go
+//!
+//! A marker is a statement, so it takes the file's read lock on its way in. It
+//! used to be sent with the contended statement, and it printed because a
+//! reader waited the `DEFAULT_BUSY_MILLIS` constant whatever its own
+//! `busy_timeout` said. Once a reader honours its own budget (task-2066
+//! section 4.2, item 23), a marker on a connection set to zero is refused
+//! while the holder is still there - a marker that never arrives, and three
+//! cases that hang rather than fail. So the marker goes after the commit, and
+//! what it marks is that the shell has worked through everything sent before
+//! it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -267,16 +279,131 @@ fn contend(shell: &Path, database: &Path, timeout_ms: u64) -> String {
     // The second writer meets it busy. Its answer is read after the holder has
     // let go, because a timeout long enough to wait is still waiting now.
     second.send("INSERT INTO note (who) VALUES ('second');");
-    second.send("SELECT 'second-is-done';");
     std::thread::sleep(HELD);
 
     holder.send("COMMIT;");
     holder.finish();
 
+    // **The marker is sent after the holder has let go, and it used to be sent
+    // with the statement it marks.** A marker is a statement like any other, so
+    // it takes the file's read lock on its way in - and once a reader honours
+    // its own `PRAGMA busy_timeout` (task-2066 section 4.2, item 23) a marker
+    // on a connection with a budget of zero is refused while the holder is
+    // still there, which is a marker that never arrives. It waited five seconds
+    // on the `DEFAULT_BUSY_MILLIS` constant before that and printed, so the
+    // choreography was resting on the defect.
+    second.send("SELECT 'second-is-done';");
     let printed = second.until("second-is-done");
     let complained = second.errors();
     second.finish();
     format!("{printed}{complained}")
+}
+
+/// Runs one arm with a **reader** instead of a second writer.
+///
+/// The same choreography as [`contend`] - the second connection opens first,
+/// on a file nobody holds, so its open never contends and the pragma it sets
+/// is the one under test - with a `SELECT` in place of the `INSERT`.
+///
+/// @param shell - the built `inillucent-shell`
+/// @param database - the file
+/// @param timeout_ms - what the reader sets `PRAGMA busy_timeout` to
+/// @returns everything the reader printed while it contended
+fn read_while_held(shell: &Path, database: &Path, timeout_ms: u64) -> String {
+    let mut reader = Fed::start(shell, database);
+    reader.send(&format!("PRAGMA busy_timeout = {timeout_ms};"));
+    reader.send("SELECT 'reader-is-open';");
+    reader.until("reader-is-open");
+
+    let mut holder = Fed::start(shell, database);
+    holder.send("BEGIN IMMEDIATE;");
+    holder.send("INSERT INTO note (who) VALUES ('holder');");
+    holder.send("SELECT 'holder-has-it';");
+    holder.until("holder-has-it");
+    std::thread::sleep(SETTLING);
+
+    reader.send("SELECT 'counted=' || count(*) FROM note;");
+    std::thread::sleep(HELD);
+
+    holder.send("COMMIT;");
+    holder.finish();
+
+    // After the holder has let go, for the reason `contend` gives above.
+    reader.send("SELECT 'reader-is-done';");
+    let printed = reader.until("reader-is-done");
+    let complained = reader.errors();
+    reader.finish();
+    format!("{printed}{complained}")
+}
+
+/// **A reader given a timeout waits for a busy file and then reads.**
+///
+/// `begin_read` raised the shared lock through `Pool::lock`, which waits the
+/// `DEFAULT_BUSY_MILLIS` constant - so the reader's own `PRAGMA busy_timeout`
+/// governed nothing (task-2066 section 4.2, item 23). Measured: with one
+/// process inside `BEGIN IMMEDIATE`, a second process's
+/// `SELECT count(*)` spent 5.4 seconds and returned `Error [busy]`, whatever
+/// its timeout had been set to. `set_busy_millis` had been pushing the pragma
+/// into this object since task-1979 and only the write path read it.
+///
+/// The value asserted is the count the reader printed, not a duration.
+#[test]
+fn a_reader_with_a_timeout_waits_and_then_reads() {
+    let (Some(binary), Some(shell)) = (program("inillucent"), program("inillucent-shell")) else {
+        return;
+    };
+    let directory = area("reader-waits");
+    let database = prepared(&binary, &directory);
+
+    let printed = read_while_held(&shell, &database, 30_000);
+    assert!(
+        !printed.to_ascii_lowercase().contains("another process"),
+        "a reader with a thirty second timeout was refused:
+{printed}"
+    );
+    assert!(
+        printed.contains("counted=1"),
+        "the reader waited and did not read the holder's committed row:
+{printed}"
+    );
+    assert_eq!(
+        rows_by(&binary, &database, "holder"),
+        1,
+        "the holder's row is not in the table, so nothing was holding the file and this case          was not about contention at all"
+    );
+}
+
+/// **A reader given no timeout is refused at once, and the refusal names its
+/// budget.**
+///
+/// The arm that separates "the reader waits" from "the reader waits five
+/// seconds whatever it was told": a refusal naming `5000 ms` here is the
+/// constant, and a refusal naming `0 ms` is the pragma.
+#[test]
+fn a_reader_with_no_timeout_is_refused_and_names_its_budget() {
+    let (Some(binary), Some(shell)) = (program("inillucent"), program("inillucent-shell")) else {
+        return;
+    };
+    let directory = area("reader-refused");
+    let database = prepared(&binary, &directory);
+
+    let printed = read_while_held(&shell, &database, 0);
+    let refusal = printed.to_ascii_lowercase();
+    assert!(
+        refusal.contains("another process holds the file"),
+        "a reader with `PRAGMA busy_timeout = 0` was not refused:
+{printed}"
+    );
+    assert!(
+        refusal.contains("0 ms pragma busy_timeout"),
+        "the refusal does not name the reader's own budget, so the wait was the          DEFAULT_BUSY_MILLIS constant rather than this pragma:
+{printed}"
+    );
+    assert!(
+        refusal.contains("wanted it for reading"),
+        "the refusal does not say this connection wanted the file for reading:
+{printed}"
+    );
 }
 
 /// A writer given a timeout waits for a busy file and then writes.

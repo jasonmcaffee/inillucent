@@ -105,7 +105,7 @@ impl Default for Backing {
 /// @param file - the open file
 /// @param offset - where to read from
 /// @param output - where the bytes go
-fn read_exact_at(file: &File, offset: u64, output: &mut [u8]) -> io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, offset: u64, output: &mut [u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;

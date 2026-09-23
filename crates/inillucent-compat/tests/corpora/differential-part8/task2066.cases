@@ -1,0 +1,27 @@
+# Differential cases, category `task2066`, from the audit in task-2066 section 4.2.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+#
+# Later than the rest of this corpus, which is task-1979's. They are here rather
+# than in a suite of their own because the mechanism is the one that fits: the
+# statements are whole scripts, they are graded against the pinned 3.53.4 shell
+# rather than against a number somebody wrote down, and `allow.list` is where a
+# difference that is not fixed has to be named.
+t2066-001	SELECT date('2024-1-1'), date('2024-01-1'), date('2024-1-01')
+t2066-002	SELECT date('02024-01-01'), date('2024-001-01'), date('2024-01-001')
+t2066-003	SELECT date(' 2024-01-01'), date('2024-01-01 ')
+t2066-004	SELECT time('1:2:3'), time('01:02:03'), time('01:02:03.5')
+t2066-005	SELECT datetime('2024-01-01 1:00:00'), datetime('2024-01-01 01:00:00')
+t2066-006	SELECT printf('%.20f', 1.0/3)
+t2066-007	SELECT printf('%.20f', 2.0/3)
+t2066-008	SELECT printf('%.25f', 1.0/7)
+t2066-009	SELECT printf('%.20f', 1.0), printf('%.4f', 1.0/3), printf('%.0f', 2.5)
+t2066-010	SELECT strftime('%J','2020-01-01')
+t2066-011	SELECT 'a%b' LIKE 'a\%b' ESCAPE '\', 'a_b' LIKE 'a\_b' ESCAPE '\'
+t2066-012	SELECT 'a%b' LIKE 'a%b' ESCAPE ''
+t2066-013	SELECT like('a%b','a%b','ab')
+t2066-014	SELECT 'a%b' LIKE 'a%b' ESCAPE 'ab'
+t2066-015	SELECT length(randomblob(2000000)), length(zeroblob(2000000))
+t2066-016	SELECT length(randomblob(1)), length(randomblob(0)), length(randomblob(-1))
+t2066-017	CREATE TABLE t (a INTEGER CHECK (a > 0), b INTEGER CHECK (b > 100));\nINSERT INTO t VALUES (1, 5);
+t2066-018	CREATE TABLE t (a INTEGER, b INTEGER, CONSTRAINT first CHECK (a > 0), CONSTRAINT second CHECK (b > 100));\nINSERT INTO t VALUES (1, 5);

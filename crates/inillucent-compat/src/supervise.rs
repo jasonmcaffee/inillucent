@@ -614,6 +614,17 @@ mod tests {
                 // The rule itself is checked exactly by
                 // `the_kill_rule_needs_both_conditions`, which has no clock in
                 // it; this one checks that the rule is wired to the loop.
+                //
+                // **It has been seen to fail once, and the load that did it is
+                // worth knowing** (task-2066). On 2026-09-23 this box was
+                // carrying two other tickets' full suites, a third copy of the
+                // nightly stories under `cargo llvm-cov --release`, and this
+                // ticket's own gate - four concurrent runs rather than the two
+                // the paragraph above is sized for. It passed three times in a
+                // row immediately afterwards on the same build. The threshold
+                // was deliberately **not** raised: the stated design point was
+                // exceeded rather than wrong, and widening a guard to cover a
+                // load nobody should create is how a guard stops guarding.
                 silence: Duration::from_secs(2),
                 drain: Duration::from_secs(2),
             },

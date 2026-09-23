@@ -211,6 +211,42 @@ pub fn sync_directory(path: &DbPath) -> VfsResult<()> {
         .map_err(|error| VfsError::from_io(VfsOperation::DirSync, &error))
 }
 
+/// Flushes a file the strongest way this platform can.
+///
+/// **On Darwin that is `fcntl(F_FULLFSYNC)` and not `fsync`** (task-2066
+/// section 4.2, item 19). `fsync(2)` on macOS returns once the bytes have
+/// reached the drive, which on a drive with a volatile write cache says
+/// nothing about whether they survive a power loss; `F_FULLFSYNC` asks the
+/// drive to flush that cache, and it is the barrier Apple documents and the
+/// one SQLite's `PRAGMA fullfsync` reaches for. macOS is a shipped target.
+///
+/// A filesystem that does not implement it answers `ENOTSUP` - a network
+/// mount, and some others - and the fallback is `fsync`, which is what SQLite
+/// does in the same case. On every other Unix `sync_all` already is the
+/// strongest barrier the platform offers.
+///
+/// @param file - the file to flush
+pub fn full_sync(file: &File) -> std::io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: `fcntl` with `F_FULLFSYNC` takes no argument beyond the
+        // descriptor, and the descriptor is one this borrowed `File` owns and
+        // keeps open for the length of the call.
+        let answer = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) };
+        if answer != -1 {
+            return Ok(());
+        }
+        let why = std::io::Error::last_os_error();
+        // Anything other than "this filesystem does not do that" is a real
+        // failure to report, not a reason to reach for the weaker barrier.
+        if why.raw_os_error() != Some(libc::ENOTSUP) {
+            return Err(why);
+        }
+    }
+    file.sync_all()
+}
+
 /// Fills `output` with randomness from the kernel.
 pub fn system_randomness(output: &mut [u8]) -> VfsResult<()> {
     if output.is_empty() {

@@ -53,6 +53,57 @@ fn connect() -> Connection {
     connection
 }
 
+/// Whether this build registered `embed` at all, said once per process.
+///
+/// **`coverage.mjs` is why this exists** (task-2066). It runs
+/// `cargo test --tests --release --workspace` with no features, because
+/// `inillucent-engine/embed` reaches `inillucent-core/onnx` and the coverage run
+/// excludes `inillucent-core` on purpose - a machine with no model measures it
+/// as zero. So every case in this file ran without the function they are about
+/// and failed, which took the exit code of the whole documented coverage command
+/// with it. It had been doing that since this file arrived on 2026-09-17 and was
+/// found six days later by the first person to run the command.
+///
+/// **A skip is not the green-that-checked-nothing this file's header warns
+/// about.** That warning is about a file quietly testing "an unknown function is
+/// an unknown function" and reporting success. This says out loud that it did
+/// not run, `--strict` turns it into a failure, and the target's `features` row
+/// in `tests/selection.toml` means the runner always builds it with `embed` -
+/// so the only build that skips is one that deliberately left the feature out.
+///
+/// **The probe prepares rather than runs**, which is the same thing
+/// `a_statement_may_name_embed` relies on and for the same reason: binding is
+/// where the policy is applied, and running is where the 275 MB model would be
+/// loaded. A build with the feature and no model on disk prepares this exactly
+/// as one with the model does.
+///
+/// A `CHECK` constraint is the wrong probe and was tried first: this engine
+/// stores a schema expression as text and binds it on the write, so
+/// `CREATE TABLE ... CHECK (embed(...))` is *accepted* and says nothing about
+/// whether the function exists.
+fn embed_is_registered() -> bool {
+    let connection = connect();
+    match connection.prepare("SELECT embed('hello')") {
+        Ok(_) => true,
+        Err(error) => !error.message().contains("no embedding support compiled in"),
+    }
+}
+
+/// Opens a connection, or says why these cases did not run.
+///
+/// See [`embed_is_registered`].
+fn connect_or_skip() -> Option<Connection> {
+    if !embed_is_registered() {
+        inillucent_compat::differential::skipping(
+            "this build has no embedding support compiled in, so there is no `embed` to \
+             refuse; build with `inillucent-engine/embed`, which `tests/selection.toml` \
+             declares for this target",
+        );
+        return None;
+    }
+    Some(connect())
+}
+
 /// Asserts a statement is refused for naming `embed` from a schema.
 ///
 /// @param connection - the connection to run it on
@@ -79,7 +130,9 @@ fn refused_as_schema(connection: &Connection, sql: &str, what: &str) {
 /// the table, inside the statement that creates the index."
 #[test]
 fn an_index_expression_may_not_name_embed() {
-    let connection = connect();
+    let Some(connection) = connect_or_skip() else {
+        return;
+    };
     refused_as_schema(
         &connection,
         "CREATE INDEX note_vec ON note (embed(body))",
@@ -94,7 +147,9 @@ fn an_index_expression_may_not_name_embed() {
 /// is the statement that would have loaded the model.
 #[test]
 fn a_check_constraint_may_not_name_embed() {
-    let connection = connect();
+    let Some(connection) = connect_or_skip() else {
+        return;
+    };
     connection
         .execute("CREATE TABLE guarded (b TEXT CHECK (length(embed(b)) > 0))")
         .expect("the table is stored");
@@ -108,7 +163,9 @@ fn a_check_constraint_may_not_name_embed() {
 /// A generated column may not name `embed`.
 #[test]
 fn a_generated_column_may_not_name_embed() {
-    let connection = connect();
+    let Some(connection) = connect_or_skip() else {
+        return;
+    };
     connection
         .execute("CREATE TABLE doc (b TEXT, v BLOB GENERATED ALWAYS AS (embed(b)) STORED)")
         .expect("the table is stored");
@@ -128,7 +185,9 @@ fn a_generated_column_may_not_name_embed() {
 /// model does.
 #[test]
 fn a_statement_may_name_embed() {
-    let connection = connect();
+    let Some(connection) = connect_or_skip() else {
+        return;
+    };
     connection
         .prepare("SELECT embed('hello')")
         .expect("a statement may call embed");
@@ -146,7 +205,9 @@ fn a_statement_may_name_embed() {
 /// had not turned the pragma off, which is every machine.
 #[test]
 fn a_trusted_schema_may_not_name_embed() {
-    let connection = connect();
+    let Some(connection) = connect_or_skip() else {
+        return;
+    };
     let trusted = connection
         .query("PRAGMA trusted_schema")
         .expect("answers")

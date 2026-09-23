@@ -487,8 +487,6 @@ pub(crate) struct CachedQuery {
     /// mutability is what lets one execution build the chain and a later one,
     /// through the same `Rc`, find it already there.
     pub(crate) slot: std::cell::RefCell<physical::Slot>,
-    /// The result column names, decoded once (task-2066 §4.3.5).
-    pub(crate) names: std::rc::Rc<Vec<String>>,
 }
 
 impl CachedQuery {
@@ -497,12 +495,10 @@ impl CachedQuery {
     /// @param plan - the planner's output
     /// @param prepared - the structural choice `prepare` made
     pub(crate) fn new(plan: PhysicalPlan, prepared: physical::Prepared) -> CachedQuery {
-        let names = std::rc::Rc::new(column_names(&plan));
         CachedQuery {
             plan: Box::new(plan),
             prepared: Box::new(prepared),
             slot: std::cell::RefCell::new(physical::Slot::default()),
-            names,
         }
     }
 }

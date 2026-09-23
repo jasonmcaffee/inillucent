@@ -257,6 +257,203 @@ fn a_recovered_database_is_no_longer_than_its_header_says() {
     );
 }
 
+/// **A page count no file could have is refused, and the refusal names it.**
+///
+/// `page_count` was decoded and never compared against anything. A
+/// 163,840-byte file with both meta pages carrying a `PAGE_COUNT` of 2^60 and
+/// both checksums resealed answered `SELECT count(*)` with 10, answered
+/// `integrity-check` with `ok`, and accepted an `INSERT` - every one of them
+/// exit 0 (task-2066 section 4.2, item 16). The number is not decoration:
+/// `paged::cursor` bounds the leaf sibling chain by `pool.page_count()`, so an
+/// inflated one disables that cycle guard as well.
+///
+/// **The forged header is the case, and truncation is not, because truncation
+/// is not a wrong page count.** The first version of this cut the file in half
+/// and asserted the header was refused for describing more pages than the file
+/// holds. That check is unsound here: the file grows when a page is *written*
+/// and the count grows when a page is *allocated*, so a page allocated and
+/// never written leaves the count ahead of the file for ever - which is the
+/// leak state `new_engine_page_ownership`'s
+/// `the_leak_report_names_a_page_no_tree_reaches` builds on purpose. It caught
+/// this, refusing a healthy database with "the header claims 6 pages but the
+/// file holds 5". What is left that no file can have is a count whose byte
+/// length does not fit in a `u64`, and that is what the audit forged.
+///
+/// It belongs beside `a_recovered_database_is_no_longer_than_its_header_says`
+/// rather than in `corruption.rs`, whose corpus is SQLite format files read
+/// through `inillucent-storage`; this is the native format's own header.
+#[test]
+fn a_page_count_no_file_could_have_is_refused_by_name() {
+    let root = inillucent_compat::workspace_root().join("_agent_output/durability");
+    let _ = std::fs::create_dir_all(&root);
+    let whole = build_a_small_database(&root, "forged-count");
+
+    let forged = root.join(format!("{}-forged-count-cut.rdb", std::process::id()));
+    std::fs::write(&forged, forge_the_page_count(&whole, 1u64 << 60))
+        .expect("the forged file is written");
+
+    let refusal = inillucent_compat::facade::Database::open(&forged)
+        .err()
+        .map(|error| error.message().to_string())
+        .expect("a page count no file could have must be refused");
+    assert!(
+        refusal.contains("1152921504606846976"),
+        "the refusal did not name the count it turned away: {refusal}"
+    );
+    assert!(
+        refusal.contains("longer than any file"),
+        "the refusal did not say why the count is impossible: {refusal}"
+    );
+
+    // The control: the same fixture, unforged, opens and reads. Without it a
+    // refusal of everything would pass the arm above.
+    let good = root.join(format!("{}-forged-count-control.rdb", std::process::id()));
+    std::fs::write(&good, &whole).expect("the control file is written");
+    assert!(
+        reads_back(&good),
+        "the unforged fixture does not read back, so the arm above proves nothing"
+    );
+}
+
+/// Returns a copy of a database with both meta pages claiming a page count.
+///
+/// **Both, and both resealed**, which is what makes it the audit's case rather
+/// than a damaged file: `Meta::choose` reads the higher generation of the two
+/// and a checksum that no longer matches is caught by the decoder, so a forgery
+/// that left either alone would be refused for a reason that is not the count.
+///
+/// @param whole - the pristine bytes
+/// @param claimed - the page count to write into both meta pages
+fn forge_the_page_count(whole: &[u8], claimed: u64) -> Vec<u8> {
+    let mut bytes = whole.to_vec();
+    for page in 0..2usize {
+        let at = page.saturating_mul(PAGE_SIZE);
+        let Some(slice) = bytes.get(at..at.saturating_add(PAGE_SIZE)) else {
+            continue;
+        };
+        let Ok(mut meta) = inillucent_pool::meta::Meta::decode(slice) else {
+            continue;
+        };
+        meta.page_count = claimed;
+        let mut page_bytes = vec![0u8; PAGE_SIZE];
+        meta.encode(&mut page_bytes).expect("the meta page encodes");
+        if let Some(slot) = bytes.get_mut(at..at.saturating_add(PAGE_SIZE)) {
+            slot.copy_from_slice(&page_bytes);
+        }
+    }
+    bytes
+}
+
+/// **A flipped bit in a page's LSN is not detected, and a flipped bit next to
+/// it is.** This test records the gap; the format ticket closes it.
+///
+/// `page_checksum` covers `page[12..]` - the kind, the flags, the level, the
+/// tree, the right sibling and the body - and the LSN is bytes 0..8, outside
+/// it (task-2066 section 4.2, item 17, and section 9 item 2). The LSN is the
+/// one field whose corruption loses rows silently, and `meta.rs` already says
+/// so: a page carrying a stamp from a stream that no longer exists swallows
+/// every later write to it, because redo skips a record whose LSN is not above
+/// the page's. The file stays structurally intact and `PRAGMA integrity_check`
+/// answers `ok` about a row that is gone.
+///
+/// Covering it is a change to the file format, under the `FORMAT_VERSION` rule at
+/// `meta.rs:30` - `page[0..8] ++ page[12..]`, the same split `meta.rs`'s own
+/// checksum already uses to skip its checksum field - so this ticket does not
+/// make it. What this case does is hold the difference still: the control
+/// arm proves the checksum works, so when the format ticket lands, this test
+/// fails on the first arm and is the one place that has to be edited to say
+/// the gap is closed.
+#[test]
+fn a_flipped_page_lsn_is_not_detected_and_a_flipped_body_byte_is() {
+    let root = inillucent_compat::workspace_root().join("_agent_output/durability");
+    let _ = std::fs::create_dir_all(&root);
+
+    let built = build_a_small_database(&root, "lsn-gap");
+    let outside = flip_one_byte_of_a_page(&root, "lsn-outside", &built, 0);
+    assert!(
+        reads_back(&outside),
+        "a flipped LSN byte was detected, so the checksum now covers bytes 0..8 - which is the          format change task-2066 section 9 item 2 hands to the format ticket. Delete this arm,          keep the control below, and record it there"
+    );
+
+    // The control, and the reason the arm above is a statement about the LSN
+    // rather than about a checksum that does not work: one byte further into
+    // the same page is covered, and is refused.
+    let inside = flip_one_byte_of_a_page(&root, "lsn-inside", &built, 12);
+    assert!(
+        !reads_back(&inside),
+        "a flipped byte inside the checksummed region was not detected, so the page checksum is          not working at all and the arm above says nothing"
+    );
+}
+
+/// Builds a small database at this file's own page size and returns its bytes.
+///
+/// **`PAGE_SIZE` explicitly, because the caller does arithmetic on it.** The
+/// byte a page's header starts at is `page * PAGE_SIZE`, and a fixture built
+/// at whatever page size an open happened to choose would have the damage
+/// land somewhere else.
+///
+/// @param root - where the scratch files go
+/// @param tag - what to name this one
+fn build_a_small_database(root: &std::path::Path, tag: &str) -> Vec<u8> {
+    let file = root.join(format!("{}-{tag}.rdb", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    {
+        let vfs: Arc<dyn Vfs> = Arc::new(inillucent_vfs::os::OsVfs::new());
+        let mut engine = ImportedDatabase::create_on(vfs, file.clone(), PAGE_SIZE, FRAMES)
+            .expect("the database is created");
+        exec(&mut engine, "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)")
+            .expect("the schema is created");
+        for row in 0..200 {
+            exec(
+                &mut engine,
+                &format!("INSERT INTO t VALUES({row}, 'row {row}')"),
+            )
+            .expect("a row is inserted");
+        }
+        engine.checkpoint().expect("the log is folded in");
+    }
+    std::fs::read(&file).expect("the database reads")
+}
+
+/// Writes a copy of a database with one byte of page 2 flipped.
+///
+/// Page 2 because pages 0 and 1 are the meta pages, which carry a checksum of
+/// their own over a different span.
+///
+/// @param root - where the scratch files go
+/// @param tag - what to name this copy
+/// @param whole - the pristine bytes
+/// @param offset - the byte inside page 2's header to flip
+fn flip_one_byte_of_a_page(
+    root: &std::path::Path,
+    tag: &str,
+    whole: &[u8],
+    offset: usize,
+) -> PathBuf {
+    let mut bytes = whole.to_vec();
+    let at = PAGE_SIZE.saturating_mul(2).saturating_add(offset);
+    if let Some(byte) = bytes.get_mut(at) {
+        *byte ^= 0x40;
+    }
+    let file = root.join(format!("{}-{tag}.rdb", std::process::id()));
+    std::fs::write(&file, &bytes).expect("the damaged copy is written");
+    file
+}
+
+/// Reports whether every row of the fixture reads back.
+///
+/// @param file - the database to read
+fn reads_back(file: &std::path::Path) -> bool {
+    let vfs: Arc<dyn Vfs> = Arc::new(inillucent_vfs::os::OsVfs::new());
+    let Ok(mut engine) = ImportedDatabase::open_on(vfs, file.to_path_buf(), PAGE_SIZE, FRAMES)
+    else {
+        return false;
+    };
+    engine
+        .execute_any("SELECT count(*) FROM t", &Params::new())
+        .is_ok()
+}
+
 /// Returns the path every run uses.
 fn path() -> PathBuf {
     PathBuf::from("app.db")

@@ -869,3 +869,36 @@ fn held_rows(connection: &inillucent_compat::facade::Connection) -> String {
         })
         .unwrap_or_else(|| "no counter at all".to_string())
 }
+
+/// **`randomblob(n)` answers n bytes, or refuses by name.**
+///
+/// It used to do neither above 1,000,000. `random_blob` clamped at that number
+/// - one eight hundredth of the bound the same connection applies to
+/// `zeroblob`, and not a number SQLite has anywhere - so
+/// `SELECT length(randomblob(2000000))` answered 1000000 and the caller was
+/// told it had the two megabytes it asked for (task-2066 section 4.2,
+/// item 20).
+///
+/// The two assertions are the two halves of the fix and neither alone is the
+/// behaviour: a build that removed the clamp and did not refuse would allocate
+/// whatever an argument named, and a build that refused everything above a
+/// megabyte would still be answering a question nobody asked. The refusing
+/// case is at `Limit::Length`'s default, 1,000,000,000, which is the bound a
+/// connection has when nothing lowered it.
+#[test]
+fn randomblob_honours_the_value_length_limit() {
+    let connection = connect();
+    assert_eq!(
+        single(&connection, "SELECT length(randomblob(2000000))"),
+        Some(2_000_000),
+        "randomblob answered a different size than it was asked for"
+    );
+    let refusal = connection
+        .query("SELECT length(randomblob(1073741824))")
+        .expect_err("a blob past the value bound must be refused");
+    assert!(
+        refusal.message().contains("too big"),
+        "randomblob past the value bound was refused by something else: {}",
+        refusal.message()
+    );
+}

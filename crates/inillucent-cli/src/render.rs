@@ -269,10 +269,7 @@ fn csv(layout: &Layout, columns: &[String], rows: &[Vec<Value<'static>>]) -> Vec
         );
     }
     for row in rows {
-        let cells: Vec<String> = row
-            .iter()
-            .map(|value| csv_field(&plain(layout, value)))
-            .collect();
+        let cells: Vec<String> = row.iter().map(|value| csv_cell(layout, value)).collect();
         out.push(cells.join(","));
     }
     // The caller writes a newline after each line, so a row separator of
@@ -314,12 +311,33 @@ const CRLF: &str = "\r\n";
 /// The carriage return half of it.
 const CR: char = '\r';
 
+/// Renders one value as a CSV field.
+///
+/// @param layout - the mode's settings, for `nullvalue`
+/// @param value - the cell
+fn csv_cell(layout: &Layout, value: &Value<'static>) -> String {
+    let text = plain(layout, value);
+    // **An empty field that is not NULL is quoted, which is how the two are
+    // told apart** (task-2066 section 4.2, item 27). A BLOB is printed as a C
+    // string and stops at its first NUL, so a blob beginning with one rendered
+    // as nothing at all - and so does a NULL under the default `nullvalue`,
+    // which is the empty string. The reference writes two quotes for the
+    // first and nothing for the second, so an exported blob could be read back
+    // as a NULL.
+    if text.is_empty() && !value.is_null() {
+        return "\"\"".to_string();
+    }
+    csv_field(&text)
+}
+
 /// Quotes one CSV field, if it needs it.
 ///
 /// The separator, a quote and a line break all force quoting, and so does a
 /// control character - it has already been turned into caret notation by the
 /// time this sees it, and quoting is how the reference marks that the field was
 /// not plain text to begin with.
+///
+/// @param text - the rendered field
 fn csv_field(text: &str) -> String {
     let needs = text.contains(',')
         || text.contains('"')
@@ -760,6 +778,34 @@ mod tests {
         assert_eq!(csv_field("plain"), "plain");
         assert_eq!(csv_field("a,b"), "\"a,b\"");
         assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    /// **An empty CSV field that is not NULL is quoted, and a NULL is not.**
+    ///
+    /// A blob is printed as a C string and stops at its first NUL, so a blob
+    /// beginning with one rendered as nothing at all - and so does a NULL
+    /// under the default `nullvalue`, which is the empty string. The reference
+    /// writes two quotes for the first and nothing for the second, so an
+    /// exported blob was indistinguishable from a NULL on the way back in
+    /// (task-2066 section 4.2, item 27).
+    #[test]
+    fn csv_tells_an_empty_value_from_a_null() {
+        let columns = vec!["x".to_string()];
+        let rows = vec![
+            vec![Value::Null],
+            vec![Value::owned_blob(&[0, 1, 2]).expect("owns")],
+            vec![Value::owned_text(b"").expect("owns")],
+            vec![Value::owned_text(b"kept").expect("owns")],
+        ];
+        let layout = Layout {
+            mode: Mode::Csv,
+            separator: ",".to_string(),
+            ..Layout::default()
+        };
+        assert_eq!(
+            render(&layout, &columns, &rows),
+            vec!["", "\"\"", "\"\"", "kept"]
+        );
     }
 
     /// A control character is escaped and a NUL ends the value.

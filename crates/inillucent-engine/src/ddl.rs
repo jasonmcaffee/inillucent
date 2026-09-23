@@ -372,8 +372,9 @@ impl ImportedDatabase {
             Directive::Pragma {
                 ref name,
                 ref argument,
+                database,
                 ..
-            } => self.pragma(name, argument.as_ref()),
+            } => self.pragma(name, argument.as_ref(), database),
             Directive::Rollback { savepoint } => match savepoint {
                 Some(name) => {
                     self.rollback_to(&name)?;

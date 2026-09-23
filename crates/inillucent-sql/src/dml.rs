@@ -1157,6 +1157,7 @@ impl<'a> Binder<'a> {
             // re-pointing afterwards would be two chances to disagree.
             let inner = self.view_query(&table, term.span)?;
             let source = BoundSource {
+                index_hint: crate::ast::IndexHint::None,
                 id: self.sources.len(),
                 rows: crate::bind::SourceRows::Subquery(Box::new(inner)),
                 table: std::rc::Rc::new(table.clone()),
@@ -1273,6 +1274,7 @@ impl<'a> Binder<'a> {
     fn push_write_source(&mut self, table: TableInfo, alias: Vec<u8>) -> usize {
         let id = self.sources.len();
         self.sources.push(BoundSource {
+            index_hint: crate::ast::IndexHint::None,
             id,
             rows: crate::bind::SourceRows::Table,
             table: std::rc::Rc::new(table),

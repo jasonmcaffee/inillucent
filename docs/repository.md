@@ -130,7 +130,7 @@ table.
 |---|---:|---|
 | `oracle` | 31 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
 | `programs` | 24 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
-| `shell` | 7 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
+| `shell` | 8 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
 | `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
 | `python` | 3 | a Python interpreter with `ssl`, for the TLS server, the `ctypes` conformance runner and the Nikaya workload extractor |
@@ -139,6 +139,7 @@ table.
 | `go` | 1 | a Go toolchain, for the Go wrapper's conformance runner: https://go.dev/dl/ |
 | `php` | 1 | a PHP interpreter, for the PHP wrapper's conformance runner: https://www.php.net/downloads |
 | `asan` | 1 | a toolchain with the address sanitizer, which is nightly on every platform and absent on Windows |
+| `embed` | 1 | a build with `inillucent-engine/embed` compiled in, which is what registers `embed(TEXT)` as a name to refuse. The runner builds it from the target's `features` row; `tools/coverage.mjs` does not, because the feature reaches `inillucent-core/onnx` and that crate is excluded from the coverage run |
 | `baseline` | 1 | a recorded performance baseline: `cargo run -p inillucent-compat --bin inillucent-baseline -- capture` |
 | `btree-corpus` | 1 | the retained sequences under `compat/corpus/btree/`, which are tracked |
 | `capi` | 1 | the C ABI shared library, built by `cargo build -p inillucent-driver-capi` into this run's own target directory |

@@ -335,6 +335,103 @@ fn the_media_model_follows_its_declaration() {
     );
 }
 
+/// **A misdirected write lands whole, one page along, and says it succeeded.**
+///
+/// The one damage a checksum per page cannot catch (task-2066 section 4.4.8):
+/// nothing is torn, so both pages read back as well formed pages, and what is
+/// wrong is which one is where. The three assertions are the three halves of
+/// that: the caller was told it worked, the bytes it asked to write are not
+/// where it asked, and they are exactly one write further on.
+#[test]
+fn a_misdirected_write_lands_one_write_further_on() {
+    let vfs = simulator(41);
+    // **Armed before the first write, because `Nth` counts every write to the
+    // site.** Arming it after the fixture is built asks for a write that has
+    // already gone by, and nothing is then injected at all - which the first
+    // version of this case did, and it passed its "success was reported"
+    // assertion while measuring an ordinary write.
+    vfs.failpoints()
+        .set(Site::Write, Policy::Nth(3, Failure::Misdirected));
+    let path = DbPath::from("/sim/misdirected.db");
+    let file = vfs
+        .open(&path, OpenOptions::main_db())
+        .expect("the database opens");
+    file.write_all_at(0, &[0xAA; 512])
+        .expect("the first write lands where it was asked");
+    file.write_all_at(512, &[0xBB; 512])
+        .expect("the second write lands where it was asked");
+    file.write_all_at(0, &[0xCC; 512])
+        .expect("a misdirected write reports success");
+    file.sync(SyncMode::Full).expect("the sync succeeds");
+    drop(file);
+
+    let snapshot = vfs.crash();
+    let bytes = snapshot
+        .files
+        .get(std::path::Path::new("/sim/misdirected.db"))
+        .expect("the file is in the snapshot");
+    assert!(
+        bytes.iter().take(512).all(|byte| *byte == 0xAA),
+        "the page that was written to is the one that changed, so nothing was misdirected"
+    );
+    assert!(
+        bytes.iter().skip(512).take(512).all(|byte| *byte == 0xCC),
+        "the misdirected bytes are not one write further on"
+    );
+}
+
+/// **A sync that lies leaves the cache exactly as it was.**
+///
+/// A drive that acknowledges a cache flush it did not perform is a real
+/// device, and every durability argument in this engine rests on `sync`
+/// meaning what it says (task-2066 section 4.4.8). The control arm is the same
+/// workload on a device that does not lie, because an assertion that bytes are
+/// missing proves nothing unless the same bytes are there when the flush is
+/// honest.
+#[test]
+fn a_sync_that_lies_makes_nothing_durable() {
+    let honest = SimVfs::new(SimConfig {
+        seed: 7,
+        model: MediaModel::default(),
+        ..SimConfig::default()
+    });
+    let lying = SimVfs::new(SimConfig {
+        seed: 7,
+        model: MediaModel {
+            sync_is_a_lie: true,
+            ..MediaModel::default()
+        },
+        ..SimConfig::default()
+    });
+    let mut durable = Vec::new();
+    for vfs in [&honest, &lying] {
+        let path = DbPath::from("/sim/lying-sync.db");
+        let file = vfs
+            .open(&path, OpenOptions::main_db())
+            .expect("the database opens");
+        file.write_all_at(0, &[0x5A; 512]).expect("the write lands");
+        file.sync(SyncMode::Full).expect("the sync reports success");
+        drop(file);
+        let snapshot = vfs.crash();
+        let bytes = snapshot
+            .files
+            .get(std::path::Path::new("/sim/lying-sync.db"))
+            .cloned()
+            .unwrap_or_default();
+        durable.push(bytes.iter().take(512).filter(|byte| **byte == 0x5A).count());
+    }
+    assert_eq!(
+        durable.first().copied(),
+        Some(512),
+        "an honest sync did not make the write durable, so the control arm proves nothing"
+    );
+    assert_ne!(
+        durable.get(1).copied(),
+        Some(512),
+        "a sync that lies made the write durable anyway"
+    );
+}
+
 /// A disk-full failure, a permission failure and an interrupt must each arrive
 /// as the code SQLite uses for it, on the operation that hit it. The pager
 /// above will branch on these, so a failure that arrives as a generic I/O error

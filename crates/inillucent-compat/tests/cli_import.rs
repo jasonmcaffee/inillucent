@@ -230,3 +230,98 @@ fn loading_a_full_text_table_reports_its_rows() {
     );
     assert_eq!(scalar(&mut context, "SELECT count(*) FROM notes"), "2");
 }
+
+/// **A file that is not UTF-8 is refused for the reason it is refused.**
+///
+/// `std::fs::read_to_string` fails on a byte sequence that does not decode,
+/// and the message was `cannot open "<path>"` - which sends the reader to
+/// check the path and the permissions of a file that opens perfectly well
+/// (task-2066 section 4.2, item 24). The same file with ASCII in it imports,
+/// so the difference between the run that works and the run that does not is
+/// one byte of content, and the old message named neither content nor bytes.
+///
+/// `Café` in cp1252 is `43 61 66 E9`, and `E9` begins no UTF-8 character. The
+/// offset asserted is where the decode stopped, so a message that named a
+/// byte but the wrong one fails this too.
+#[test]
+fn a_file_that_is_not_utf8_is_refused_by_name_and_offset() {
+    let path = area().join("cp1252.csv");
+    std::fs::write(&path, b"id,name\n1,Caf\xe9\n").expect("the scratch file is written");
+    let named = path.to_string_lossy().replace('\\', "/");
+    let mut context =
+        Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens");
+    let refusal = run(
+        &mut context,
+        "import",
+        &[("file", text(named.as_str())), ("table", text("people"))],
+    )
+    .expect_err("a file that is not UTF-8 must be refused");
+    assert!(
+        refusal.contains("not valid UTF-8"),
+        "the refusal did not say why the file could not be read: {refusal}"
+    );
+    assert!(
+        refusal.contains("byte 13") && refusal.contains("0xE9"),
+        "the refusal did not name the byte that does not decode: {refusal}"
+    );
+
+    // The control: the same file with the same shape and an ASCII name loads,
+    // so the refusal above is about the encoding and not about the file.
+    let plain = written("cp1252-control.csv", "id,name\n1,Cafe\n");
+    let loaded = run(
+        &mut context,
+        "import",
+        &[("file", text(plain.as_str())), ("table", text("people"))],
+    )
+    .expect("the ASCII file loads");
+    assert_eq!(loaded.changes, 1, "the control file did not load its row");
+}
+
+/// **A quoted field holding a newline is one field, and CRLF rows are rows.**
+///
+/// Both shapes are tested on the way *out* and neither on the way in
+/// (task-2066 section 4.4.13), and they are the two a real CSV has: a spreadsheet
+/// writes CRLF, and any free-text column eventually holds a line break. A
+/// reader that split on every newline would turn one row into two and put the
+/// tail of a sentence in an `id` column, which is a load that succeeds and is
+/// wrong.
+///
+/// The row count is asserted as well as the values, because a splitter that
+/// broke the quoted field would still load *something* - and the something
+/// would be three rows rather than two.
+#[test]
+fn a_quoted_newline_is_one_field_and_crlf_rows_are_rows() {
+    let path = area().join("newlines.csv");
+    let body = "id,note\r\n1,\"first line\nsecond line\"\r\n2,plain\r\n";
+    std::fs::write(&path, body).expect("the scratch file is written");
+    let named = path.to_string_lossy().replace('\\', "/");
+
+    let mut context =
+        Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens");
+    let loaded = run(
+        &mut context,
+        "import",
+        &[("file", text(named.as_str())), ("table", text("note"))],
+    )
+    .expect("the CSV loads");
+    assert_eq!(
+        loaded.changes, 2,
+        "a quoted newline was read as a row separator: {} rows loaded where 2 were written",
+        loaded.changes
+    );
+    assert_eq!(
+        scalar(&mut context, "SELECT count(*) FROM note"),
+        "2",
+        "the table does not hold the two rows the file held"
+    );
+    assert_eq!(
+        scalar(&mut context, "SELECT note FROM note WHERE id = '1'"),
+        "first line\nsecond line",
+        "the quoted newline did not survive the load"
+    );
+    assert_eq!(
+        scalar(&mut context, "SELECT note FROM note WHERE id = '2'"),
+        "plain",
+        "the carriage return was kept as part of the value"
+    );
+}

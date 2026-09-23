@@ -757,3 +757,208 @@ fn a_source_the_reader_cannot_read_whole_is_not_published() {
         destination.display()
     );
 }
+
+/// Builds a SQLite database by feeding a script to the pinned shell.
+///
+/// @param shell - the pinned `sqlite3`
+/// @param database - the file to create
+/// @param script - the statements, one per line
+fn build_with_shell(shell: &Path, database: &Path, script: &str) -> bool {
+    let built = Command::new(shell)
+        .arg(database)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(script.as_bytes())?;
+            }
+            child.wait_with_output()
+        });
+    let Ok(output) = built else {
+        return false;
+    };
+    assert!(
+        output.status.success(),
+        "the source could not be built: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
+/// Asks the pinned shell one question and returns its lines.
+///
+/// `-noheader` and list mode, so the answer is the values and nothing around
+/// them.
+///
+/// @param shell - the pinned `sqlite3`
+/// @param database - the file to read
+/// @param sql - the statement
+fn shell_answers(shell: &Path, database: &Path, sql: &str) -> Vec<String> {
+    let Ok(output) = Command::new(shell)
+        .arg("-noheader")
+        .arg("-list")
+        .arg(database)
+        .arg(sql)
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .replace("\r\n", "\n")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Renders one value the way the shell's list mode prints it.
+///
+/// A NULL is the empty string there, not the word `NULL`, and a REAL goes
+/// through the engine's own SQLite-compatible float rendering rather than
+/// through a second formatter that could drift from it. No question in
+/// `EDGE_QUESTIONS` selects a blob directly - they go through `hex()` and
+/// `quote()` - because the shell writes a blob's raw bytes and a NUL inside one
+/// would end the line.
+///
+/// @param value - one value as the new engine produced it
+fn list_cell(value: &OwnedDatum) -> String {
+    match value {
+        OwnedDatum::Null => String::new(),
+        OwnedDatum::Int(number) => number.to_string(),
+        OwnedDatum::Real(number) => {
+            String::from_utf8_lossy(&inillucent_value::numeric::real_to_text(*number)).into_owned()
+        }
+        OwnedDatum::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        OwnedDatum::Blob(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// The questions both engines are asked about the migrated values.
+///
+/// Every one of them answers in text, so the comparison is between two strings
+/// and not between two renderings of a float. `hex()` for the blobs because a
+/// NUL inside one is invisible in any other form, and `typeof()` for the
+/// affinity rows because the point of those is which type the value was stored
+/// as, which is decided when it is written and must survive being copied.
+const EDGE_QUESTIONS: &[&str] = &[
+    "SELECT id, hex(b), typeof(b) FROM \"caf\u{e9} table\" ORDER BY id",
+    "SELECT id, typeof(r), CAST(r AS TEXT) FROM \"caf\u{e9} table\" ORDER BY id",
+    "SELECT id, t FROM \"caf\u{e9} table\" ORDER BY id",
+    "SELECT typeof(i), typeof(t), typeof(b), typeof(r), typeof(n) FROM aff ORDER BY rowid",
+    "SELECT quote(i), quote(t), quote(b), quote(r), quote(n) FROM aff ORDER BY rowid",
+    "SELECT a, b FROM ex ORDER BY b",
+    "SELECT type, name FROM sqlite_schema WHERE type = 'index' ORDER BY name",
+];
+
+/// **The values a real database holds survive the migration.**
+///
+/// The fixture §4.1.7 built covers the *objects* a database has - triggers,
+/// views, generated columns, a partial index, a foreign key. What it does not
+/// cover is the values inside them, and a migration loses those in different
+/// ways: a blob truncated at the first NUL, an infinity written back as text, a
+/// column whose affinity was applied a second time on the way in, a table whose
+/// name is not ASCII (task-2066 section 4.4.14).
+///
+/// **Both engines are asked the same seven questions** and the answers compared
+/// as text, rather than the expected answers being written here. Writing them
+/// here would be writing down SQLite's affinity rules from memory, which is the
+/// thing the reference exists to avoid: `INSERT INTO aff VALUES('42', 42, ...)`
+/// stores an integer in the TEXT column or a string in it depending on rules
+/// nobody should be reciting into a test.
+///
+/// NaN is in the fixture and is not in the assertions by name, because SQLite
+/// stores a NaN as NULL - `typeof()` answers `null` on both sides, which is
+/// what the first question checks.
+#[test]
+fn the_values_a_real_database_holds_survive_the_migration() {
+    let Some(shell) = reference() else {
+        inillucent_compat::differential::skipping("the pinned SQLite shell is missing");
+        return;
+    };
+    let area = scratch("values");
+    let source = area.join("source.db");
+    let script = "\
+CREATE TABLE \"caf\u{e9} table\"(id INTEGER PRIMARY KEY, b BLOB, r REAL, t TEXT);\n\
+INSERT INTO \"caf\u{e9} table\" VALUES(1, x'00FF0041', 9e999, 'positive infinity');\n\
+INSERT INTO \"caf\u{e9} table\" VALUES(2, x'610062', -9e999, 'negative infinity');\n\
+INSERT INTO \"caf\u{e9} table\" VALUES(3, x'', 0.0/0.0, 'not a number');\n\
+INSERT INTO \"caf\u{e9} table\" VALUES(4, NULL, 5e-324, 'the smallest subnormal');\n\
+CREATE INDEX caf_r ON \"caf\u{e9} table\"(r);\n\
+CREATE TABLE aff(i INTEGER, t TEXT, b BLOB, r REAL, n NUMERIC);\n\
+INSERT INTO aff VALUES('42', 42, 42, '42', '42');\n\
+INSERT INTO aff VALUES('4.0', 4.0, x'34', '1e3', '0012');\n\
+INSERT INTO aff VALUES('abc', 'abc', 'abc', 'abc', 'abc');\n\
+INSERT INTO aff VALUES(NULL, NULL, NULL, NULL, NULL);\n\
+CREATE TABLE ex(a TEXT, b INTEGER);\n\
+INSERT INTO ex VALUES('Alpha', 1),('BETA', 2),('gamma', 3);\n\
+CREATE INDEX ex_lower ON ex(lower(a));\n\
+CREATE INDEX ex_doubled ON ex(b * 2, a);\n";
+    if !build_with_shell(&shell, &source, script) {
+        inillucent_compat::differential::skipping("the reference shell could not be run");
+        return;
+    }
+
+    let destination = area.join("migrated.rdb");
+    let report = sqlite::migrate(&source, &destination).expect("the migration runs");
+    assert!(
+        report.passed(),
+        "the migration did not verify: {:?}",
+        report
+            .checks
+            .iter()
+            .filter(|check| !check.passed)
+            .collect::<Vec<_>>()
+    );
+
+    let database =
+        inillucent_engine::connect::Database::open(&destination).expect("the migration opens");
+    let connection = database.session();
+
+    let mut wrong: Vec<String> = Vec::new();
+    for sql in EDGE_QUESTIONS {
+        let theirs = shell_answers(&shell, &source, sql);
+        // **A question both engines answer with nothing agrees and proves
+        // nothing.** A misspelled table name here would have been a silent pass
+        // rather than a failure, which is §1.2 of the testing standard.
+        assert!(
+            !theirs.is_empty(),
+            "the reference answered {sql} with no rows, so this question grades nothing"
+        );
+        let ours: Vec<String> = connection
+            .query(sql)
+            .unwrap_or_else(|error| panic!("{sql}: {error:?}"))
+            .iter()
+            .map(|row| row.iter().map(list_cell).collect::<Vec<String>>().join("|"))
+            .collect();
+        if theirs != ours {
+            wrong.push(format!(
+                "{sql}\n  sqlite     : {theirs:?}\n  inillucent : {ours:?}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of {} questions about the migrated values answered differently:\n{}",
+        wrong.len(),
+        EDGE_QUESTIONS.len(),
+        wrong.join("\n")
+    );
+
+    // The expression indexes are in the schema *and* reachable. A migration
+    // that carried the `CREATE INDEX` text and built nothing would pass the
+    // schema question above and answer every query by scanning.
+    let plan = connection
+        .query("EXPLAIN QUERY PLAN SELECT b FROM ex WHERE lower(a) = 'beta'")
+        .expect("the plan is explained")
+        .iter()
+        .map(|row| quote_row(row))
+        .collect::<Vec<String>>()
+        .join(" ");
+    assert!(
+        plan.contains("ex_lower"),
+        "the index on `lower(a)` did not survive the migration as something the planner \
+         can use: {plan}"
+    );
+}

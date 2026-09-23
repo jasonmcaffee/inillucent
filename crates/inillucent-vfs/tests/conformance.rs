@@ -307,3 +307,77 @@ fn an_abandoned_wal_index_is_discarded() {
     drop(survivor);
     let _ = std::fs::remove_dir_all(root.as_path());
 }
+
+/// **Creating a file that survives a restart forces its directory entry.**
+///
+/// `OsVfs::open` created a file and never synced the parent, while `delete`
+/// and `rename` had done it since phase 1 (task-2066 section 4.2, item 19). On
+/// ext4 or XFS a power loss can then leave a log segment whose header was
+/// written and synced with no directory entry naming it - and `read_chain`
+/// reads a missing segment as the ordinary end of the chain, so every commit
+/// inside it is lost and recovery reports success over the loss.
+///
+/// The count is the observable, because the durability of a directory entry is
+/// not: nothing a later read does can tell a forced entry from an unforced
+/// one, and no test on a real file system can arrange the power loss that
+/// would. Three things are asserted and none of them alone is the behaviour: a
+/// create forces the entry exactly once, reopening the file it just made
+/// forces nothing, and a transient file - which is deleted when it is closed
+/// and has nothing to lose - pays no directory sync for it.
+#[test]
+fn creating_a_durable_file_forces_its_directory_entry() {
+    use inillucent_vfs::contract::FileKind;
+
+    let root = workspace("directory-sync");
+    let vfs = OsVfs::new();
+    let path = DbPath::new(root.as_path().join("made.rdb"));
+    assert_eq!(vfs.directory_syncs(), 0, "a fresh VFS has forced nothing");
+
+    let made = vfs
+        .open(&path, OpenOptions::of_kind(FileKind::MainDb))
+        .expect("the file is created");
+    assert_eq!(
+        vfs.directory_syncs(),
+        1,
+        "creating a database file did not force the directory entry naming it"
+    );
+    drop(made);
+
+    // Reopening is not creating, and there is no new entry to force.
+    let again = vfs
+        .open(&path, OpenOptions::of_kind(FileKind::MainDb))
+        .expect("the file reopens");
+    assert_eq!(
+        vfs.directory_syncs(),
+        1,
+        "reopening an existing file forced a directory entry it did not create"
+    );
+    drop(again);
+
+    // A log segment is the case the defect actually lost commits through.
+    let segment = DbPath::new(root.as_path().join("made.rdb-wal-1"));
+    let log = vfs
+        .open(&segment, OpenOptions::of_kind(FileKind::Wal))
+        .expect("the segment is created");
+    assert_eq!(
+        vfs.directory_syncs(),
+        2,
+        "creating a log segment did not force the directory entry naming it"
+    );
+    drop(log);
+
+    // And a file that is deleted when it is closed pays nothing for a name
+    // nobody will ever look for.
+    let scratch = DbPath::new(root.as_path().join("sort-run"));
+    let transient = vfs
+        .open(&scratch, OpenOptions::of_kind(FileKind::Transient))
+        .expect("the scratch file is created");
+    assert_eq!(
+        vfs.directory_syncs(),
+        2,
+        "a transient file forced a directory entry it has no use for"
+    );
+    drop(transient);
+
+    let _ = std::fs::remove_dir_all(root.as_path());
+}

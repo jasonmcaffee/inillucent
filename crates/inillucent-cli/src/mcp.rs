@@ -497,28 +497,43 @@ struct TooLong;
 /// @param input - where requests arrive
 /// @param line - the buffer to fill
 fn read_request(input: &mut impl BufRead, line: &mut String) -> Result<usize, TooLong> {
-    let mut bytes: Vec<u8> = Vec::new();
+    // **A blank line is read past, and only the end of the stream ends the
+    // session** (task-2066 section 4.2, item 27). This returned `Ok(0)` for
+    // both, and `serve` reads `Ok(0)` as the end of input - so one stray
+    // newline from a client ended the session, the next request was never
+    // answered, and the process exited 0 as though the client had hung up.
+    // JSON-RPC over a line protocol has no meaning for an empty line, and
+    // reading past it is what every other implementation does.
     loop {
-        let mut one = [0u8; 1];
-        match input.read(&mut one) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
+        let mut bytes: Vec<u8> = Vec::new();
+        let ended = loop {
+            let mut one = [0u8; 1];
+            match input.read(&mut one) {
+                Ok(0) | Err(_) => break true,
+                Ok(_) => {}
+            }
+            let byte = one.first().copied().unwrap_or(b'\n');
+            if byte == b'\n' {
+                break false;
+            }
+            if bytes.len() >= MAX_REQUEST_BYTES {
+                return Err(TooLong);
+            }
+            bytes.push(byte);
+        };
+        // Whitespace rather than emptiness, so a carriage return and newline
+        // pair - which is what a client on Windows sends - is the same blank
+        // line as a bare newline.
+        let blank = bytes.iter().all(|byte| byte.is_ascii_whitespace());
+        if blank {
+            match ended {
+                true => return Ok(0),
+                false => continue,
+            }
         }
-        let byte = one.first().copied().unwrap_or(b'\n');
-        if byte == b'\n' {
-            break;
-        }
-        if bytes.len() >= MAX_REQUEST_BYTES {
-            return Err(TooLong);
-        }
-        bytes.push(byte);
+        line.push_str(&String::from_utf8_lossy(&bytes));
+        return Ok(line.len());
     }
-    if bytes.is_empty() {
-        return Ok(0);
-    }
-    line.push_str(&String::from_utf8_lossy(&bytes));
-    Ok(line.len())
 }
 
 /// Answers one request, or returns nothing for a notification.

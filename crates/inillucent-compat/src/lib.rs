@@ -30,6 +30,7 @@
 pub mod cliproc;
 pub mod corpus;
 pub mod crashcampaign;
+pub mod damage;
 pub mod differential;
 pub mod durable;
 pub mod facade;

@@ -874,6 +874,105 @@ fn a_gap_in_the_chain_ends_the_scan() {
     );
 }
 
+/// **A zeroed hole in the middle of the log stops the scan there.**
+///
+/// A decode that returns `Ok(None)` - a length word of all zeros, which is what a
+/// dropped or zeroed sector looks like - used to `break` out of that segment's
+/// loop without recording why and without returning. The outer loop moved to
+/// the next segment and lifted `valid_end` over the bytes nobody read, so
+/// records in segment 2 were replayed although records at the end of segment 1
+/// never were. That is "apply a later record without the earlier one it
+/// depends on", which is the property this module's second invariant exists to
+/// prevent (task-2066 section 4.2, item 18).
+///
+/// The gap check above it does not catch this: it compares the next segment's
+/// first LSN against the previous segment's *file size*, not against where the
+/// records actually stopped, and the file is still its full length.
+///
+/// **The discriminator is what follows the zeroes, not what follows the
+/// segment.** A segment is rolled when the next record does not fit, so the
+/// tail of every rolled segment is zeroes by design; `vacuum_crash`'s
+/// `a_vacuum_under_a_log_cut_anywhere_leaves_one_of_the_two_databases` is what
+/// caught a first attempt that stopped at the end of every rolled segment and
+/// left a free map page half applied.
+///
+/// The eight bytes are zeroed **on a record boundary**, found by decoding
+/// forward from the start of the body, because that is the only place a zero
+/// length word is read as a length word rather than as damage inside a record
+/// the checksum would catch.
+#[test]
+fn a_zeroed_hole_in_a_segment_stops_the_scan_inside_it() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("hole.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    for txn in 1..=40u64 {
+        wal.append(
+            txn,
+            Body::WritePage {
+                page: txn,
+                image: &[0x22u8; 400],
+            },
+        )
+        .unwrap();
+        wal.commit(txn, txn).unwrap();
+    }
+    assert!(wal.sequence() >= 2, "the workload did not roll a segment");
+    drop(wal);
+
+    let first = inillucent_wal::writer::segment_path(
+        &path.as_path().to_string_lossy(),
+        path.as_path().parent(),
+        1,
+    );
+    let file = vfs
+        .open(
+            &first,
+            inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+        )
+        .unwrap();
+    let size = file.file_size().unwrap() as usize;
+    let mut bytes = vec![0u8; size];
+    file.read_exact_at(0, &mut bytes).unwrap();
+    let header = SegmentHeader::decode(&bytes).expect("the segment header decodes");
+
+    // Walk to the sixth record's boundary, which is well inside the segment
+    // and past enough commits that the prefix below it is worth keeping.
+    let body = &bytes[segment::HEADER_BYTES..];
+    let mut at = 0usize;
+    for _ in 0..6 {
+        let record = Record::decode(&body[at..])
+            .expect("a record decodes")
+            .expect("there is a record here");
+        at += record.length;
+    }
+    let hole_lsn = header.first_lsn + at as u64;
+    file.write_all_at((segment::HEADER_BYTES + at) as u64, &[0u8; 8])
+        .unwrap();
+    drop(file);
+
+    let (store, outcome) = recover_into(vfs.as_ref(), &path);
+    assert_eq!(
+        outcome.next_lsn, hole_lsn,
+        "the scan did not stop at the hole"
+    );
+    assert_eq!(
+        outcome.sequence, 1,
+        "the scan carried on into segment {} past a hole in segment 1",
+        outcome.sequence
+    );
+    let why = outcome.stopped_because.unwrap_or_default();
+    assert!(
+        why.contains("more bytes follow the gap"),
+        "the scan stopped without saying it had found a hole: {why}"
+    );
+    // And nothing from the second segment was applied. Page 40 is the last
+    // transaction's, which is the furthest thing from the hole.
+    assert!(
+        !store.pages.contains_key(&40),
+        "a record from after the hole was replayed"
+    );
+}
+
 /// A stale record left in a reused segment ends the scan.
 ///
 /// A segment file that a shorter run left behind holds records at LSNs that do

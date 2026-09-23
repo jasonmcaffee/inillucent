@@ -978,24 +978,33 @@ impl Eval for Pattern {
         if operand.is_null() || pattern.is_null() {
             return Ok(Computed::Borrowed(Datum::Null));
         }
+        // **The escape is one character, and one that is not is refused**
+        // (task-2066 section 4.2, item 27). This took the first byte of
+        // whatever was written, so `ESCAPE ''` silently meant "no escape" -
+        // `'a%b' LIKE 'a\%b' ESCAPE ''` answered where SQLite raises - and a
+        // escape character of more than one byte escaped on its first byte.
         let escape = match &self.escape {
             Some(expression) => {
                 let value = expression.value(batch, nth)?;
                 if value.is_null() {
                     return Ok(Computed::Borrowed(Datum::Null));
                 }
-                eval::text_bytes(&Value::from(&value.get()).into_owned()?, ENCODING)
-                    .first()
-                    .copied()
+                let bytes = eval::text_bytes(&Value::from(&value.get()).into_owned()?, ENCODING);
+                inillucent_scalar::builtin::single_character_escape(&bytes)
+                    .map_err(inillucent_base::error::misuse)?;
+                Some(bytes)
             }
             None => None,
         };
         let subject = eval::text_bytes(&Value::from(&operand.get()).into_owned()?, ENCODING);
         let pattern_bytes = eval::text_bytes(&Value::from(&pattern.get()).into_owned()?, ENCODING);
         let matched = match self.kind {
-            PatternKind::Like => {
-                pattern::like_folding(&pattern_bytes, &subject, escape, !self.case_sensitive)
-            }
+            PatternKind::Like => pattern::like_folding(
+                &pattern_bytes,
+                &subject,
+                escape.as_deref(),
+                !self.case_sensitive,
+            ),
             PatternKind::Glob => pattern::glob(&pattern_bytes, &subject),
         };
         Ok(Computed::Borrowed(Datum::Int(i64::from(
