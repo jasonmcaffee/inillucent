@@ -574,3 +574,123 @@ fn sqlite_sequence_can_be_written_and_the_counter_follows() {
         "the schema table is still not writable"
     );
 }
+
+/// A `WHERE` conjunct that reads no subquery rejects a row before the row's
+/// correlated block is answered.
+///
+/// **The block here fails on the rejected row, so the order is visible in the
+/// answer rather than only in the clock** (task-2076). `abs` of the smallest
+/// integer is an integer overflow, and the row holding it is the one
+/// `v > 0` throws away. Before the change the correlation operator answered
+/// every row the scan produced and the filter ran afterwards, so this query
+/// failed. SQLite 3.53.4 answers it, in both orders the terms can be written
+/// in. The third assertion below checks that the same block with nothing in
+/// front of it does fail, so the first two are passing because the row was
+/// skipped and not because `abs` stopped failing.
+#[test]
+fn a_cheap_conjunct_rejects_a_row_before_its_correlated_block_is_answered() {
+    let database = fixture("gate_order");
+    let connection = database.session();
+    connection
+        .execute_batch(
+            "CREATE TABLE acct (id INTEGER PRIMARY KEY, v INTEGER); \
+             CREATE TABLE one (n INTEGER); \
+             INSERT INTO one(n) VALUES (1); \
+             INSERT INTO acct(id, v) VALUES (1, 5); \
+             INSERT INTO acct(id, v) VALUES (2, -9223372036854775808)",
+        )
+        .expect("the accounts load");
+
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM acct WHERE v > 0 AND (SELECT abs(acct.v) FROM one) > 0",
+        ),
+        vec![1],
+        "the block was answered for the row the cheap conjunct rejects"
+    );
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM acct WHERE (SELECT abs(acct.v) FROM one) > 0 AND v > 0",
+        ),
+        vec![1],
+        "writing the block first put it in front of the cheap conjunct"
+    );
+    assert!(
+        connection
+            .query("SELECT id FROM acct WHERE (SELECT abs(acct.v) FROM one) > 0")
+            .is_err(),
+        "abs of the smallest integer no longer fails, so the two answers above prove nothing"
+    );
+}
+
+/// Moving the cheap conjuncts in front of a correlated block changes no answer.
+///
+/// Each case is one way the split between the conjuncts tested first and the
+/// ones left in the filter could be wrong: a filter and a block that disagree,
+/// a `NOT EXISTS`, a block in the projection with a filter beside it, an `OR`
+/// that must stay whole because one side of it reads the block, an `AND`
+/// nested inside parentheses, a conjunct whose verdict is NULL, and a join,
+/// where the conjunct reads the inner table and the block the outer one.
+/// Expected values are written out from the fixture: items 1 to 4 priced 100,
+/// 250, 250 and 50, and parts naming items 2 and 3.
+#[test]
+fn a_filtered_correlated_query_answers_what_sqlite_answers() {
+    let database = fixture("gate_answers");
+    let connection = database.session();
+    let exists = "EXISTS (SELECT 1 FROM part WHERE part.item_id = item.id)";
+    let cases: Vec<(String, Vec<i64>)> = vec![
+        (
+            format!("SELECT id FROM item WHERE price < 200 AND {exists} ORDER BY id"),
+            vec![],
+        ),
+        (
+            format!("SELECT id FROM item WHERE price = 250 AND {exists} ORDER BY id"),
+            vec![2, 3],
+        ),
+        (
+            format!("SELECT id FROM item WHERE price < 200 AND NOT {exists} ORDER BY id"),
+            vec![1, 4],
+        ),
+        (
+            "SELECT id * 10 + (SELECT count(*) FROM part WHERE part.item_id = item.id) \
+             FROM item WHERE price >= 100 ORDER BY id"
+                .to_string(),
+            vec![10, 21, 31],
+        ),
+        (
+            format!("SELECT id FROM item WHERE price < 60 OR {exists} ORDER BY id"),
+            vec![2, 3, 4],
+        ),
+        (
+            format!(
+                "SELECT id FROM item WHERE price > 60 AND (price < 200 OR {exists}) ORDER BY id"
+            ),
+            vec![1, 2, 3],
+        ),
+        (
+            format!(
+                "SELECT id FROM item WHERE price >= 100 AND (price > 200 AND {exists}) ORDER BY id"
+            ),
+            vec![2, 3],
+        ),
+        (
+            format!(
+                "SELECT id FROM item WHERE nullif(price, 100) > 0 AND NOT {exists} ORDER BY id"
+            ),
+            vec![4],
+        ),
+        (
+            "SELECT item.id FROM item JOIN part ON part.item_id = item.id \
+             WHERE part.id > 10 AND EXISTS \
+             (SELECT 1 FROM item other WHERE other.price = item.price AND other.id <> item.id) \
+             ORDER BY item.id"
+                .to_string(),
+            vec![3],
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(integers(&connection, &sql), expected, "{sql}");
+    }
+}

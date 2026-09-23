@@ -460,6 +460,10 @@ pub(crate) struct Upper {
     /// borrowed for the chain's own lifetime, which is exactly what this
     /// function does not take.
     pub(crate) correlations: Vec<crate::correlate::Correlation>,
+    /// The `WHERE` conjuncts that read no subquery, compiled for
+    /// [`crate::correlate::Correlated`] to test before it answers a block.
+    /// Empty whenever `correlations` is.
+    pub(crate) gate: Vec<Box<dyn crate::expr::Eval>>,
 }
 /// Builds every operator above the source, short of the inner join stages and
 /// the correlation operator - the part of a chain that holds no borrow of the
@@ -549,6 +553,10 @@ struct Upward<'a> {
     offset: usize,
     /// The result columns and the sort keys.
     outputs: Outputs,
+    /// The `WHERE` conjuncts the filters above the correlation operator test,
+    /// or `None` when there is no such operator and the plan's own residuals
+    /// are used as they are.
+    filters_above: Option<Vec<BoundExpr>>,
 }
 
 /// Whether the source walks its tree backwards.
@@ -1116,6 +1124,14 @@ fn push_filters(
     up: &Upward<'_>,
 ) -> DbResult<Box<dyn Sink>> {
     let mut chain = chain;
+    if let Some(above) = &up.filters_above {
+        for term in above {
+            let translated = translate_scan(term, up.space, up.params)?;
+            chain = Box::new(Filter::new(compile(&translated, up.scan_types)?, chain));
+            operators.add(|| "FILTER RESIDUAL".to_string());
+        }
+        return Ok(chain);
+    }
     if let Some(constant) = &up.plan.constant_filter {
         let translated = translate_scan(constant, up.space, up.params)?;
         chain = Box::new(Filter::new(compile(&translated, up.scan_types)?, chain));
@@ -1127,6 +1143,67 @@ fn push_filters(
         operators.add(|| "FILTER RESIDUAL".to_string());
     }
     Ok(chain)
+}
+
+/// Splits a correlated statement's `WHERE` into the conjuncts that read a
+/// subquery and the ones that do not.
+///
+/// **The second list is tested before any block is answered** (task-2076), by
+/// [`crate::correlate::Correlated`] itself; its module comment gives the
+/// argument for why that cannot change an answer. The first list stays in the
+/// filters above that operator.
+///
+/// The rule is by the expression tree and nothing else: a conjunct holding a
+/// `Subquery` node anywhere, correlated or folded, stays above. A conjunct
+/// that is not split by `AND` at its top - `a.v = 1 OR EXISTS (...)` - is one
+/// conjunct, holds a subquery, and stays above whole.
+///
+/// Only called when the statement has a correlated block, so a statement
+/// without one allocates nothing here.
+///
+/// @param plan - the planner's output
+fn place_around_correlation(plan: &PhysicalPlan) -> (Vec<BoundExpr>, Vec<BoundExpr>) {
+    let mut above = Vec::new();
+    let mut below = Vec::new();
+    let predicates = plan
+        .constant_filter
+        .iter()
+        .chain(plan.residuals.iter().flatten());
+    for predicate in predicates {
+        for term in inillucent_sql::plan::conjunction(predicate) {
+            if inillucent_sql::plan::expression_holds_subquery(&term) {
+                above.push(term);
+            } else {
+                below.push(term);
+            }
+        }
+    }
+    (above, below)
+}
+
+/// Compiles the conjuncts the correlation operator tests before it answers a
+/// block.
+///
+/// Compiled against the row as the joins produce it, which is the row that
+/// operator receives: none of these conjuncts reads a correlated column, so
+/// none of them needs the widened types.
+///
+/// @param below - the conjuncts [`place_around_correlation`] put below
+/// @param space - the widened column space, which resolves base columns
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param joined_types - the column types before any widening
+fn compile_gate(
+    below: &[BoundExpr],
+    space: &Space<'_>,
+    params: &Params,
+    joined_types: &[StaticType],
+) -> DbResult<Vec<Box<dyn crate::expr::Eval>>> {
+    let mut gate = Vec::with_capacity(below.len());
+    for term in below {
+        let translated = translate_scan(term, space, params)?;
+        gate.push(compile(&translated, joined_types)?);
+    }
+    Ok(gate)
 }
 
 /// Builds the whole of a statement's chain above the source, and returns it
@@ -1166,6 +1243,7 @@ pub(crate) fn build_upper(
     refuse_unhandled(select)?;
     let (correlations, correlation_columns, widened_types) =
         correlated_columns(plan, catalog, space)?;
+    let joined_types = space.types;
     let scan_types: &[StaticType] = if correlations.is_empty() {
         space.types
     } else {
@@ -1184,6 +1262,15 @@ pub(crate) fn build_upper(
     let (group_exprs, group_collations, grouped_walk) =
         grouping_of(plan, prepared, space, params, &scan_order)?;
     let limit = constant_limit(select, params)?;
+    let (filters_above, gate) = if correlations.is_empty() {
+        (None, Vec::new())
+    } else {
+        let (above, below) = place_around_correlation(plan);
+        (
+            Some(above),
+            compile_gate(&below, space, params, joined_types)?,
+        )
+    };
     let up = Upward {
         sorted_already: already_sorted(plan, prepared, &outputs, &scan_order, grouped_walk),
         skipping: is_skip_scan(prepared),
@@ -1205,6 +1292,7 @@ pub(crate) fn build_upper(
         grouped_walk,
         limit,
         outputs,
+        filters_above,
     };
 
     // Built bottom-up, because each operator owns the one below it. The
@@ -1241,6 +1329,7 @@ pub(crate) fn build_upper(
         )
         .map(|limit| limit.saturating_add(up.offset)),
         correlations,
+        gate,
     })
 }
 /// Builds every operator above the source.
@@ -1278,13 +1367,20 @@ fn build_chain<'t>(
     // to `'t` here and only here: an index nested loop borrows its inner tree,
     // and it wraps everything built so far rather than being wrapped by it.
     let mut chain: Box<dyn Sink + 't> = upper.head;
-    // The correlation operator goes *below* every join and *above* every
-    // filter: the value it computes reads the whole joined row, and the `WHERE`
-    // that tests it runs after the last join has widened that row.
+    // The correlation operator goes *above* every join and *below* every
+    // filter that reads a block: the value it computes reads the whole joined
+    // row, and the `WHERE` that tests it runs after the last join has widened
+    // that row. The conjuncts that read no block are its gate and are tested
+    // inside it, before a block is answered (task-2076); they are listed
+    // beneath it because that is where they run.
     if !upper.correlations.is_empty() {
         operators.add(|| "CORRELATED SUBQUERY".to_string());
+        for _ in &upper.gate {
+            operators.add(|| "FILTER RESIDUAL".to_string());
+        }
         chain = Box::new(crate::correlate::Correlated::new(
             upper.correlations,
+            upper.gate,
             catalog,
             params,
             chain,

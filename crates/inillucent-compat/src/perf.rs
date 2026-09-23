@@ -1044,12 +1044,14 @@ fn join_read_workloads(point: u32) -> Vec<Workload> {
 /// against the join's 1.85, so the shape is still the expensive way to ask and
 /// this is what will say when that changes.
 ///
-/// **The outer table is `wide`, which holds 400 rows, and bounding a larger
-/// one does not work.** The correlation operator sits *below* the filter - it
-/// computes a block for every row the source produces and the `WHERE` then
-/// discards most of them - so `a.key BETWEEN ?1 AND ?1 + 200` over
-/// `main_table` added a predicate and removed no work, and measured slower
-/// than the unbounded form for the extra iterations alone.
+/// **The outer table is `wide`, which holds 400 rows.** When these arms were
+/// written the correlation operator sat *below* the filter - it computed a
+/// block for every row the source produced and the `WHERE` then discarded most
+/// of them - so `a.key BETWEEN ?1 AND ?1 + 200` over `main_table` added a
+/// predicate and removed no work, and measured slower than the unbounded form
+/// for the extra iterations alone. task-2076 moved every conjunct that reads no
+/// subquery in front of the block, and the two `.selective` arms are the ones
+/// that measure it.
 ///
 /// `EXISTS` and `IN (SELECT ...)` both, because they reach different code:
 /// `crate::correlate` answers the first and refuses the second, so a workload
@@ -1095,6 +1097,55 @@ fn correlated_read_workloads(point: u32) -> Vec<Workload> {
             name: "correlated.in".to_string(),
             family: "read.correlated".to_string(),
             sql: "SELECT count(*) FROM wide a WHERE a.id IN (SELECT b.owner FROM side_table b                   WHERE b.owner = a.id)"
+                .to_string(),
+            pre: None,
+            post: None,
+            repeat,
+            grouping: Grouping::Autocommit,
+            prepare_each: false,
+            binds: Vec::new(),
+            mutates: false,
+        },
+        // **The two arms with a selective filter beside the block** (task-2076).
+        // `a.id + 0 > 396` keeps 4 of `wide`'s 400 rows, one in a hundred, and
+        // the `+ 0` is what stops the rowid range answering it, so it stays a
+        // residual predicate. The arms above keep every outer row, so they cost
+        // the same whether the correlation operator answers a block before or
+        // after the filter; these two are the arms where that order is the
+        // whole of the difference.
+        //
+        // Measured in a quiet window, release builds alternated, medians of 12
+        // and then 30 rounds: `correlated.exists.selective` went from 54.90 ms
+        // to 1.963 ms and `correlated.scalar.selective` from 55.48 ms to
+        // 1.948 ms, which is 27.97x and 28.48x. The two unfiltered arms did not
+        // move by more than two readings of the same build differ from each
+        // other. SQLite answers both selective arms in about 26 us, so against
+        // SQLite they are still 0.01x.
+        //
+        // Not `a.id % 100 = 0`, which was tried first. A modulo is translated
+        // through `Expr::General`, which reads the connection's length limit
+        // through `Params::context`, and that read is counted against
+        // `Statement::rebindable` - so the gate refused the arm in both builds
+        // before either had timed anything.
+        Workload {
+            name: "correlated.exists.selective".to_string(),
+            family: "read.correlated".to_string(),
+            sql: "SELECT count(*) FROM wide a WHERE a.id + 0 > 396 AND EXISTS \
+                  (SELECT 1 FROM side_table b WHERE b.owner = a.id)"
+                .to_string(),
+            pre: None,
+            post: None,
+            repeat,
+            grouping: Grouping::Autocommit,
+            prepare_each: false,
+            binds: Vec::new(),
+            mutates: false,
+        },
+        Workload {
+            name: "correlated.scalar.selective".to_string(),
+            family: "read.correlated".to_string(),
+            sql: "SELECT count(*) FROM wide a WHERE a.id + 0 > 396 AND a.id * 4 > \
+                  (SELECT count(*) FROM side_table b WHERE b.owner = a.id)"
                 .to_string(),
             pre: None,
             post: None,

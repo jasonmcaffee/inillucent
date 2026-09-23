@@ -45,6 +45,7 @@ use inillucent_sql::plan::{plan_select_with, Levers, PhysicalPlan};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 
 use crate::batch::{Batch, Vector};
+use crate::expr::Eval;
 use crate::ops::{Flow, Sink};
 use crate::physical::{prepare_any, run_any_prepared_limited, Params, Prepared, TreeCatalog};
 
@@ -86,12 +87,40 @@ pub struct Correlation {
 
 /// Appends one column per correlated subquery to every row that passes.
 ///
-/// It sits above every join and below every filter, because the value it
-/// computes is read by the `WHERE` and by the projection alike, and both of
-/// those run after the last join has widened the row.
+/// It sits above every join and below every filter that reads what it
+/// computes, because the value is read by the `WHERE` and by the projection
+/// alike, and both of those run after the last join has widened the row.
+///
+/// ## The conjuncts that do not read a block are tested first
+///
+/// **This operator used to answer every block for every row the joins
+/// produced, and the `WHERE` threw most of those rows away afterwards**
+/// (task-2076). `SELECT a FROM t WHERE t.v % 100 = 0 AND EXISTS (...)` ran the
+/// inner query once per row of `t` rather than once per row that survives
+/// `t.v % 100 = 0`. A block's prepare was hoisted out of the row loop in
+/// task-2066 section 4.3.1; its run cannot be, and that run was paid on rows
+/// nobody wanted.
+///
+/// So the chain hands this operator the `WHERE` conjuncts that hold no
+/// subquery at all, and a row that fails one of them is dropped before any
+/// block is answered for it. That is sound for one reason: this operator is a
+/// map. It emits exactly one row for every row it receives and only appends
+/// columns, so a predicate that reads none of the appended columns gives the
+/// same verdict on either side of it. A conjunct that names any subquery,
+/// correlated or not, stays in the filters above, which is the conservative
+/// half of the rule and the one that needs no argument.
+///
+/// SQLite 3.53.4 answers the same way: a block that fails on a row the cheap
+/// conjunct rejects does not fail the query, whichever order the two terms are
+/// written in. The test that checks it here is in `new_engine_subquery.rs`,
+/// and it failed on this engine before the change.
 pub struct Correlated<'t> {
     /// The blocks, in the order their columns are appended.
     correlations: Vec<Correlation>,
+    /// The `WHERE` conjuncts that read no block, compiled against the row as
+    /// the joins produce it. A row answers a block only when all of them are
+    /// true, which is exactly when the filter above would have kept it.
+    gate: Vec<Box<dyn Eval>>,
     /// Where the trees and layouts come from.
     catalog: &'t dyn TreeCatalog,
     /// The statement's own bound parameters, which a block may also read.
@@ -103,17 +132,20 @@ impl<'t> Correlated<'t> {
     /// Returns the operator over blocks [`correlations_of`] has prepared.
     ///
     /// @param correlations - the prepared blocks
+    /// @param gate - the conjuncts a row must pass before any block is answered
     /// @param catalog - where the trees and layouts come from
     /// @param params - the statement's bound parameters
     /// @param downstream - what to push widened rows into
     pub fn new(
         correlations: Vec<Correlation>,
+        gate: Vec<Box<dyn Eval>>,
         catalog: &'t dyn TreeCatalog,
         params: &Params,
         downstream: Box<dyn Sink + 't>,
     ) -> Correlated<'t> {
         Correlated {
             correlations,
+            gate,
             catalog,
             // **Without the outer statement's folded subqueries.** A block run
             // from here is a statement of its own and folds its own; carrying
@@ -134,6 +166,9 @@ impl Sink for Correlated<'_> {
         // `Correlation::answer` for what that clone cost.
         let mut bound = self.params.clone();
         for nth in 0..batch.live() {
+            if !passes(&self.gate, batch, nth)? {
+                continue;
+            }
             let mut row: Vec<OwnedDatum> =
                 Vec::with_capacity(width.saturating_add(self.correlations.len()));
             for column in 0..width {
@@ -163,6 +198,25 @@ impl Sink for Correlated<'_> {
     fn reset(&mut self) -> DbResult<()> {
         self.downstream.reset()
     }
+}
+
+/// Whether one row passes every conjunct of a gate.
+///
+/// The same test [`crate::ops::Filter`] applies: a row is kept only when the
+/// predicate is definitely true, so a NULL rejects it exactly as it would in
+/// the `WHERE` the conjunct came from.
+///
+/// @param gate - the compiled conjuncts
+/// @param batch - the rows as the joins produced them
+/// @param nth - which live row of the batch to test
+fn passes(gate: &[Box<dyn Eval>], batch: &Batch<'_>, nth: usize) -> DbResult<bool> {
+    for predicate in gate {
+        let verdict = predicate.value(batch, nth)?;
+        if crate::expr::truth(&verdict.get()) != Some(true) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 impl Correlation {
