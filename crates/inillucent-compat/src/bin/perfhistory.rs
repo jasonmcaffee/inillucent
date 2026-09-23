@@ -716,14 +716,34 @@ fn append(path: &Path, text: &str) -> Result<(), String> {
 
 /// Returns this workspace's shell, release build preferred.
 ///
+/// **Beside this binary first, because `target/` beside the manifest is only
+/// the default.** A `.cargo/config.toml` can move it to another drive, which is
+/// what an agent worktree does to keep its builds off the repository - and this
+/// then looked for a shell that was never going to be there and refused with
+/// `inillucent-shell is not built` against a shell that was. `run-nightly.ps1`
+/// carries the same note for the same reason; it asks `cargo metadata`, and this
+/// does not need to: the shell is built by the same command that built this, so
+/// it lands in the same directory.
+///
+/// The `root/target` arms are kept for a caller that built the shell and not
+/// this - `cargo run --bin inillucent-perfhistory` from a checkout with no
+/// override puts both in the same place anyway, so they cost nothing and cover
+/// the case where the two were built separately.
+///
 /// @param root - the workspace root
 /// @param name - the binary's name
 fn shell_path(root: &Path, name: &str) -> Option<PathBuf> {
+    let named = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    if let Some(beside) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|at| at.join(&named)))
+    {
+        if beside.is_file() {
+            return Some(beside);
+        }
+    }
     for profile in ["release", "debug"] {
-        let path = root
-            .join("target")
-            .join(profile)
-            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        let path = root.join("target").join(profile).join(&named);
         if path.is_file() {
             return Some(path);
         }
