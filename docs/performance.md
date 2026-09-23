@@ -162,6 +162,9 @@ against a 3.00x requirement, with the family reading 4.21x. `join.selective` rea
 `join.range` **0.84x**; the range join is the slow half and it is what holds the bound under the
 requirement. task-2082 measured `join.range` on three builds across 27 passes and found this engine's
 time for it unchanged on every one; the bound moves with SQLite's arm of the same workload.
+[Why `read.join` misses its 3.00x bar, and when it last met it](#why-readjoin-misses-its-300x-bar-and-when-it-last-met-it)
+has task-2086's pinned history: the bar was never measured, the lower bound mostly measures the
+gap between the two workloads, and `join.range` lost 26% of this engine's time since task-1833.
 
 A join-only run reads the family much higher - 6.46x, 6.26x, 6.14x and 5.60x, with lower bounds of
 4.11x, 4.00x, 4.02x and 3.67x, when the gate was given `--families read.join` on 2026-09-15 - and
@@ -469,6 +472,71 @@ build before task-2074 exited at once, because the worktree it was built in had 
 the SQLite oracle; they are not counted. The gate refuses without the oracle, but only a pass that
 takes two seconds instead of two and a half minutes shows it. Every output is in
 `_agent_output/task-2082-txn-large/` in the main checkout.
+
+### Why `read.join` misses its 3.00x bar, and when it last met it
+
+task-2086 answered this with 60 pinned passes on 2026-09-23. Every pass ran with the gate process
+pinned to affinity mask `0xC03C03` from outside, which is the only way to pin the builds from before
+task-2085, and the mask was read back from the SQLite child on every pass. It read `0xC03C03` all 60
+times. Builds from before task-2085 cannot pin themselves, so HEAD was pinned the same way, from
+outside, rather than left to pin itself. Passes 1 to 3 ran while one test target of another ticket
+was running at 6 to 9% box load. Every other pass ran on an empty box.
+
+**Two things are true, and neither one explains the miss by itself.**
+
+**1. The 3.00x bar was never measured.** It is the "low estimate" column of the performance
+contract in `tasks/task-1816-rearchitecture-tdd.md`, a table headed "Targets are estimates unless
+marked measured", written when `read.join` read 0.154x. `inillucent-readgate` first graded it at
+task-1819 (`57e87b0`), which read the family at 4.87x with a lower bound of 3.32x.
+`inillucent-fullgate` carried it over unchanged.
+
+**2. The family's lower bound mostly measures how far apart its two workloads are.** Every gate
+puts all 60 rounds of both workloads into one list and bootstraps the mean of that list. A resample
+draws the two workloads in random proportions. `join.selective` reads about 21x and `join.range`
+about 0.87x, so the proportion moves the mean far more than timing noise does. On HEAD each workload
+is measured to within 2%: `join.selective` 20.30x to 22.14x and `join.range` 0.85x to 0.89x across
+the pinned passes. The family interval printed beside them is 2.76x to 6.67x. The bound can be
+predicted from the two workload ratios alone, as exp(m - 1.96 x (d / 2) / sqrt(60)), where m is the
+mean of the two log ratios and d is the gap between them. That prediction matches the printed bound
+to within 0.07x on every clean pass, at every build. For the bound to reach 3.00x,
+0.3735 x ln(`join.selective`) + 0.6265 x ln(`join.range`) has to reach ln 3.
+
+Resampling rounds instead, with each round's value the mean of that round's two log ratios (the
+statistic `weighted_headline` already uses for every family), reads 4.15x [4.11x, 4.21x] and 4.17x
+[4.16x, 4.25x] on two pinned passes of HEAD. That change is on the unmerged branch
+`task-2086-family-interval` and is not what the gate runs today.
+
+**3. `join.range` did lose time, 26% of this engine's time, in four steps.** On the read gate's plan,
+pinned, this engine in milliseconds, forward sweep / reverse sweep, with SQLite's arm at 23.9 to
+24.6 ms on every pass:
+
+| build | `join.range` | |
+|---|---|---|
+| `57e87b0`, task-1819 | 22.21, 23.00, 22.39, 22.00 | the build the bar was first met on |
+| `b0ba286`, task-1833 | 22.37 / 22.62 | |
+| `ea03335` | 23.44 / 23.36 | **+1.0 ms** somewhere in the 15 commits before it |
+| `3322436`, `1334b80`, `59ccf91` | 23.27 to 23.72 | |
+| `71d014a` | 24.12 / 24.15 | **+0.8 ms** somewhere in the 30 commits before it |
+| `566c688`, task-1870's narrow slot | 24.23 / 24.01 | |
+| `a8f45b1`, task-1870's five follow-ups | 27.03 / 26.77 | **+2.8 ms in this one commit** |
+| `f9e2374`, task-1962 | 25.86 / 26.05 | 1.0 ms back, somewhere between |
+| `b3ad244` to `a07036b` | 26.07 to 26.53 | |
+| `dcc65f2` | 27.37 / 27.52 | **+1.0 ms** somewhere in the 25 commits before it |
+| `36939dd`, `5353eb4` | 27.03 to 27.59 | |
+| `d389021`, task-2085 | 27.96 / 27.88 | **+0.9 ms** somewhere in the 25 first parent commits before it (41 with the merged branches) |
+| HEAD | 27.88 / 28.00 | |
+
+The two sweeps agree at every build to within 0.4 ms. The full gate's plan shows the same drift:
+25.61 and 25.41 ms at `b0ba286`, 27.55 and 27.38 at `f9e2374`, and 28.08 to 28.43 on HEAD.
+
+**So the bar was last met on the read gate's plan, at `57e87b0` and `b0ba286`**, where `join.range`
+read 1.04x to 1.10x and the pooled bound 3.03x to 3.28x. That is only just over the bar. **On the
+full plan, which is the one the contract grades, no build ever met it when pinned.** `b0ba286` read
+2.20x and 2.38x, because `join.selective` was 11x at the time. The ticket asked whether the join path
+lost something or whether the bar was set from a flattering measurement. The join path did lose 5.7
+ms. The bar was not set from any measurement at all, and the statistic it is graded by would have
+missed it on the full plan even with that 5.7 ms back. Each of these is now its own ticket. Every
+output is in `_agent_output/task-2086-read-join/` in the main checkout.
 
 
 ### What a statement costs before it reaches a tree

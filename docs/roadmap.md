@@ -17,6 +17,9 @@ three runs of four. `read.join` reads 4.21x with lower bounds of 2.73x, 2.83x, 2
 misses its 3.00x requirement on all four. [Performance](performance.md#by-family) has both. The rest
 of this item is how each got here.
 
+task-2086 walked `read.join` back through history, pinned, in
+[Performance](performance.md#why-readjoin-misses-its-300x-bar-and-when-it-last-met-it), and it has three follow-up tickets.
+
 **`read.join` was taken off this list on a run of the join family alone.** It was on it because its four lower bounds read 2.97x, 3.00x,
 3.00x and 2.99x against a 3.00x bar, and a number that straddles a threshold has not met it. The
 chain reuse that landed in task-1911 had never been measured against the family. Re-measured
@@ -35,6 +38,9 @@ Every lower bound clears the bar, by a third at the narrowest. `join.selective` 
 would reach. Inside the whole plan, which is what the contract grades, the family misses, as above;
 task-2082 found this engine's time for `join.range` unchanged across three builds, with the bound
 following SQLite's arm of the same workload.
+task-2086 then measured further back, pinned: this engine's `join.range` time rose from 22.4 ms
+at task-1833 to 28.0 ms at HEAD in four steps, and on the full plan no build it measured cleared
+the bar.
 
 **`extension` missed, and re-applying the reverted segment format could not have closed it.** Four
 runs the same way, on 2026-09-15:

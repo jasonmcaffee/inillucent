@@ -672,6 +672,20 @@ they are touching do not collide; two that have not, do.
   writes, so no write change can reach a read workload's leaves at all. And pin the gate before you
   compare it with anything: unpinned, the scheduler put this engine on the efficiency cores and SQLite
   on the performance cores (task-2064), and task-2085 makes the gates pin themselves. (task-2082)
+- **A family's lower bound in every gate is mostly the gap between its workloads, not noise.**
+  fullgate, readgate, writegate and scorecard all bootstrap one list of every workload's every round.
+  For `read.join` (21x and 0.87x) that gives [2.8x, 6.5x] around two workloads each measured to
+  within 2%, and the printed bound is predicted from the two ratios alone to within 0.07x. Before
+  reading a family's bound as a regression, compute it from the per-workload rows. The fix that
+  resamples rounds is on the unmerged branch `task-2086-family-interval`. (task-2086)
+- **To walk a gate back through history, pin from outside and use the read gate.** Builds before
+  `d389021` cannot pin themselves, so `_agent_output/task-2086-read-join/pinned-walk.ps1` (main
+  checkout) sets `0xC03C03` on the gate process and reads the SQLite child's mask back on every pass.
+  HEAD gets the same external pin, so no build is treated differently. `inillucent-readgate` takes
+  21 s a pass against 2.5 minutes for fullgate, so a 36 pass bisection fits in 13 minutes. A detached
+  worktree checkout needs `git checkout -- Cargo.lock` first, because some builds rewrite it and the
+  next checkout then fails and leaves the old binary in place. `.sqlite-ref/3.53.4` has to be copied
+  in whole, the shell included. (task-2086)
 - **Three in four of the `transaction` family's updates match no row.** `Bind::Scatter` picks rowids
   up to `main_table`'s row count and `side_table` holds a quarter of that, so those statements measure
   a lookup past the end of `side_table`'s last leaf - the leaf `write.insert.autocommit` appended 100
