@@ -640,3 +640,17 @@ they are touching do not collide; two that have not, do.
   `target/.../deps/story_large_table_nightly-*.exe` keeps a build out of a quiet window, but a check
   that looks for cargo to see whether a measurement is running will miss it. List processes by name
   and CPU, without truncating the list. (task-2077)
+- **A test that asserts a defect is still there has to be inverted by the ticket that fixes the
+  defect, in the same change.** This repository records known gaps as tests that fail once the gap
+  closes: task-2052's page leak cases, the LSN checksum case in `durability.rs`, and the
+  `does_not_yet` cases in `planner.rs`. That is a good record, but it only works if the fixing ticket
+  runs the strict gate before it merges. task-2074 closed the LSN checksum gap in format 2 and did not
+  run it, so `inillucent-compat::durability` was red on `main` from d142334 until task-2078 inverted
+  the case, and two agents each spent a diagnosis on it. Before merging a fix, search the tests for the
+  gap's name or ticket number. (task-2078)
+- **`INDEXED BY` forces the named index and nothing else, and the binder refuses what it cannot
+  answer.** `choose_path` returns an `AccessPath` and cannot refuse, so `plan::unanswerable_index_hint`
+  (in `plan/hint.rs`) asks the same question first with the same terms, from `bind_arms` and from the
+  UPDATE and DELETE binders. If you change which terms a path may use, whether that means
+  `statement_terms`, `outer_terms` or `index_usable`, change them there, or the binder's refusal and
+  the planner's choice disagree. (task-2078)
