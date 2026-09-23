@@ -139,6 +139,7 @@ table.
 | `go` | 1 | a Go toolchain, for the Go wrapper's conformance runner: https://go.dev/dl/ |
 | `php` | 1 | a PHP interpreter, for the PHP wrapper's conformance runner: https://www.php.net/downloads |
 | `asan` | 1 | a toolchain with the address sanitizer, which is nightly on every platform and absent on Windows |
+| `embed` | 1 | a build with `inillucent-engine/embed` compiled in, which is what registers `embed(TEXT)` as a name to refuse. The runner builds it from the target's `features` row; `tools/coverage.mjs` does not, because the feature reaches `inillucent-core/onnx` and that crate is excluded from the coverage run |
 | `baseline` | 1 | a recorded performance baseline: `cargo run -p inillucent-compat --bin inillucent-baseline -- capture` |
 | `btree-corpus` | 1 | the retained sequences under `compat/corpus/btree/`, which are tracked |
 | `capi` | 1 | the C ABI shared library, built by `cargo build -p inillucent-driver-capi` into this run's own target directory |

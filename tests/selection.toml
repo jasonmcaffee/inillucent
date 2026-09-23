@@ -489,6 +489,13 @@ name = "embed_direct_only"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext", "inillucent-search"]
 features = ["inillucent-engine/embed"]
+# The runner always builds the feature above, so this never skips under the
+# runner. It is declared for the one caller that does not: `tools/coverage.mjs`
+# runs a plain `cargo test --workspace`, because the feature reaches
+# `inillucent-core/onnx` and the coverage run excludes that crate on purpose
+# (task-2066). Without the row, a target that can skip and does not say so fails
+# `selection::every_target_that_can_skip_declares_it_and_vice_versa`.
+requires = ["embed"]
 
 [[target]]
 package = "inillucent-compat"
