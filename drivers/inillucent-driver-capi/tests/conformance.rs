@@ -8,7 +8,8 @@
 //! structural tests and no behaviour at all - a driver could have returned the
 //! wrong status from every one of them and stayed green.
 //!
-//! What this harness does is build the static library, compile
+//! What this harness does is take the static library `cargo test` built beside
+//! it, compile
 //! `tests/c/lifecycle.c` against `include/inillucent_driver.h`, run it, and
 //! fail on any `FAIL` line or on a run that did not reach `done`. The C program
 //! is where the argument is; this file is a compiler and a reader.
@@ -110,23 +111,46 @@ fn target_directory() -> PathBuf {
     path
 }
 
-/// Builds the plain static library and returns what a linker should be given.
+/// Returns the plain static library that the build of this test produced.
 ///
 /// The **static** library rather than the dynamic one, so the program and the
-/// library are one image with one sanitizer runtime. This build is not
+/// library are one image with one sanitizer runtime. This library is not
 /// instrumented, so a sanitizer linked against it checks only the loads the C
 /// program makes. The sanitized case uses [`build_instrumented_library`].
-fn build_library() -> Option<PathBuf> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Command::new(cargo)
-        .current_dir(workspace_root())
-        .args(["build", "-p", "inillucent-driver-capi"])
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    static_library_in(&target_directory())
+///
+/// **No cargo is run for it (task-2101).** This used to run
+/// `cargo build -p inillucent-driver-capi`, and that build also relinks the
+/// `cdylib` and copies it up to `target/debug`, which is the file
+/// `python_conformance` loads into a Python process. `cargo test` and a plain
+/// `cargo build` build the library with different features, so each relinked
+/// after the other, and when the two suites ran together Windows refused to
+/// remove a DLL Python had loaded: `failed to remove file
+/// ...\debug\inillucent_driver_capi.dll ... Access is denied. (os error 5)`.
+/// Both suites ran concurrently in 5 of 5 runs of the pair under
+/// `inillucent-testrun --strict`, and `conformance` failed every time.
+///
+/// `cargo test` already builds every crate type the manifest lists when it
+/// builds the library this test links, and leaves the static library in
+/// `deps`, beside this test binary. That file comes from the same build as the
+/// test, so it cannot be older than the test, and reading it writes nothing.
+fn plain_library() -> PathBuf {
+    let directory = deps_directory();
+    static_library_in(&directory).unwrap_or_else(|| {
+        panic!(
+            "{} has no static library for this crate. `cargo test` builds it with the \
+             test, because the manifest lists `staticlib`, so either that line was removed \
+             or this binary was not built by cargo",
+            directory.display()
+        )
+    })
+}
+
+/// Returns the directory this test binary is in, which is where cargo put the
+/// library crate types it built for it.
+fn deps_directory() -> PathBuf {
+    let mut path = std::env::current_exe().unwrap_or_default();
+    path.pop();
+    path
 }
 
 /// Returns the static library in a directory, under either platform's name.
@@ -164,11 +188,20 @@ fn sanitizer_target() -> Option<&'static str> {
 /// makes; see the module comment for the run that showed the plain library
 /// hides one. `CARGO_ENCODED_RUSTFLAGS` rather than `RUSTFLAGS` because cargo
 /// reads it first, so a value inherited from the shell cannot replace the flag.
-fn build_instrumented_library() -> Option<PathBuf> {
-    let target = sanitizer_target()?;
+///
+/// **A build that fails is a failure of the test, with cargo's output
+/// (task-2101).** It used to be a skip, and under `--strict` a skip is counted
+/// as a missing prerequisite, so a failed link was reported as a machine
+/// without a C compiler or a sanitizer. The canary has already built with the
+/// same flag by the time this runs, so the toolchain is there and a failure
+/// here is about this crate. This build writes only into its own target
+/// directory, which nothing else loads from.
+///
+/// @param target - the triple to instrument, from [`sanitizer_target`]
+fn build_instrumented_library(target: &str) -> PathBuf {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let directory = instrumented_target_directory();
-    let status = Command::new(cargo)
+    let produced = Command::new(&cargo)
         .current_dir(workspace_root())
         .env("RUSTC_BOOTSTRAP", "1")
         .env("CARGO_ENCODED_RUSTFLAGS", "-Zsanitizer=address")
@@ -176,12 +209,22 @@ fn build_instrumented_library() -> Option<PathBuf> {
         .args(["build", "-p", "inillucent-driver-capi", "--target", target])
         .arg("--target-dir")
         .arg(&directory)
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    static_library_in(&directory.join(target).join("debug"))
+        .output()
+        .unwrap_or_else(|error| panic!("{cargo} did not start: {error}"));
+    assert!(
+        produced.status.success(),
+        "the instrumented C ABI library did not build, and {}. This is a failure and not a \
+         missing sanitizer: the canary built with the same flag. Cargo said:\n{}",
+        ending(produced.status.code()),
+        String::from_utf8_lossy(&produced.stderr)
+    );
+    let profile = directory.join(target).join("debug");
+    static_library_in(&profile).unwrap_or_else(|| {
+        panic!(
+            "cargo built the instrumented library and {} has no static library in it",
+            profile.display()
+        )
+    })
 }
 
 /// Says whether a static library was compiled with the address sanitizer.
@@ -487,10 +530,7 @@ fn judge(printed: &str, code: Option<i32>, how: &str) {
 /// Every exported call, from C, in every destruction order.
 #[test]
 fn the_c_conformance_program_passes() {
-    let Some(library) = build_library() else {
-        inillucent_base::testing::skipping("the C ABI static library did not build");
-        return;
-    };
+    let library = plain_library();
     let Some(exe) = compile("lifecycle", "lifecycle", &library, false) else {
         inillucent_base::testing::skipping("no usable C compiler");
         return;
@@ -546,6 +586,9 @@ fn judge_canary(printed: &str, code: Option<i32>) {
 #[test]
 fn the_c_conformance_program_passes_under_a_sanitizer() {
     let required = std::env::var("INILLUCENT_CAPI_ASAN").is_ok_and(|value| value != "0");
+    let Some(target) = sanitizer_target() else {
+        return sanitizer_unavailable(required, "Rust has no address sanitizer for this platform");
+    };
     let Some(canary) = build_canary() else {
         return sanitizer_unavailable(
             required,
@@ -558,9 +601,7 @@ fn the_c_conformance_program_passes_under_a_sanitizer() {
     let (printed, code) = run(&canary_exe, "freed_read_canary");
     judge_canary(&printed, code);
 
-    let Some(library) = build_instrumented_library() else {
-        return sanitizer_unavailable(required, "the instrumented C ABI library did not build");
-    };
+    let library = build_instrumented_library(target);
     assert!(
         is_instrumented(&library),
         "{} has no address sanitizer calls in it, so a sanitized pass would not have \

@@ -12,10 +12,13 @@
 //! and the row that selects this suite is the row a change to this crate
 //! already selects.
 //!
-//! It needs two things the workspace cannot build: a Python interpreter, and
-//! the `cdylib` in a profile directory a `cargo test` run has produced. Both
-//! are declared on the row as `python` and `capi`, and both are announced as a
-//! skip rather than a pass when they are absent.
+//! It needs one thing the workspace cannot build, a Python interpreter. That is
+//! declared on the row as `python` and announced as a skip rather than a pass
+//! when it is absent. The `cdylib` used to be a second prerequisite, `capi`,
+//! because it was looked for where only a plain `cargo build` puts it. It is
+//! now read from beside this test, where the `cargo test` build that produced
+//! this test left it, so it is always there and its absence is a failure
+//! (task-2101).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,27 +46,66 @@ fn interpreter() -> Option<String> {
     None
 }
 
-/// Returns the built C ABI shared library, or nothing.
-///
-/// Looked for beside the calling test rather than in `target/debug`, for the
-/// reason `inillucent_compat::cliproc` gives: a release run and a coverage run
-/// each build into a directory of their own, and a fixed path finds the wrong
-/// one or nothing.
-fn library() -> Option<PathBuf> {
-    let mut directory = std::env::current_exe().ok()?;
-    directory.pop();
-    directory.pop();
-    let names = if cfg!(windows) {
-        vec!["inillucent_driver_capi.dll"]
+/// Returns the file name the C ABI shared library has on this platform.
+fn library_name() -> &'static str {
+    if cfg!(windows) {
+        "inillucent_driver_capi.dll"
     } else if cfg!(target_os = "macos") {
-        vec!["libinillucent_driver_capi.dylib"]
+        "libinillucent_driver_capi.dylib"
     } else {
-        vec!["libinillucent_driver_capi.so"]
-    };
-    names
-        .into_iter()
-        .map(|name| directory.join(name))
-        .find(|path| path.is_file())
+        "libinillucent_driver_capi.so"
+    }
+}
+
+/// Returns the C ABI shared library that the build of this test produced.
+///
+/// **Beside this test binary, in `deps`, rather than one directory up
+/// (task-2101).** `cargo test` builds every crate type the manifest lists and
+/// leaves them in `deps`; only a plain `cargo build` copies the `cdylib` up to
+/// `target/debug`. This used to look there, so it found a library only when
+/// something else had run `cargo build` first - usually `conformance`, which is
+/// also what then tried to replace the file while Python had it loaded.
+///
+/// Beside the calling test also for the reason `inillucent_compat::cliproc`
+/// gives: a release run and a coverage run each build into a directory of
+/// their own, and a fixed path finds the wrong one or nothing.
+fn library() -> PathBuf {
+    let mut directory = std::env::current_exe().unwrap_or_default();
+    directory.pop();
+    let path = directory.join(library_name());
+    assert!(
+        path.is_file(),
+        "{} is not there. `cargo test` builds it with this test, because the manifest \
+         lists `cdylib`, so either that line was removed or this binary was not built by cargo",
+        path.display()
+    );
+    path
+}
+
+/// Copies the library to a file only this run uses, and returns the copy.
+///
+/// **Python loads the copy, never the build output (task-2101).** Windows will
+/// not remove or replace a DLL a process has loaded. While Python held the
+/// build's own `inillucent_driver_capi.dll`, any cargo build that needed to
+/// relink it failed with `Access is denied. (os error 5)`, and in the suite
+/// beside this one that failure was reported as a missing C compiler. With a
+/// copy there is no file cargo writes that this suite holds open, so the
+/// conflict cannot happen whatever runs at the same time. The process id is in
+/// the name so two runs of this suite do not hold each other's copy either.
+///
+/// @param library - the library the build produced
+fn private_copy(library: &Path) -> PathBuf {
+    let directory = workspace_root().join("_agent_output/capi-python");
+    let _ = std::fs::create_dir_all(&directory);
+    let copy = directory.join(format!("{}-{}", std::process::id(), library_name()));
+    std::fs::copy(library, &copy).unwrap_or_else(|error| {
+        panic!(
+            "could not copy {} to {}: {error}",
+            library.display(),
+            copy.display()
+        )
+    });
+    copy
 }
 
 /// Every case in the shared suite passes through the Python binding.
@@ -75,13 +117,7 @@ fn the_python_binding_passes_the_conformance_suite() {
         );
         return;
     };
-    let Some(library) = library() else {
-        inillucent_base::testing::skipping(
-            "the C ABI shared library is not built; run \
-             `cargo build -p inillucent-driver-capi`",
-        );
-        return;
-    };
+    let library = private_copy(&library());
 
     let root = workspace_root();
     let runner = root.join("drivers/bindings/python/run_conformance.py");
@@ -100,6 +136,8 @@ fn the_python_binding_passes_the_conformance_suite() {
         .current_dir(&root)
         .output()
         .unwrap_or_else(|error| panic!("{python} did not start: {error}"));
+    // Python has exited, so nothing holds the copy.
+    let _ = std::fs::remove_file(&library);
     let said = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),

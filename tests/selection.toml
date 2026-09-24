@@ -1834,8 +1834,10 @@ tier = "e2e"
 # `drivers/bindings/python/run_conformance.py` drives `drivers/conformance/suite.json`
 # against the plain `ctypes` binding. `drivers/README.md` presents it as the
 # proof that a second language can implement the driver from the documents, and
-# nothing ran it.
-requires = ["python", "capi"]
+# nothing ran it. `capi` was a second prerequisite until task-2101: the suite
+# looked for the `cdylib` where only a plain `cargo build` puts it, and now reads
+# the one the `cargo test` build left beside it, through a private copy.
+requires = ["python"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1879,12 +1881,13 @@ package = "inillucent-driver-capi"
 kind = "test"
 name = "conformance"
 tier = "e2e"
-# `cc` for the C program that links the `cdylib`, and `asan` for the sanitized
+# `cc` for the C program that links the static library, and `asan` for the sanitized
 # run, which skipped on a toolchain without the sanitizer while the row named
 # only the compiler. Since task-2103 the sanitized run instruments the Rust
 # library too, with `-Zsanitizer=address` under `RUSTC_BOOTSTRAP=1`. Before
 # that it instrumented only the C program and did not report the Rust side read
-# of freed memory that task-2098 fixed.
+# of freed memory that task-2098 fixed. A library that fails to build is not a
+# missing prerequisite and fails the suite with cargo's output (task-2101).
 requires = ["cc", "asan"]
 
 # --- perf: the cost guards, so a regression fails a test rather than a benchmark

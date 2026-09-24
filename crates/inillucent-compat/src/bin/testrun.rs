@@ -1645,10 +1645,18 @@ fn missing_prerequisites<'run>(
         let silent = outcome.ran == 0;
         let announced = inillucent_compat::differential::announces_a_skip(&outcome.output);
         if silent || announced {
-            let said = if row.requires.is_empty() {
-                strict_reasons
-            } else {
+            // **What the suite said comes first, and the row is the fallback
+            // (task-2101).** The row lists everything a suite *could* be
+            // missing, and the suite names what it *was* missing. With the row
+            // first, `conformance` failing to relink a DLL that Python had
+            // loaded was printed as `needs cc, asan`, which sent the reader
+            // looking for a missing toolchain when the suite itself had said
+            // "the C ABI static library did not build". A non-strict run has no
+            // panic to read the reason from, so it still prints the row.
+            let said = if strict_reasons.is_empty() {
                 row.requires.clone()
+            } else {
+                strict_reasons
             };
             hollow.push((outcome, said));
         }
