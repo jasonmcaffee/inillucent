@@ -657,7 +657,10 @@ function Get-Routes {
                 foreach ($script in @('install.sh', 'macos/verify-macos.sh')) {
                     $path = Join-Path $script:Packaging $script
                     if (-not (Test-Path -LiteralPath $path)) { continue }
-                    $complaint = (& bash -n $path 2>&1 | Out-String).Trim()
+                    # The script goes in on standard input rather than as a path. `bash` on this machine can be
+                    # WSL's, which cannot open a Windows path such as J:/build/release, and the site route
+                    # was skipped as "No such file or directory".
+                    $complaint = ([System.IO.File]::ReadAllText($path) | & bash -n 2>&1 | Out-String).Trim()
                     if ($LASTEXITCODE -ne 0) { return "packaging/$script does not parse: $complaint" }
                     # **And no carriage returns, which `bash -n` does not object to.** These scripts
                     # run under `sh`, which on Debian and Ubuntu is dash, and dash reads a CR as
