@@ -97,9 +97,7 @@ fn write_across(main: &Path, aux: &Path) {
     // So the process is a real one and it is killed: `exclusive` checkpoints
     // nothing, the kill runs no destructor, and the operating system releases
     // the locks.
-    let Some(shell) = inillucent_compat::cliproc::program("inillucent-shell") else {
-        panic!("inillucent-shell is not built, and this case is about a crashed process");
-    };
+    let shell = inillucent_compat::cliproc::program("inillucent-shell");
     let said = inillucent_compat::cliproc::write_and_crash(
         &shell,
         main,

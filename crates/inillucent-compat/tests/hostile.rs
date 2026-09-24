@@ -493,9 +493,7 @@ fn hex_of(bits: u64) -> String {
 /// which charge the parser's own recursion.
 #[test]
 fn a_statement_at_the_depth_limit_answers_and_one_past_it_names_the_limit() {
-    let Some(shell) = inillucent_compat::cliproc::program("inillucent-shell") else {
-        return;
-    };
+    let shell = inillucent_compat::cliproc::program("inillucent-shell");
     // Under `ExprDepth`'s 1000 and `ParserDepth`'s 2500, and over each.
     for (under, over, build) in [
         (900usize, 1_100usize, 0usize),
@@ -546,9 +544,7 @@ fn a_statement_at_the_depth_limit_answers_and_one_past_it_names_the_limit() {
 /// not follow the value.
 #[test]
 fn one_value_cannot_be_built_past_the_length_limit() {
-    let Some(binary) = inillucent_compat::cliproc::program("inillucent") else {
-        return;
-    };
+    let binary = inillucent_compat::cliproc::program("inillucent");
     for sql in [
         "SELECT length(zeroblob(1073741824))",
         "SELECT length(randomblob(1073741824))",
@@ -584,9 +580,7 @@ fn one_value_cannot_be_built_past_the_length_limit() {
 /// command line does not have.
 #[test]
 fn a_chain_of_concatenations_cannot_double_past_the_value_bound() {
-    let Some(binary) = inillucent_compat::cliproc::program("inillucent") else {
-        return;
-    };
+    let binary = inillucent_compat::cliproc::program("inillucent");
     let sql = "WITH RECURSIVE c(s) AS (SELECT 'aa' UNION ALL SELECT s||s FROM c) \
                SELECT length(s) FROM c";
     let (code, said, _) = run_and_watch(&binary, sql);

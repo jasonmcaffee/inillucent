@@ -121,24 +121,6 @@ fn reference() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Returns this repository's shell, building it first.
-fn ours() -> Option<PathBuf> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Command::new(cargo)
-        .current_dir(workspace_root())
-        .args(["build", "-p", "inillucent-cli"])
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    let mut directory = std::env::current_exe().unwrap_or_default();
-    directory.pop();
-    directory.pop();
-    let path = directory.join(format!("inillucent-shell{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
-}
-
 /// Builds the generated half of the population.
 ///
 /// Random bit patterns rather than random values in a range: a value drawn
@@ -278,15 +260,21 @@ fn disagreements(shells: &(PathBuf, PathBuf), area: &str, text: &str) -> Vec<Str
     wrong
 }
 
-/// Returns both shells, or `None` after reporting the skip.
+/// Returns both shells, or `None` after reporting that the pinned SQLite shell
+/// is missing.
+///
+/// Only the reference can be missing. This repository's shell is built from
+/// the workspace, and a build that fails panics with cargo's output rather
+/// than being reported here as a missing shell (task-2106).
 fn shells() -> Option<(PathBuf, PathBuf)> {
-    match (reference(), ours()) {
-        (Some(reference), Some(ours_shell)) => Some((reference, ours_shell)),
-        _ => {
-            inillucent_compat::differential::skipping("a shell is missing");
-            None
-        }
-    }
+    let Some(reference) = reference() else {
+        inillucent_compat::differential::skipping("the pinned SQLite shell is not built");
+        return None;
+    };
+    Some((
+        reference,
+        inillucent_compat::cliproc::program("inillucent-shell"),
+    ))
 }
 
 /// **`printf('%s', <real>)`, the default rendering and `%.20g` agree with the

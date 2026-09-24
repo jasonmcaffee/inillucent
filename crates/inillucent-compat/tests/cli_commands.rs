@@ -132,9 +132,7 @@ fn succeeded(verb: &str, ran: &Ran) {
 /// and the exact one is the promise AGENTS.md makes about the JSON object.
 #[test]
 fn query_returns_rows_and_an_exact_total() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "query");
     let ran = run(
         &binary,
@@ -162,9 +160,7 @@ fn query_returns_rows_and_an_exact_total() {
 /// `exec` reports the number of rows it changed.
 #[test]
 fn exec_reports_the_rows_it_changed() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "exec");
     let ran = run(
         &binary,
@@ -184,9 +180,7 @@ fn exec_reports_the_rows_it_changed() {
 /// `batch` runs several statements as one transaction.
 #[test]
 fn batch_runs_several_statements_as_one_transaction() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "batch");
     let path = database.to_string_lossy().to_string();
     let ran = run(
@@ -223,9 +217,7 @@ fn batch_runs_several_statements_as_one_transaction() {
 /// `run` drives the shell, dot commands and all.
 #[test]
 fn run_drives_the_shell_including_dot_commands() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "run");
     let ran = run(
         &binary,
@@ -263,9 +255,7 @@ fn run_drives_the_shell_including_dot_commands() {
 /// pair is read together.
 #[test]
 fn run_reports_a_failing_statement_as_a_failure() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "run-failing");
     let refused = run(
         &binary,
@@ -324,9 +314,7 @@ fn run_reports_a_failing_statement_as_a_failure() {
 /// case is on `run` rather than only on `export`.
 #[test]
 fn run_writes_the_file_a_once_in_the_script_names() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "run-once");
     let file = database
         .parent()
@@ -368,9 +356,7 @@ fn run_writes_the_file_a_once_in_the_script_names() {
 /// `create` makes a file, and says which one.
 #[test]
 fn create_makes_a_file_and_names_it() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = area("create").join("fresh.rdb");
     let ran = run(
         &binary,
@@ -391,9 +377,7 @@ fn create_makes_a_file_and_names_it() {
 /// `tables` lists the tables that are there.
 #[test]
 fn tables_lists_the_tables_that_are_there() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "tables");
     let ran = run(
         &binary,
@@ -419,9 +403,7 @@ fn tables_lists_the_tables_that_are_there() {
 /// `describe` returns one row per column, with the column names as its own.
 #[test]
 fn describe_returns_one_row_per_column() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "describe");
     let ran = run(
         &binary,
@@ -455,9 +437,7 @@ fn describe_returns_one_row_per_column() {
 /// `schema` returns the statement that would recreate the table.
 #[test]
 fn schema_returns_the_statement_that_recreates_the_table() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "schema");
     let ran = run(
         &binary,
@@ -480,9 +460,7 @@ fn schema_returns_the_statement_that_recreates_the_table() {
 /// `indexes` names the index that was created.
 #[test]
 fn indexes_names_the_index_that_was_created() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "indexes");
     let ran = run(
         &binary,
@@ -508,9 +486,7 @@ fn indexes_names_the_index_that_was_created() {
 /// `databases` names the main database and its file.
 #[test]
 fn databases_names_the_main_database_and_its_file() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "databases");
     let ran = run(
         &binary,
@@ -533,9 +509,7 @@ fn databases_names_the_main_database_and_its_file() {
 /// `explain` returns a plan naming the table it would read.
 #[test]
 fn explain_returns_a_plan_naming_the_table() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "explain");
     let ran = run(
         &binary,
@@ -564,9 +538,7 @@ fn explain_returns_a_plan_naming_the_table() {
 /// `functions` lists a built-in by name.
 #[test]
 fn functions_lists_a_builtin_by_name() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "functions");
     let ran = run(
         &binary,
@@ -593,9 +565,7 @@ fn functions_lists_a_builtin_by_name() {
 /// `capabilities` reports every row with a support value.
 #[test]
 fn capabilities_reports_every_row_with_a_support_value() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let ran = run(&binary, &["capabilities", "--output", "json"]);
     succeeded("capabilities", &ran);
     assert_eq!(
@@ -626,9 +596,7 @@ fn capabilities_reports_every_row_with_a_support_value() {
 /// `version` reports the version this binary was built at.
 #[test]
 fn version_reports_the_version_it_was_built_at() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let ran = run(&binary, &["version", "--output", "json"]);
     succeeded("version", &ran);
     let reported = text_field(&ran.stdout, "cli");
@@ -643,9 +611,7 @@ fn version_reports_the_version_it_was_built_at() {
 /// `help` lists every verb the registry holds.
 #[test]
 fn help_lists_every_verb_the_registry_holds() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let ran = run(&binary, &["help", "--output", "json"]);
     succeeded("help", &ran);
     let listed: Vec<String> = rows(&ran.stdout)
@@ -669,9 +635,7 @@ fn help_lists_every_verb_the_registry_holds() {
 /// `import` loads a CSV file and says how many rows it took.
 #[test]
 fn import_loads_a_csv_file() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "import");
     let csv = database.with_file_name("rows.csv");
     // Both columns, because `import` maps a file's columns onto the table's by
@@ -726,9 +690,7 @@ fn import_loads_a_csv_file() {
 /// `export_to_a_file_writes_the_rows_in_every_format` below does.
 #[test]
 fn export_writes_the_rows_in_the_format_asked_for() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "export");
     let ran = run(
         &binary,
@@ -763,9 +725,7 @@ fn export_writes_the_rows_in_the_format_asked_for() {
 /// contains every substring nobody looked for.
 #[test]
 fn export_to_a_file_writes_the_rows_in_every_format() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "export-out");
     // The database's own directory, not a second `area` call: `area` empties
     // what it returns, and asking for this one again would delete the fixture
@@ -850,9 +810,7 @@ fn export_to_a_file_writes_the_rows_in_every_format() {
 /// checking whether the export found anything would be told it had.
 #[test]
 fn export_to_a_file_of_an_empty_table_reports_no_rows() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "export-empty");
     let file = database
         .parent()
@@ -906,9 +864,7 @@ fn export_to_a_file_of_an_empty_table_reports_no_rows() {
 /// which matched neither destination of the thing it replaces.
 #[test]
 fn export_to_a_csv_file_ends_records_the_way_the_reference_does() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "export-crlf");
     let file = database
         .parent()
@@ -946,9 +902,7 @@ fn export_to_a_csv_file_ends_records_the_way_the_reference_does() {
 /// `dump` produces SQL that recreates the schema and the rows.
 #[test]
 fn dump_produces_sql_that_recreates_the_database() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "dump");
     let ran = run(
         &binary,
@@ -971,9 +925,7 @@ fn dump_produces_sql_that_recreates_the_database() {
 /// `backup` writes a copy that opens and holds the same rows.
 #[test]
 fn backup_writes_a_copy_that_holds_the_same_rows() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "backup");
     let copy = database.with_file_name("copy.rdb");
     let ran = run(
@@ -1028,9 +980,7 @@ fn backup_writes_a_copy_that_holds_the_same_rows() {
 /// (task-1969, 5.2).
 #[test]
 fn restore_refuses_a_backup_that_is_not_there_and_reopens_one_that_is() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "restore");
     let copy = database.with_file_name("copy.rdb");
     succeeded(
@@ -1105,9 +1055,7 @@ fn restore_refuses_a_backup_that_is_not_there_and_reopens_one_that_is() {
 /// nonzero exit code rather than an empty destination.
 #[test]
 fn migrate_refuses_a_source_that_is_not_there() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let directory = area("migrate");
     let absent = directory.join("no-such-source.db");
     let destination = directory.join("out.rdb");
@@ -1148,9 +1096,7 @@ fn migrate_refuses_a_source_that_is_not_there() {
 /// `checkpoint` reports how much of the log it moved.
 #[test]
 fn checkpoint_reports_what_it_moved() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "checkpoint");
     let ran = run(
         &binary,
@@ -1285,9 +1231,7 @@ fn empty_named_column(binary: &Path, path: &str) -> Vec<Vec<String>> {
 /// code would have passed throughout.
 #[test]
 fn a_dump_round_trip_keeps_every_row_of_an_awkwardly_named_table() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let (directory, source) = awkwardly_named(&binary, "dump-round-trip");
     let source_path = source.to_string_lossy().to_string();
     let dumped = run(&binary, &["--db", source_path.as_str(), "dump"]);
@@ -1334,9 +1278,7 @@ fn a_dump_round_trip_keeps_every_row_of_an_awkwardly_named_table() {
 /// `integrity-check` answers `ok` on a database it just wrote.
 #[test]
 fn integrity_check_answers_ok_on_a_healthy_file() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "integrity-check");
     let ran = run(
         &binary,
@@ -1373,9 +1315,7 @@ fn integrity_check_answers_ok_on_a_healthy_file() {
 /// question.
 #[test]
 fn integrity_check_refuses_a_corrupt_file() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "integrity-check-corrupt");
     // Enough rows that the damage lands in a page the check reads rather than
     // in the header, which is refused at open and would grade a different path.
@@ -1444,9 +1384,7 @@ fn integrity_check_refuses_a_corrupt_file() {
 /// from argv reaches the same parser, and so does every MCP request line.
 #[test]
 fn a_deeply_nested_params_file_is_refused_rather_than_fatal() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let directory = area("deep-params-file");
     let database = directory.join("app.rdb");
     let path = database.to_string_lossy().to_string();
@@ -1532,9 +1470,10 @@ fn pinned_shell() -> Option<PathBuf> {
 /// shipped one was the one nobody graded.
 #[test]
 fn the_shipped_verb_carries_a_full_text_table_and_the_schema_pragmas() {
-    let (Some(shell), Some(binary)) = (pinned_shell(), program("inillucent")) else {
+    let Some(shell) = pinned_shell() else {
         return;
     };
+    let binary = program("inillucent");
     let directory = area("migrate-shipped-verb");
     let source = directory.join("src.db");
     let built = std::process::Command::new(&shell)
@@ -1632,9 +1571,7 @@ fn the_shipped_verb_carries_a_full_text_table_and_the_schema_pragmas() {
 /// `analyze` writes statistics the planner can read back.
 #[test]
 fn analyze_writes_statistics_the_planner_reads() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "analyze");
     let ran = run(
         &binary,
@@ -1673,9 +1610,7 @@ fn analyze_writes_statistics_the_planner_reads() {
 /// `stats` reports the page pool's size in bytes.
 #[test]
 fn stats_reports_the_page_pool_size() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "stats");
     let ran = run(
         &binary,
@@ -1700,9 +1635,7 @@ fn stats_reports_the_page_pool_size() {
 /// `search` finds the row whose text matches.
 #[test]
 fn search_finds_the_row_whose_text_matches() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "search");
     let ran = run(
         &binary,
@@ -1741,9 +1674,7 @@ fn search_finds_the_row_whose_text_matches() {
 /// engine, which is where a ranking question belongs.
 #[test]
 fn vector_search_answers_with_a_distance_column() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "vector-search");
     let ran = run(
         &binary,
@@ -1780,9 +1711,7 @@ fn vector_search_answers_with_a_distance_column() {
 /// names the model it would fetch and where it would put it.
 #[test]
 fn setup_embeddings_reports_what_is_installed() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let ran = run(&binary, &["setup-embeddings", "--output", "json"]);
     succeeded("setup-embeddings", &ran);
     assert!(
@@ -1806,9 +1735,7 @@ fn setup_embeddings_reports_what_is_installed() {
 /// drive one from a test is to write to it and close the pipe.
 #[test]
 fn shell_runs_what_is_written_to_its_standard_input() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "shell");
     let ran = run_with_input(
         &binary,
@@ -1830,9 +1757,7 @@ fn shell_runs_what_is_written_to_its_standard_input() {
 /// belongs to the command table.
 #[test]
 fn mcp_answers_an_initialize_over_its_standard_input() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "mcp");
     let request = concat!(
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"#,
@@ -1886,9 +1811,7 @@ const NOT_BUILT: [&str; 3] = [
 /// script's `$?` were untested.
 #[test]
 fn an_unbuilt_statement_exits_three_and_says_unsupported() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "exit-code-three");
     let mut tried: Vec<String> = Vec::new();
     // A flag rather than a `return` out of the loop: `policy.rs`'s
@@ -1944,9 +1867,7 @@ fn an_unbuilt_statement_exits_three_and_says_unsupported() {
 /// could not tell it from the live log.
 #[test]
 fn query_names_a_log_segment_the_chain_does_not_reach() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let database = populated(&binary, "stray-segment");
     let path = database.to_string_lossy().to_string();
 
@@ -2067,9 +1988,7 @@ fn every_registry_command_has_a_subprocess_test() {
 /// file and says so in its own help.
 #[test]
 fn a_read_verb_on_a_missing_path_refuses_and_creates_nothing() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let directory = area("missing");
     let database = directory.join("not-there.rdb");
     for verb in ["tables", "schema", "indexes", "databases", "stats"] {
@@ -2130,9 +2049,7 @@ fn a_read_verb_on_a_missing_path_refuses_and_creates_nothing() {
 /// test writes it through the engine first rather than assembling a header.
 #[test]
 fn a_newer_format_version_is_refused_as_unsupported() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let directory = area("format");
     let database = directory.join("newer.rdb");
     let made = run(&binary, &["create", &database.to_string_lossy()]);

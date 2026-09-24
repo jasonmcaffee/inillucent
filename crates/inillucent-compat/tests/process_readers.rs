@@ -265,9 +265,7 @@ fn graded(mut child: Child, who: usize) -> Seen {
 
 /// Four readers beside a writer see prefixes and nothing else.
 fn readers_beside_a_writer_see_only_prefixes(arm: &Arm) {
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let shell = program("inillucent-shell");
     let directory = area(arm);
     let database = prepared(arm, &directory);
     let commits = Scale::from_env().pick(2_000, 20_000);

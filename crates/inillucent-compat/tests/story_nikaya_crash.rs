@@ -68,9 +68,7 @@ fn area(arm: &Arm, tag: &str) -> PathBuf {
 /// A kill between the `ALTER TABLE` and the `CREATE INDEX` leaves a database
 /// the next startup finishes.
 fn a_kill_inside_the_migration_leaves_it_finishable(arm: &Arm, _unused: &Path) {
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let shell = program("inillucent-shell");
     let directory = area(arm, "mid-migration");
     let path = directory.join("nikaya.rdb");
     let documents = Scale::from_env().pick(24, 400);
@@ -204,9 +202,7 @@ scenario!(
 /// so the log stream is abandoned rather than closed, which is the condition
 /// the page was stamped under.
 fn a_kill_after_analyze_leaves_the_file_openable(arm: &Arm, _unused: &Path) {
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let shell = program("inillucent-shell");
     let directory = area(arm, "after-analyze");
     let path = directory.join("analyzed.rdb");
     let documents = Scale::from_env().pick(24, 400);

@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 
+use inillucent_compat::cliproc;
 use inillucent_compat::workspace_root;
 
 /// Where this suite's scratch databases live.
@@ -32,26 +33,6 @@ fn area() -> PathBuf {
     let path = workspace_root().join("_agent_output/mcp-cancel");
     let _ = std::fs::create_dir_all(&path);
     path
-}
-
-/// Returns one of the shipped binaries, building them first.
-///
-/// @param name - which binary
-fn binary(name: &str) -> Option<PathBuf> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Command::new(cargo)
-        .current_dir(workspace_root())
-        .args(["build", "-p", "inillucent-cli"])
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    let mut directory = std::env::current_exe().unwrap_or_default();
-    directory.pop();
-    directory.pop();
-    let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
 }
 
 /// How many rows the table holds.
@@ -67,8 +48,8 @@ const ROWS: usize = 150;
 /// A database with enough rows that a statement over it takes a while.
 ///
 /// @param name - the file's name
-fn database(name: &str) -> Option<PathBuf> {
-    let program = binary("inillucent")?;
+fn database(name: &str) -> PathBuf {
+    let program = cliproc::program("inillucent");
     let path = area().join(name);
     for suffix in ["", "-wal", "-journal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
@@ -77,22 +58,26 @@ fn database(name: &str) -> Option<PathBuf> {
     let made = Command::new(&program)
         .args(["--db", &named, "exec", "CREATE TABLE t (n INTEGER)"])
         .output()
-        .ok()?;
-    if !made.status.success() {
-        eprintln!("{}", String::from_utf8_lossy(&made.stderr));
-        return None;
-    }
+        .unwrap_or_else(|error| panic!("inillucent did not start: {error}"));
+    assert!(
+        made.status.success(),
+        "`inillucent exec` could not create the table:
+{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
     let values: Vec<String> = (0..ROWS).map(|nth| format!("({nth})")).collect();
     let filled = Command::new(&program)
         .args(["--db", &named, "exec"])
         .arg(format!("INSERT INTO t (n) VALUES {}", values.join(",")))
         .output()
-        .ok()?;
-    if !filled.status.success() {
-        eprintln!("{}", String::from_utf8_lossy(&filled.stderr));
-        return None;
-    }
-    Some(path)
+        .unwrap_or_else(|error| panic!("inillucent did not start: {error}"));
+    assert!(
+        filled.status.success(),
+        "`inillucent exec` could not fill the table:
+{}",
+        String::from_utf8_lossy(&filled.stderr)
+    );
+    path
 }
 
 /// The statement the cases cancel.
@@ -115,8 +100,8 @@ impl Server {
     /// Starts a server on a database and completes the handshake.
     ///
     /// @param database - the file to serve
-    fn start(database: &PathBuf) -> Option<Server> {
-        let program = binary("inillucent-mcp")?;
+    fn start(database: &PathBuf) -> Server {
+        let program = cliproc::program("inillucent-mcp");
         let mut child = Command::new(program)
             .arg("--db")
             .arg(database)
@@ -124,8 +109,11 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .ok()?;
-        let answers = BufReader::new(child.stdout.take()?);
+            .unwrap_or_else(|error| panic!("inillucent-mcp did not start: {error}"));
+        let Some(stdout) = child.stdout.take() else {
+            panic!("inillucent-mcp was started with a piped standard output and has none");
+        };
+        let answers = BufReader::new(stdout);
         let mut server = Server { child, answers };
         let _ = server.ask(concat!(
             r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":"#,
@@ -133,7 +121,7 @@ impl Server {
             r#""clientInfo":{"name":"mcp_cancel"}}}"#
         ));
         server.tell(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
-        Some(server)
+        server
     }
 
     /// Writes one line and does not wait for an answer.
@@ -212,14 +200,8 @@ fn uncancelled_seconds(server: &mut Server) -> f64 {
 /// server could not read the second while it was answering the first.
 #[test]
 fn a_running_tool_call_is_stopped_by_a_cancellation() {
-    let Some(database) = database("running.rdb") else {
-        inillucent_compat::differential::skipping("mcp_cancel: the command line did not build");
-        return;
-    };
-    let Some(mut server) = Server::start(&database) else {
-        inillucent_compat::differential::skipping("mcp_cancel: the MCP server did not start");
-        return;
-    };
+    let database = database("running.rdb");
+    let mut server = Server::start(&database);
 
     let whole = uncancelled_seconds(&mut server);
     assert!(
@@ -255,14 +237,8 @@ fn a_running_tool_call_is_stopped_by_a_cancellation() {
 /// id instead, and answers the request as cancelled without running it.
 #[test]
 fn a_cancellation_that_arrives_first_is_not_lost() {
-    let Some(database) = database("early.rdb") else {
-        inillucent_compat::differential::skipping("mcp_cancel: the command line did not build");
-        return;
-    };
-    let Some(mut server) = Server::start(&database) else {
-        inillucent_compat::differential::skipping("mcp_cancel: the MCP server did not start");
-        return;
-    };
+    let database = database("early.rdb");
+    let mut server = Server::start(&database);
 
     // Cancel a request that has not been sent, then send it.
     server.tell(&cancellation(7));

@@ -568,12 +568,8 @@ fn drive(shell: &Path, database: &Path, directory: &str, case: &Case, safely: bo
 /// Every dispatched dot command answers, and the answer says something.
 #[test]
 fn every_dispatched_dot_command_answers() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let area = area("dispatched");
     let directory = area.to_string_lossy().replace('\\', "/");
     let database = populated(&binary, &area);
@@ -616,12 +612,8 @@ fn every_dispatched_dot_command_answers() {
 /// whatever machine this is.
 #[test]
 fn the_unsafe_dot_commands_are_refused_in_safe_mode() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let area = area("unsafe");
     let directory = area.to_string_lossy().replace('\\', "/");
     let database = populated(&binary, &area);
@@ -803,12 +795,8 @@ fn typing(shell: &Path, database: &Path, typed: &str) -> String {
 /// difference between help that is browsable and help that is searchable.
 #[test]
 fn the_help_command_answers_in_all_five_of_its_ways() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let area = area("help-modes");
     let database = populated(&binary, &area);
     let ask = |pattern: &str| typing(&shell, &database, pattern);
@@ -902,12 +890,8 @@ fn the_help_command_answers_in_all_five_of_its_ways() {
 /// prints a default back whatever it was told.
 #[test]
 fn the_dbconfig_command_lists_reads_sets_and_refuses() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let area = area("dbconfig-arms");
     let database = populated(&binary, &area);
     let ask = |typed: &str| typing(&shell, &database, typed);
@@ -996,12 +980,8 @@ fn the_dbconfig_command_lists_reads_sets_and_refuses() {
 /// they go back to being constants.
 #[test]
 fn the_show_command_reports_the_settings_that_were_written_into_it() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let area = area("show-settings");
     let database = populated(&binary, &area);
     let ask = |typed: &str| typing(&shell, &database, typed);
@@ -1057,12 +1037,8 @@ fn the_show_command_reports_the_settings_that_were_written_into_it() {
 /// there, and the two words a person types when they want a setting off again.
 #[test]
 fn the_settings_commands_take_their_arguments() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let area = area("settings-arguments");
     let database = populated(&binary, &area);
     let ask = |typed: &str| typing(&shell, &database, typed);

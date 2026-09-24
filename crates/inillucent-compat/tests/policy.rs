@@ -1888,27 +1888,24 @@ fn announces_by_saying_so(block: &str) -> bool {
 /// crates.** Each of these has one way to answer "nothing to do" and announces
 /// before it does: `differential::compare` returns zero only when
 /// `start_oracle` answered `None`, after which it has already called
-/// `announce_skip`; `cliproc::program` returns `None` only when the build did
-/// not produce the binary, after which it has already called `skipping`. So
-/// `let Some(binary) = program("inillucent") else { return; }` in a caller is a
-/// skip that was announced by the only code that knew what was missing.
+/// `announce_skip`. So a caller that returns early on that zero is a skip that
+/// was announced by the only code that knew what was missing.
 ///
 /// The cost of naming them is that the list can go stale - a helper could stop
 /// announcing and forty call sites would silently become silent skips - and
 /// [`every_helper_this_check_trusts_actually_announces`] is what pays it.
 ///
-/// **`program` joined the list in task-1970.** Forty call sites across
-/// `cli_commands.rs`, `mcp_wire.rs`, `dot_commands.rs`, `process_crash.rs` and
-/// `rag_verify.rs` were reported by this check as silent skips, and they are
-/// not: they go through a helper in `src/` rather than one in the same test
-/// file, which `announcing_helpers` below can see and this list is for.
-const ANNOUNCERS: [(&str, &str); 3] = [
+/// **`cliproc::program` was on this list from task-1970 until task-2106.** It
+/// returned `None` and announced a skip when the build of `inillucent-cli`
+/// failed, which `--strict` then reported as a missing prerequisite. It now
+/// panics with cargo's output and returns the path, so its callers have no
+/// early return left to account for and it announces nothing.
+const ANNOUNCERS: [(&str, &str); 2] = [
     ("compare", "crates/inillucent-compat/src/differential.rs"),
     (
         "compare_queries",
         "crates/inillucent-compat/src/differential.rs",
     ),
-    ("program", "crates/inillucent-compat/src/cliproc.rs"),
 ];
 
 /// Every helper [`ANNOUNCERS`] trusts to announce a skip does announce one.
@@ -1917,7 +1914,8 @@ const ANNOUNCERS: [(&str, &str); 3] = [
 /// `announces_by_saying_so` accepts a call to any of them as an announcement,
 /// so a helper that stopped calling the skip helper would turn every one of its
 /// call sites into a silent skip at once - forty of them, in the case of
-/// `program` - and `every_early_return_in_a_test_says_why` would go on passing.
+/// `cliproc::program` while it was on the list - and
+/// `every_early_return_in_a_test_says_why` would go on passing.
 /// That is the exact shape of the defect task-1969 4.2 found, one level up: a
 /// check that matched a helper by name.
 #[test]

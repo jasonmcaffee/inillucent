@@ -167,12 +167,7 @@ fn drive_the_runners() -> Vec<String> {
     // `cliproc::program` builds it into the same target directory the calling
     // test binary is in, which is what makes this work under a redirected
     // `CARGO_TARGET_DIR` and so in every worktree.
-    let Some(binary) = inillucent_compat::cliproc::program("inillucent") else {
-        return DRIVEN
-            .iter()
-            .map(|(language, _, _, _)| (*language).to_string())
-            .collect();
-    };
+    let binary = inillucent_compat::cliproc::program("inillucent");
     let mut absent = Vec::new();
     for (language, program, version, arguments) in DRIVEN {
         let present = std::process::Command::new(program)

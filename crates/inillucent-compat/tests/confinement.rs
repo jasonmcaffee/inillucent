@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use inillucent_compat::cliproc;
 use inillucent_compat::workspace_root;
 
 /// Where this suite's scratch directories live.
@@ -38,39 +39,6 @@ fn area(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&path);
     let _ = std::fs::create_dir_all(&path);
     path
-}
-
-/// Returns the verb-shaped command line, building it first.
-///
-/// **`None` is announced as a skip rather than returned quietly (task-1913).**
-/// Ten cases in this file opened with `let Some(program) = binary(...) else {
-/// return; };`, so a build that did not produce the binary made all ten pass
-/// without running anything - and these are the cases that check a confined
-/// server cannot be talked into opening a file outside its root, which is the
-/// last place a silent pass belongs. `--strict` turns the announced skip into
-/// a failure; the two link cases in this file already announced theirs.
-///
-/// @param name - the binary's name, without the platform's suffix
-fn binary(name: &str) -> Option<PathBuf> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let built = Command::new(cargo)
-        .current_dir(workspace_root())
-        .args(["build", "-p", "inillucent-cli"])
-        .status();
-    let found = match built {
-        Ok(status) if status.success() => {
-            let mut directory = std::env::current_exe().unwrap_or_default();
-            directory.pop();
-            directory.pop();
-            let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-            path.is_file().then_some(path)
-        }
-        _ => None,
-    };
-    if found.is_none() {
-        inillucent_compat::differential::skipping(&format!("{name} did not build"));
-    }
-    found
 }
 
 /// What one run of the command line printed and what it returned.
@@ -161,9 +129,7 @@ fn link_directory(link: &Path, target: &Path) -> bool {
 /// database in a completely different directory.
 #[test]
 fn a_link_below_the_root_does_not_reach_outside_it() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("link");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -227,9 +193,7 @@ fn a_link_below_the_root_does_not_reach_outside_it() {
 /// resolving one must not lose the case it was right about.
 #[test]
 fn a_path_that_climbs_out_of_the_root_is_refused() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("climb");
     let root = base.join("root");
     let _ = std::fs::create_dir_all(&root);
@@ -245,9 +209,7 @@ fn a_path_that_climbs_out_of_the_root_is_refused() {
 /// An absolute path outside the root is refused.
 #[test]
 fn an_absolute_path_outside_the_root_is_refused() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("absolute");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -268,9 +230,7 @@ fn an_absolute_path_outside_the_root_is_refused() {
 /// above and be useless.
 #[test]
 fn a_path_inside_the_root_is_admitted() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("inside");
     let root = base.join("root");
     let _ = std::fs::create_dir_all(root.join("nested"));
@@ -310,9 +270,7 @@ fn a_path_inside_the_root_is_admitted() {
 /// a version that printed the file and then complained.
 #[test]
 fn a_params_file_outside_the_root_is_refused() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("params-file-outside");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -352,9 +310,7 @@ fn a_params_file_outside_the_root_is_refused() {
 /// `params-file` would pass it and would have broken the parameter.
 #[test]
 fn a_params_file_inside_the_root_is_admitted() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("params-file-inside");
     let root = base.join("root");
     let _ = std::fs::create_dir_all(&root);
@@ -397,9 +353,7 @@ fn a_params_file_inside_the_root_is_admitted() {
 /// this reason, and `params-file` did not.
 #[test]
 fn a_params_file_of_standard_input_is_refused_when_confined() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("params-file-stdin");
     let root = base.join("root");
     let _ = std::fs::create_dir_all(&root);
@@ -440,9 +394,7 @@ fn a_params_file_of_standard_input_is_refused_when_confined() {
 /// disk and read it with a qualified name.
 #[test]
 fn attaching_a_database_outside_the_root_is_refused() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("attach");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -480,9 +432,7 @@ fn attaching_a_database_outside_the_root_is_refused() {
 /// through the statement that never saw the check.
 #[test]
 fn attaching_through_a_link_is_refused() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("attach-link");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -528,9 +478,7 @@ fn attaching_through_a_link_is_refused() {
 /// to stop.
 #[test]
 fn vacuuming_into_a_path_outside_the_root_is_refused() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("vacuum");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -562,9 +510,7 @@ fn vacuuming_into_a_path_outside_the_root_is_refused() {
 /// read from outside it.
 #[test]
 fn backup_and_restore_stay_inside_the_root() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("backup");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -599,9 +545,7 @@ fn backup_and_restore_stay_inside_the_root() {
 /// outside it.
 #[test]
 fn import_and_export_stay_inside_the_root() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("transfer");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -651,9 +595,7 @@ fn import_and_export_stay_inside_the_root() {
 /// got wrong was the one path that was never checked.
 #[test]
 fn the_startup_database_is_confined_too() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("startup");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -680,9 +622,7 @@ fn the_startup_database_is_confined_too() {
 /// A root that names nothing is refused rather than confining to nothing.
 #[test]
 fn a_root_that_is_not_a_directory_is_refused() {
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let program = cliproc::program("inillucent");
     let base = area("absent");
     let missing = base.join("not-there");
     let refused = run(&program, &missing, &["--db", ":memory:", "query"])
@@ -701,9 +641,7 @@ fn a_root_that_is_not_a_directory_is_refused() {
 /// documented on `inillucent-mcp` and that is the program an agent is handed.
 #[test]
 fn the_mcp_server_refuses_a_path_outside_the_root() {
-    let Some(program) = binary("inillucent-mcp") else {
-        return;
-    };
+    let program = cliproc::program("inillucent-mcp");
     let base = area("mcp");
     let root = base.join("root");
     let outside = base.join("outside");
@@ -814,12 +752,8 @@ fn ask_the_server(program: &Path, root: &Path, calls: &[String]) -> String {
 /// never checked.
 #[test]
 fn the_mcp_server_exports_into_a_file_inside_the_root() {
-    let Some(server) = binary("inillucent-mcp") else {
-        return;
-    };
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let server = cliproc::program("inillucent-mcp");
+    let program = cliproc::program("inillucent");
     let base = area("mcp-export");
     let root = base.join("root");
     let _ = std::fs::create_dir_all(&root);
@@ -868,12 +802,8 @@ fn the_mcp_server_exports_into_a_file_inside_the_root() {
 /// checks.
 #[test]
 fn a_typed_once_is_still_refused_on_a_confined_server() {
-    let Some(server) = binary("inillucent-mcp") else {
-        return;
-    };
-    let Some(program) = binary("inillucent") else {
-        return;
-    };
+    let server = cliproc::program("inillucent-mcp");
+    let program = cliproc::program("inillucent");
     let base = area("mcp-once");
     let root = base.join("root");
     let _ = std::fs::create_dir_all(&root);

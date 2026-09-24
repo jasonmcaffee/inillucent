@@ -275,9 +275,7 @@ fn read_until(mut out: std::process::ChildStdout, marker: &str) -> String {
 /// Two writers, one process per statement, lose nothing, under both modes.
 #[test]
 fn two_writer_processes_lose_nothing_one_statement_each() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     for mode in ["normal", "exclusive"] {
         let directory = area(&format!("one-shot-{mode}"));
         let database = prepared(&binary, &directory);
@@ -313,12 +311,8 @@ fn two_writer_processes_lose_nothing_one_statement_each() {
 /// Two long-lived writers, autocommitting, lose nothing, under both modes.
 #[test]
 fn two_writer_processes_lose_nothing_long_lived() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     for mode in ["normal", "exclusive"] {
         let directory = area(&format!("long-lived-{mode}"));
         let database = prepared(&binary, &directory);
@@ -382,12 +376,8 @@ fn two_writer_processes_lose_nothing_long_lived() {
 /// be measuring nothing.
 #[test]
 fn a_second_process_reads_the_first_processes_unfolded_statement() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let directory = area("unfolded-read");
     let database = prepared(&binary, &directory);
     let mut writer = Command::new(&shell)
@@ -464,12 +454,8 @@ fn a_second_process_reads_the_first_processes_unfolded_statement() {
 /// fold on the same path, at a point the script names.
 #[test]
 fn two_processes_alternate_with_folds_and_lose_nothing() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let directory = area("alternating-folds");
     let database = prepared(&binary, &directory);
     let script = |who: &str| {
@@ -518,12 +504,8 @@ fn two_processes_alternate_with_folds_and_lose_nothing() {
 /// nothing (task-1979, C2).
 #[test]
 fn two_processes_attaching_one_file_lose_nothing() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let directory = area("attached");
     let shared = prepared(&binary, &directory);
     let own = |who: &str| {
@@ -678,12 +660,8 @@ fn first_lines(said: &str) -> String {
 /// a budget and reporting the writer's lock (task-1979, C5).
 #[test]
 fn a_readonly_process_reads_while_a_writer_holds_the_file() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let directory = area("readonly-reader");
     let database = prepared(&binary, &directory);
     let ran = run(
@@ -745,12 +723,8 @@ fn a_readonly_process_reads_while_a_writer_holds_the_file() {
 /// with it (task-1979, C6).
 #[test]
 fn a_refusal_names_the_holder_and_the_operation() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let directory = area("refusal-text");
     let database = prepared(&binary, &directory);
 

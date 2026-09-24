@@ -132,9 +132,7 @@ fn write_and_abandon(path: &Path, sql: &str) {
     // crash is a real one now - the shell is killed while it waits for its next
     // line, and the operating system releases the locks, which is the thing
     // this was simulating all along.
-    let Some(shell) = inillucent_compat::cliproc::program("inillucent-shell") else {
-        panic!("inillucent-shell is not built, and this case is about a crashed process");
-    };
+    let shell = inillucent_compat::cliproc::program("inillucent-shell");
     let said = inillucent_compat::cliproc::write_and_crash(&shell, path, sql);
     assert!(
         said.contains("written"),

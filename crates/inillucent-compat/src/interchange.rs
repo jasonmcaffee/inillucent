@@ -25,45 +25,14 @@ use std::process::Command;
 
 /// Returns the workspace's own shell, building it first.
 ///
-/// **Built into the directory the calling test's own binary lives in
-/// (task-1962).** The shell is looked for beside that binary - `target/debug/`
-/// for an ordinary `cargo test`, `target/release/` for a release one, and
-/// `target/llvm-cov-target/release/` under `cargo llvm-cov` - and the build
-/// used to go to the default target directory whatever the caller's was. Under
-/// coverage that built a shell into `target/debug/` and then looked for one in
-/// `target/llvm-cov-target/release/`, so twelve `schema_forms` cases failed
-/// with "the workspace shell is not built" and a coverage run that cannot
-/// finish reports no number at all.
-///
-/// `None` when the build fails or the binary is not where cargo puts it, which
-/// a caller reports rather than works around.
-pub fn our_shell() -> Option<PathBuf> {
-    let mut directory = std::env::current_exe().ok()?;
-    directory.pop();
-    directory.pop();
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let mut build = Command::new(cargo);
-    build
-        .current_dir(crate::workspace_root())
-        .args(["build", "-p", "inillucent-cli"]);
-    // The profile and the target directory are read back off the path rather
-    // than guessed: the last component names the profile, and its parent is
-    // what cargo was given as `--target-dir`.
-    let profile = directory
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "debug".to_string());
-    if profile != "debug" {
-        build.args(["--profile", &profile]);
-    }
-    if let Some(target) = directory.parent() {
-        build.arg("--target-dir").arg(target);
-    }
-    if !build.status().ok()?.success() {
-        return None;
-    }
-    let path = directory.join(format!("inillucent-shell{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
+/// **Through [`crate::cliproc::program`], which is the one place a test builds
+/// the programs (task-2106).** This ran its own `cargo build`, and returned
+/// `None` when it failed, which each caller turned into the sentence "the
+/// workspace shell is not built" with cargo's actual error left on an inherited
+/// standard error. It also built during the run, which is the race `program`
+/// describes. A failed build now panics with cargo's output in the message.
+pub fn our_shell() -> PathBuf {
+    crate::cliproc::program("inillucent-shell")
 }
 
 /// Returns the pinned reference shell, when it has been downloaded.
@@ -100,7 +69,7 @@ pub fn reference_shell() -> Option<PathBuf> {
 ///
 /// @param path - the inillucent database to render
 pub fn dumped(path: &Path) -> Result<String, String> {
-    let shell = our_shell().ok_or("the workspace shell is not built")?;
+    let shell = our_shell();
     let output = Command::new(&shell)
         .arg(path)
         .arg(".dump")
@@ -181,7 +150,7 @@ fn replay(shell: &Path, path: &Path, sql: &str) -> Result<(), String> {
 ///
 /// @param path - the inillucent database to carry across
 pub fn as_sqlite_file(path: &Path) -> Result<PathBuf, String> {
-    let ours = our_shell().ok_or("the workspace shell is not built")?;
+    let ours = our_shell();
     let mut sql = dumped(path)?;
     sql.push_str(&header_pragmas(&ours, path)?);
     let reference = reference_shell().ok_or("the pinned SQLite shell is not downloaded")?;
@@ -217,7 +186,7 @@ pub fn from_sqlite_file(source: &Path, destination: &Path) -> Result<(), String>
     }
     let mut sql = String::from_utf8_lossy(&output.stdout).into_owned();
     sql.push_str(&header_pragmas(&reference, source)?);
-    let ours = our_shell().ok_or("the workspace shell is not built")?;
+    let ours = our_shell();
     let _ = std::fs::remove_file(destination);
     let _ = std::fs::remove_file(destination.with_extension("db-wal"));
     replay(&ours, destination, &sql)?;

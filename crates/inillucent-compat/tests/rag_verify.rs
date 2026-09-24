@@ -74,9 +74,7 @@ fn can_embed(binary: &Path) -> bool {
 /// Both of the example's scripts pass.
 #[test]
 fn the_example_answers_the_questions_it_documents() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let Some(shell) = shell() else {
         inillucent_compat::differential::skipping(
             "no bash on PATH, and the example's checks are shell scripts",

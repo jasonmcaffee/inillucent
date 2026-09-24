@@ -198,9 +198,7 @@ fn a_database_an_earlier_release_wrote_still_takes_a_write() {
 /// deletes all have to be there, and the file has to pass the integrity check.
 #[test]
 fn an_earlier_releases_file_recovers_this_builds_writes_after_a_crash() {
-    let Some(shell) = inillucent_compat::cliproc::program("inillucent-shell") else {
-        panic!("inillucent-shell is not built, and this case is about a crashed process");
-    };
+    let shell = inillucent_compat::cliproc::program("inillucent-shell");
     let mut sql = String::new();
     for id in 20_000..20_300 {
         sql.push_str(&format!(

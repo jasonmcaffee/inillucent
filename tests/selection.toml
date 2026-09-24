@@ -425,7 +425,6 @@ covers = ["inillucent-engine"]
 # The case that needs a log nothing has folded into the file gets one by running
 # the statements in `inillucent-shell` and killing it, which is what a crash is
 # (task-1980). The shell has to be built for that.
-requires = ["programs"]
 
 # The half `analyze_reopen` cannot ask, because every case in it reopens first:
 # that the connection which ran `ANALYZE` reads the statistics it wrote.
@@ -514,7 +513,6 @@ covers = ["inillucent-engine", "inillucent-ext"]
 # assert is that a statement the parser accepts cannot end the process and that
 # a refusal comes before the allocation - neither of which an in-process case on
 # the harness's own thread can see (task-1979, sections 5.3 and 5.4).
-requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -531,7 +529,6 @@ tier = "engine"
 covers = ["inillucent-engine"]
 # The transaction that must stay undecided is written by `inillucent-shell` in a
 # process that is then killed, for the reason `analyze_reopen`'s row gives.
-requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1043,7 +1040,6 @@ covers = ["inillucent-ext", "inillucent-search", "inillucent-cli"]
 # One of the eleven cases spawns `inillucent query` and reads its exit code,
 # because exit 3 for a layout this build has not got is the part of the refusal
 # an application actually has - the other ten drive the library.
-requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1090,7 +1086,6 @@ covers = ["inillucent-engine"]
 # task-2074: the case that writes into every release's file and crashes kills a
 # real `inillucent-shell`, the way `analyze_reopen` does, so the shell has to be
 # built.
-requires = ["programs"]
 
 # The same question asked of every release at once, and asked backwards
 # (task-2036). The backward direction needs the released binaries, which are
@@ -1680,7 +1675,10 @@ covers = ["inillucent-cli"]
 # asserting a named field of parsed `--output json` or a specific exit code.
 # Eighteen of the thirty verbs were never passed to a spawned binary before
 # this row existed, and `--output json` was read from one for two of them.
-requires = ["programs"]
+# The case for `migrate` writes its source database with the pinned `sqlite3`
+# shell. The programs themselves are not a prerequisite: they are built from
+# this workspace, and a build that fails is a failure (task-2106).
+requires = ["shell"]
 
 # Two recorded clients, replayed against the server that is built now
 # (task-2036). 0.1.2 shipped a handshake the release scripts refused, and
@@ -1692,7 +1690,6 @@ kind = "test"
 name = "mcp_replay"
 tier = "e2e"
 covers = ["inillucent-cli"]
-requires = ["programs"]
 
 # One agent session over MCP, and the protocol edges a client can produce
 # (task-2036). `mcp_wire` beside it calls every tool once with a well formed
@@ -1703,7 +1700,6 @@ kind = "test"
 name = "mcp_session"
 tier = "e2e"
 covers = ["inillucent-cli"]
-requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1714,7 +1710,6 @@ covers = ["inillucent-cli"]
 # One `initialize` handshake over real pipes and one `tools/call` of each of
 # the 28 MCP tools. `command_parity` keeps the tool set equal to the registry;
 # nothing called a tool by name over the wire.
-requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1725,7 +1720,6 @@ covers = ["inillucent-cli"]
 # Every dot command `dot.rs` dispatches, driven through the built shell.
 # Thirty of the seventy dispatched names appeared in no test file, and nine of
 # those were named nowhere outside `dot.rs` and `help.rs`.
-requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1736,7 +1730,6 @@ covers = ["inillucent-engine"]
 # The one durability shape nothing exercised: the operating system ends a real
 # writer process and the file is reopened from the parent. Every other campaign
 # cuts at a fault the simulated file system injects.
-requires = ["programs"]
 
 # Nikaya's startup migration with the process killed inside it (task-2036). The
 # in-process half is `inillucent::story_nikaya`; this one spawns the shipped
@@ -1747,7 +1740,6 @@ kind = "test"
 name = "story_nikaya_crash"
 tier = "durability"
 covers = ["inillucent-cli"]
-requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1758,7 +1750,7 @@ covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
 # The 644 statements task-1979 asked both engines, run from the tree with an
 # allow list of the defects that are still open - and a check that the allow
 # list has no entry that now agrees.
-requires = ["oracle", "programs"]
+requires = ["oracle"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1779,7 +1771,6 @@ kind = "test"
 name = "process_readers"
 tier = "durability"
 covers = ["inillucent-cli"]
-requires = ["programs"]
 
 # A kill campaign across forty seeded cut points, at two page sizes (task-2036).
 # `process_crash` beside it kills at twenty evenly spaced points at one page
@@ -1791,7 +1782,6 @@ kind = "test"
 name = "process_campaign"
 tier = "durability"
 covers = ["inillucent-cli"]
-requires = ["programs"]
 
 # `PRAGMA busy_timeout`'s waiting half, across two real processes (task-2036).
 # The in-process version was deleted when the connection stopped being `Send`
@@ -1803,7 +1793,6 @@ kind = "test"
 name = "busy_timeout"
 tier = "durability"
 covers = ["inillucent-cli"]
-requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1815,7 +1804,6 @@ covers = ["inillucent-engine", "inillucent-pool", "inillucent-wal"]
 # present must equal commits acknowledged, under both locking modes, through
 # ATTACH, and with a read only process reading a file a writer holds
 # (task-1979, section 4).
-requires = ["programs"]
 
 [[target]]
 package = "inillucent-migrate"
@@ -1824,7 +1812,7 @@ name = "cli"
 tier = "e2e"
 # `inillucent-migrate` as a process. It was the one of the four binaries that
 # no test ever spawned.
-requires = ["programs", "tracked-fixtures"]
+requires = ["tracked-fixtures"]
 
 [[target]]
 package = "inillucent-driver-capi"
@@ -2052,7 +2040,6 @@ kind = "test"
 name = "cli_batch"
 tier = "e2e"
 # It pipes statements into the built command line.
-requires = ["programs"]
 covers = ["inillucent-cli"]
 
 # What each command line does before it opens anything. Arrived in task-1936
@@ -2067,7 +2054,6 @@ name = "cli_arguments"
 tier = "e2e"
 # Every case runs the built command line; the file builds it and skips when
 # the build did not produce it.
-requires = ["programs"]
 covers = ["inillucent-cli"]
 
 # The `inillucent` binary's own unit tests, which grew a `#[test]` in task-1936
@@ -2090,7 +2076,6 @@ kind = "test"
 name = "setup_embeddings"
 tier = "e2e"
 # It runs `inillucent setup-embeddings` as a child process.
-requires = ["programs"]
 covers = ["inillucent-cli"]
 
 # `--root` against the file system rather than against path text.
@@ -2109,7 +2094,6 @@ kind = "test"
 name = "mcp_cancel"
 tier = "e2e"
 # It starts the MCP server as a child process and cancels a request in flight.
-requires = ["programs"]
 covers = ["inillucent-cli"]
 
 [[target]]
@@ -2119,7 +2103,6 @@ name = "budgets"
 tier = "e2e"
 # It starts the command line and the MCP server as child processes and skips
 # when either did not build.
-requires = ["programs"]
 covers = ["inillucent-cli"]
 
 [[target]]
@@ -2127,9 +2110,12 @@ package = "inillucent-compat"
 kind = "test"
 name = "confinement"
 tier = "e2e"
-# It drives the built command line and the MCP server under `--root`.
-requires = ["programs"]
+# It drives the built command line and the MCP server under `--root`. The
+# cases that prove a link cannot escape the root need the platform to make a
+# directory link. This row declared `programs` instead until task-2106, so a
+# machine without directory links was reported as one without the programs.
 covers = ["inillucent-cli"]
+requires = ["directory-link"]
 
 # The documentation, checked against the engine beside it. Prose
 # goes stale silently, which is what makes it different from code.

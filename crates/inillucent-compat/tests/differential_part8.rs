@@ -208,9 +208,7 @@ fn the_corpus_agrees_with_sqlite_outside_the_allow_list() {
         inillucent_base::testing::skipping("the pinned SQLite 3.53.4 shell is not downloaded");
         return;
     };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let shell = program("inillucent-shell");
     let cases = cases();
     assert!(
         cases.len() >= 600,

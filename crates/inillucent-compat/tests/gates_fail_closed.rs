@@ -1120,7 +1120,12 @@ fn testrun_refuses_a_filter_that_matches_no_test() {
     let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
         return;
     };
-    let output = run(
+    // **Nested, like every other case here that reaches cargo (task-2106).**
+    // `--no-build` still runs `locate`, which is `cargo test --no-run`, and this
+    // case ran it in the target directory the outer run executes from. A build
+    // there that had to relink a program the outer run was executing failed
+    // with `Access is denied`, and this case then skipped.
+    let output = run_nested(
         gate,
         &[
             "--no-build",
@@ -1131,10 +1136,7 @@ fn testrun_refuses_a_filter_that_matches_no_test() {
         ],
     );
     let text = said(&output);
-    if cargo_could_not_replace_a_running_binary(&text) {
-        skip_a_contended_run("a filter that matches no test");
-        return;
-    }
+    refuse_a_contended_run("a filter that matches no test", &text);
     assert_eq!(
         code(&output),
         2,
@@ -1169,10 +1171,7 @@ fn testrun_passes_a_real_run_with_code_zero() {
     };
     let output = run_nested(gate, &["--no-build", "--tier", "smoke"]);
     let text = said(&output);
-    if cargo_could_not_replace_a_running_binary(&text) {
-        skip_a_contended_run("a real run that passes");
-        return;
-    }
+    refuse_a_contended_run("a real run that passes", &text);
     assert_eq!(
         code(&output),
         0,
@@ -1215,10 +1214,7 @@ fn testrun_exits_one_when_the_run_went_red() {
         ],
     );
     let text = said(&output);
-    if cargo_could_not_replace_a_running_binary(&text) {
-        skip_a_contended_run("a real run that goes red");
-        return;
-    }
+    refuse_a_contended_run("a real run that goes red", &text);
     if !text.contains("ran without a prerequisite") {
         inillucent_compat::differential::skipping(
             "both database servers answered, so neither suite went without its prerequisite \
@@ -1237,9 +1233,10 @@ fn testrun_exits_one_when_the_run_went_red() {
 /// The contention guard matches the failure it was written for, and nothing else.
 ///
 /// **A guard nobody has ever seen fire is the defect this file is about**, one
-/// level down: three cases skip on it, so if it matched nothing they would look
-/// like they were running and would assert nothing, and if it matched
-/// everything they would skip forever. Both texts below are verbatim from runs
+/// level down: three cases fail on it with a sentence naming the collision, so
+/// if it matched nothing a collision would be reported as whatever exit code
+/// the nested run happened to return, and if it matched everything they would
+/// fail on every run. Both texts below are verbatim from runs
 /// on 2026-09-21 - the first from the collision that found this, the second
 /// from the deliberate compile error used to check the exit code.
 #[test]
@@ -1251,7 +1248,7 @@ fn the_contention_guard_tells_a_held_binary_from_a_build_that_failed() {
     assert!(
         cargo_could_not_replace_a_running_binary(held),
         "the guard did not recognise the collision it was written for, so the three cases \
-         that skip on it would assert an exit code from a run that never started"
+         that fail on it would assert an exit code from a run that never started"
     );
 
     let did_not_compile = "error: could not compile `inillucent-compat` (test \"escapes\") \
@@ -1260,8 +1257,8 @@ fn the_contention_guard_tells_a_held_binary_from_a_build_that_failed() {
     assert!(
         !cargo_could_not_replace_a_running_binary(did_not_compile),
         "the guard swallowed a build that failed to compile, which is the case this ticket \
-         exists for - `testrun_exits_two_when_the_build_does_not_complete` would skip \
-         instead of asserting"
+         exists for - `testrun_exits_two_when_the_build_does_not_complete` would report a \
+         collision instead of asserting"
     );
 }
 
@@ -1285,15 +1282,27 @@ fn cargo_could_not_replace_a_running_binary(text: &str) -> bool {
         || text.contains("Access is denied")
 }
 
-/// Announces the skip for a nested run cargo stopped, and says how to avoid it.
+/// Fails a case whose nested run cargo stopped, with everything the run printed.
+///
+/// **A failure, not a skip (task-2106).** This was a skip, and under `--strict`
+/// a skip is a missing prerequisite, so a build that could not replace a file
+/// was reported as a machine that lacked something. It said "through
+/// `inillucent-testrun` this cannot happen", and task-2101's run through
+/// `inillucent-testrun` hit it. Every nested run now builds in
+/// [`nested_target_dir`], which no outer run executes from, so a collision here
+/// is a defect in how the cases share that directory, and cargo's own words are
+/// what a reader needs to find it.
 ///
 /// @param case - what the case was trying to measure
-fn skip_a_contended_run(case: &str) {
-    inillucent_compat::differential::skipping(&format!(
-        "{case}: cargo was relinking a binary that a case in this same file is running, so \
-         the nested run never started. Build the workspace first - through \
-         `inillucent-testrun` this cannot happen, because its own build runs before any test",
-    ));
+/// @param text - everything the nested run printed
+fn refuse_a_contended_run(case: &str, text: &str) {
+    assert!(
+        !cargo_could_not_replace_a_running_binary(text),
+        "{case}: cargo could not replace a file in {} while building for the nested run, so \
+         the nested run never started. This is a failure and not a missing prerequisite. It \
+         printed:\n{text}",
+        nested_target_dir().display()
+    );
 }
 
 /// Runs a gate with `CARGO` pointed somewhere else.

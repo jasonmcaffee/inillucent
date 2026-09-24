@@ -259,9 +259,7 @@ fn afterwards(shell: &Path, database: &Path) -> Afterwards {
 /// The count that matters is `lost`, and it is asserted to be exactly zero -
 /// which is the same bar `process_concurrency.rs` holds two writers to.
 fn a_campaign_of_kills_loses_nothing(arm: &Arm) {
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let shell = program("inillucent-shell");
     let points = cut_points(Scale::from_env().pick(40, 400));
     assert!(
         points.len() >= 20,

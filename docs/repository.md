@@ -129,8 +129,7 @@ table.
 | prerequisite | rows | what provides it |
 |---|---:|---|
 | `oracle` | 31 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
-| `programs` | 24 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
-| `shell` | 8 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
+| `shell` | 9 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
 | `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
 | `python` | 3 | a Python interpreter with `ssl`, for the TLS server, the `ctypes` conformance runner and the Nikaya workload extractor |
@@ -142,10 +141,9 @@ table.
 | `embed` | 1 | a build with `inillucent-engine/embed` compiled in, which is what registers `embed(TEXT)` as a name to refuse. The runner builds it from the target's `features` row; `tools/coverage.mjs` does not, because the feature reaches `inillucent-core/onnx` and that crate is excluded from the coverage run |
 | `baseline` | 1 | a recorded performance baseline: `cargo run -p inillucent-compat --bin inillucent-baseline -- capture` |
 | `btree-corpus` | 1 | the retained sequences under `compat/corpus/btree/`, which are tracked |
-| `capi` | 1 | the C ABI shared library, built by `cargo build -p inillucent-driver-capi` into this run's own target directory |
 | `cc` | 1 | a C compiler on `PATH`, for the program that links the C ABI |
 | `conformance-records` | 1 | what the five conformance runners recorded under `_agent_output/conformance/`: `sh tools/run-package-tests.sh` |
-| `directory-link` | 1 | permission to create a directory link, which Windows gives an elevated shell or a machine in developer mode |
+| `directory-link` | 2 | permission to create a directory link, which Windows gives an elevated shell or a machine in developer mode |
 | `local-timezone` | 1 | a configured local time zone the operating system will convert an instant through: `localtime_r` on Unix, `SystemTimeToTzSpecificLocalTime` on Windows |
 | `mysql` | 1 | a live MySQL server, named by `INILLUCENT_TEST_MYSQL_URL` |
 | `narrow-slots` | 1 | the narrow integer slots compiled in, which is a constant in `crates/inillucent-tree/src/leaf.rs` |

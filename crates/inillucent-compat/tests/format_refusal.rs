@@ -601,9 +601,7 @@ fn a_search_index_in_a_later_format_refuses_as_unsupported() {
 /// upgrading one machine and not another actually has.
 #[test]
 fn the_command_line_exits_three_for_a_later_layout() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let path = scratch();
     {
         let database = Database::open(&path).expect("opens");

@@ -327,12 +327,8 @@ fn scalar(binary: &Path, database: &Path, sql: &str) -> String {
 /// opens.
 #[test]
 fn a_killed_writer_leaves_every_acknowledged_transaction_whole() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
 
     for cut in 0..CUTS {
         let directory = area(cut);
@@ -467,9 +463,7 @@ fn a_killed_writer_leaves_every_acknowledged_transaction_whole() {
 /// file and tell an operator nothing, which is the state task-1979's C10 found.
 #[test]
 fn a_clean_reopen_does_not_claim_to_have_recovered() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
+    let binary = program("inillucent");
     let directory = area(CUTS.saturating_add(1));
     let database = prepared(&binary, &directory);
     for sequence in 1..=5 {
@@ -514,12 +508,8 @@ fn a_clean_reopen_does_not_claim_to_have_recovered() {
 /// removed would be a run in which recovery was not what put the rows back.
 #[test]
 fn a_cut_with_the_log_moved_aside_loses_the_rows() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(shell) = program("inillucent-shell") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let shell = program("inillucent-shell");
     let directory = area(CUTS);
     let database = prepared(&binary, &directory);
     let feed = script(&directory);

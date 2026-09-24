@@ -226,9 +226,9 @@ indistinguishable from a real defect, and an agent read one as the other.
 waiting for the child - and a pipe reaches end of file when the last handle to its write end closes,
 so anything the child started with inherited standard output holds it after the child is gone. The
 runner then sat there with no child of its own, no result line for the target, no summary and no exit
-code, and had to be stopped by its process id. It needs nobody to kill anything: `interchange.rs`
-runs cargo through `Command::status()`, which inherits standard output, so a cargo that outlives its
-test binary does it.
+code, and had to be stopped by its process id. It needed nobody to kill anything: `interchange.rs`
+ran cargo through `Command::status()`, which inherits standard output, so a cargo that outlived its
+test binary did it. Any child a suite starts with inherited standard output still can.
 
 It now waits on the child. Two things follow that are worth knowing before you read a report:
 
@@ -245,6 +245,14 @@ no row in `tests/timings.toml` at all - it is in the `nightly` tier, so `--recor
 and it takes **1800.37s** while printing nothing, because libtest holds a test's own output back
 until the test ends. A thirty minute floor would have killed it four tenths of a second before it
 finished.
+
+**No suite builds the programs during a run** (task-2106). `cliproc::program` is the one place a test
+finds `inillucent`, `inillucent-shell` or `inillucent-mcp`. The runner builds them before any suite
+starts and sets `INILLUCENT_PROGRAMS_BUILT`, so `program` runs no cargo; under a plain `cargo test`
+it builds once per test process and captures cargo's output. A build that fails panics with that
+output. It used to be a skip, which `--strict` reported as a missing `programs` prerequisite, and a
+build that had to relink while another suite ran `inillucent-shell.exe` failed on Windows with
+`Access is denied. (os error 5)`. `programs` is no longer a prerequisite any row declares.
 
 **In a shell, `$?` after a pipeline is the status of the last command in it**, so
 `inillucent-testrun --changed | tail -40` reports tail's `0` however the run went. That is what

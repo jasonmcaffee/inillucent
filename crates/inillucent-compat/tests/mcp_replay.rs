@@ -176,9 +176,7 @@ fn recorded_database(binary: &Path, directory: &Path) -> PathBuf {
 ///
 /// @param name - the fixture's file name
 fn replay(name: &str) {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = workspace_root()
         .join("_agent_output/mcp-replay")
         .join(name.replace('.', "-"));

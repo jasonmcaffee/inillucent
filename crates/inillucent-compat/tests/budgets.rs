@@ -17,6 +17,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
+use inillucent_compat::cliproc;
 use inillucent_compat::workspace_root;
 
 /// Where this suite's scratch databases live.
@@ -26,32 +27,12 @@ fn area() -> PathBuf {
     path
 }
 
-/// Returns one of the shipped binaries, building them first.
-///
-/// @param name - which binary
-fn binary(name: &str) -> Option<PathBuf> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Command::new(cargo)
-        .current_dir(workspace_root())
-        .args(["build", "-p", "inillucent-cli"])
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    let mut directory = std::env::current_exe().unwrap_or_default();
-    directory.pop();
-    directory.pop();
-    let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
-}
-
 /// A database with enough rows that a ceiling is reachable.
 ///
 /// @param name - the file's name, so two cases never share one
 /// @param rows - how many rows to put in it
-fn database(name: &str, rows: usize) -> Option<PathBuf> {
-    let program = binary("inillucent")?;
+fn database(name: &str, rows: usize) -> PathBuf {
+    let program = cliproc::program("inillucent");
     let path = area().join(name);
     for suffix in ["", "-wal", "-journal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
@@ -60,11 +41,13 @@ fn database(name: &str, rows: usize) -> Option<PathBuf> {
     let made = Command::new(&program)
         .args(["--db", &named, "exec", "CREATE TABLE t (n INTEGER, s TEXT)"])
         .output()
-        .ok()?;
-    if !made.status.success() {
-        eprintln!("{}", String::from_utf8_lossy(&made.stderr));
-        return None;
-    }
+        .unwrap_or_else(|error| panic!("inillucent did not start: {error}"));
+    assert!(
+        made.status.success(),
+        "`inillucent exec` could not create the table:
+{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
     // One statement rather than a row at a time: this is setup, and setup that
     // takes a minute is setup somebody turns off.
     let values: Vec<String> = (0..rows)
@@ -74,12 +57,14 @@ fn database(name: &str, rows: usize) -> Option<PathBuf> {
         .args(["--db", &named, "exec"])
         .arg(format!("INSERT INTO t (n, s) VALUES {}", values.join(",")))
         .output()
-        .ok()?;
-    if !filled.status.success() {
-        eprintln!("{}", String::from_utf8_lossy(&filled.stderr));
-        return None;
-    }
-    Some(path)
+        .unwrap_or_else(|error| panic!("inillucent did not start: {error}"));
+    assert!(
+        filled.status.success(),
+        "`inillucent exec` could not fill the table:
+{}",
+        String::from_utf8_lossy(&filled.stderr)
+    );
+    path
 }
 
 /// An MCP server on a database, and the two pipes to it.
@@ -94,8 +79,8 @@ impl Server {
     /// Starts a server on a database.
     ///
     /// @param database - the file to serve
-    fn start(database: &PathBuf) -> Option<Server> {
-        let program = binary("inillucent-mcp")?;
+    fn start(database: &PathBuf) -> Server {
+        let program = cliproc::program("inillucent-mcp");
         let mut child = Command::new(program)
             .arg("--db")
             .arg(database)
@@ -103,11 +88,14 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .ok()?;
-        let answers = BufReader::new(child.stdout.take()?);
+            .unwrap_or_else(|error| panic!("inillucent-mcp did not start: {error}"));
+        let Some(stdout) = child.stdout.take() else {
+            panic!("inillucent-mcp was started with a piped standard output and has none");
+        };
+        let answers = BufReader::new(stdout);
         let mut server = Server { child, answers };
         server.shake_hands();
-        Some(server)
+        server
     }
 
     /// Completes the MCP handshake, which every other method waits for.
@@ -174,14 +162,8 @@ impl Server {
 /// and zero is unlimited.
 #[test]
 fn a_negative_limit_is_refused_rather_than_meaning_everything() {
-    let Some(database) = database("negative.rdb", 50) else {
-        inillucent_compat::differential::skipping("budgets: the command line did not build");
-        return;
-    };
-    let Some(mut server) = Server::start(&database) else {
-        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
-        return;
-    };
+    let database = database("negative.rdb", 50);
+    let mut server = Server::start(&database);
     let answered = server.call("query", "{\"sql\":\"SELECT * FROM t\",\"limit\":-1}");
     server.stop();
     assert!(
@@ -197,14 +179,8 @@ fn a_negative_limit_is_refused_rather_than_meaning_everything() {
 /// A row ceiling refuses a request past it, and names the ceiling.
 #[test]
 fn a_row_ceiling_refuses_a_request_past_it() {
-    let Some(database) = database("ceiling.rdb", 20) else {
-        inillucent_compat::differential::skipping("budgets: the command line did not build");
-        return;
-    };
-    let Some(mut server) = Server::start(&database) else {
-        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
-        return;
-    };
+    let database = database("ceiling.rdb", 20);
+    let mut server = Server::start(&database);
     let refused = server.call("query", "{\"sql\":\"SELECT * FROM t\",\"limit\":99999999}");
     // And a request inside the ceiling still works, which is what stops a
     // server that refused everything from passing the case above.
@@ -226,14 +202,8 @@ fn a_row_ceiling_refuses_a_request_past_it() {
 /// would be a ceiling with a hole exactly the shape of the thing it guards.
 #[test]
 fn asking_for_every_row_is_refused_on_a_served_surface() {
-    let Some(database) = database("everything.rdb", 20) else {
-        inillucent_compat::differential::skipping("budgets: the command line did not build");
-        return;
-    };
-    let Some(mut server) = Server::start(&database) else {
-        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
-        return;
-    };
+    let database = database("everything.rdb", 20);
+    let mut server = Server::start(&database);
     let refused = server.call("query", "{\"sql\":\"SELECT * FROM t\",\"limit\":0}");
     server.stop();
     assert!(
@@ -249,14 +219,8 @@ fn asking_for_every_row_is_refused_on_a_served_surface() {
 /// put the ceiling everywhere.
 #[test]
 fn the_command_line_has_no_row_ceiling() {
-    let Some(program) = binary("inillucent") else {
-        inillucent_compat::differential::skipping("budgets: the command line did not build");
-        return;
-    };
-    let Some(database) = database("unbounded.rdb", 20) else {
-        inillucent_compat::differential::skipping("budgets: the command line did not build");
-        return;
-    };
+    let program = cliproc::program("inillucent");
+    let database = database("unbounded.rdb", 20);
     let named = database.to_string_lossy().into_owned();
     let produced = Command::new(&program)
         .args(["--db", &named, "query", "SELECT * FROM t", "--limit", "0"])
@@ -278,14 +242,8 @@ fn the_command_line_has_no_row_ceiling() {
 /// answer and a machine that is out of memory.
 #[test]
 fn an_over_long_request_is_refused_rather_than_buffered() {
-    let Some(database) = database("longline.rdb", 5) else {
-        inillucent_compat::differential::skipping("budgets: the command line did not build");
-        return;
-    };
-    let Some(mut server) = Server::start(&database) else {
-        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
-        return;
-    };
+    let database = database("longline.rdb", 5);
+    let mut server = Server::start(&database);
     // Two megabytes of one line, which is past the one-megabyte ceiling and
     // small enough that the test is quick.
     let padding = "x".repeat(2 * 1024 * 1024);
@@ -307,14 +265,8 @@ fn an_over_long_request_is_refused_rather_than_buffered() {
 /// the schema is where a client looks.
 #[test]
 fn the_tool_schema_says_there_is_a_ceiling() {
-    let Some(database) = database("schema.rdb", 1) else {
-        inillucent_compat::differential::skipping("budgets: the command line did not build");
-        return;
-    };
-    let Some(mut server) = Server::start(&database) else {
-        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
-        return;
-    };
+    let database = database("schema.rdb", 1);
+    let mut server = Server::start(&database);
     let listed =
         server.ask("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
     server.stop();

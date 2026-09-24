@@ -836,12 +836,11 @@ fn changed_paths(root: &Path, revision: &str) -> Result<Vec<String>, String> {
 
 /// Builds every test binary, and the two programs the shell suites run.
 ///
-/// The second half matters for parallelism. `cli.rs` and `semantics.rs` in this
-/// crate, and `conformance.rs` in `inillucent-driver-capi`, each shell out to
-/// `cargo build` from inside the test, because they drive a *program* rather
-/// than a library. Run at once, they would each wait on cargo's lock on the
-/// target directory. Building those programs here, before anything starts,
-/// makes each of those in-test builds a no-op.
+/// The second half is the only build of the programs in a run. The suites that
+/// drive a *program* rather than a library find it through
+/// `cliproc::program`, and `run_one` sets `cliproc::PROGRAMS_BUILT` so that
+/// function builds nothing: a build from inside one suite that had to relink a
+/// program another suite was running failed on Windows (task-2106).
 ///
 /// @param root - the workspace root
 /// @param rows - the rows that were selected, for the features they name
@@ -1319,11 +1318,18 @@ fn run_one(
     let mut command = Command::new(&built.executable);
     command
         .current_dir(&built.directory)
-        // `cli.rs` and its two siblings read `CARGO` to find the cargo that is
-        // driving them. Started from here rather than from cargo, they would
+        // `conformance.rs` in `inillucent-driver-capi` reads `CARGO` to find
+        // the cargo that is driving it. Started from here rather than from cargo, they would
         // fall back to whatever `cargo` is on PATH, which on a machine with
         // several toolchains is not necessarily this one.
         .env("CARGO", cargo())
+        // **The suites use the programs `build` made, and build nothing
+        // themselves (task-2106).** `cliproc::program` used to run `cargo build
+        // -p inillucent-cli` from inside every suite, and a build that had to
+        // relink while another suite was running `inillucent-shell.exe` failed
+        // with `Access is denied. (os error 5)` and was reported as a missing
+        // prerequisite.
+        .env(inillucent_compat::cliproc::PROGRAMS_BUILT, "1")
         // **What `--strict` means, handed to the suite itself.** The
         // classifier below reads a suite's captured output and decides whether
         // it skipped, which works and is the backstop; this is the same

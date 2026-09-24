@@ -26,13 +26,23 @@
 // produced something that is not a JSON document, a field of that document
 // that is absent or of the wrong type. Returning an `Option` for those would
 // put the caller back where this ticket started: a test that reads `None` and
-// passes. The one absence that is *not* a broken environment - the binary is
-// not built on this machine - is the one thing here that returns `None`, and
-// `program` announces it through `differential::skipping` before it does.
+// passes. A program that did not build is one of those too, since task-2106:
+// it used to be the one `None` here, announced as a skip, and `--strict` then
+// reported a compile error as a missing prerequisite.
 #![allow(clippy::panic)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
+
+/// The variable `inillucent-testrun` sets on every suite it starts, so that
+/// [`program`] uses the programs the runner built and runs no cargo of its own.
+///
+/// Set under `--no-build` too. That flag already means "run what is built" for
+/// the test binaries, and a build started from inside one suite while another
+/// runs a program is the race [`program`] describes. Its value is not read,
+/// only whether it is set and not empty.
+pub const PROGRAMS_BUILT: &str = "INILLUCENT_PROGRAMS_BUILT";
 
 use inillucent_scalar::json::node::Node;
 use inillucent_scalar::json::{parse, render};
@@ -54,24 +64,83 @@ impl Ran {
     }
 }
 
-/// Returns one of the command surface's binaries, building them first.
+/// Returns one of the command surface's binaries, and panics with cargo's own
+/// output if they did not build.
 ///
-/// **`None` is announced as a skip rather than returned quietly (task-1913).**
-/// A build that did not produce the binary used to make a whole file's worth of
-/// cases return without asserting anything - green under `--strict`, which
-/// exists to turn exactly that into a failure. Announcing here rather than at
-/// each call site means the next case added cannot forget it.
+/// **A build that fails is a failure, not a skip (task-2106).** This returned
+/// `None` and announced a skip, and `--strict` counts a skip as a missing
+/// prerequisite, so a compile error or a failed link was reported as a machine
+/// without the programs while cargo's error went to an inherited standard error
+/// nobody kept. Nothing here is a prerequisite a machine can lack: the programs
+/// are built from this workspace by the same cargo that built the test.
+///
+/// **No cargo runs while the runner's suites run, and that is what removes the
+/// race.** On Windows a program that is running cannot be removed or replaced.
+/// Measured on task-2106: with `inillucent-shell.exe` running, a
+/// `cargo build -p inillucent-cli` that had to relink failed with `failed to
+/// remove file ...\inillucent-shell.exe ... Access is denied. (os error 5)`,
+/// and the same build passed once nothing was running. After the runner's own
+/// build the in-test build was a no-op and did not touch the file, so the
+/// relink happened only when the build was not fresh: a source saved during
+/// the run, or `--no-build` over an older build. Under `inillucent-testrun`,
+/// [`PROGRAMS_BUILT`] now tells this function to use what the runner built and
+/// run no cargo at all. Under a plain `cargo test` it builds once per test
+/// process, before any test in that process can have started a program, and
+/// cargo runs one test binary at a time.
 ///
 /// @param name - the binary's name, without the platform's suffix
-pub fn program(name: &str) -> Option<PathBuf> {
-    let mut directory = std::env::current_exe().ok()?;
+pub fn program(name: &str) -> PathBuf {
+    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    let directory = match BUILT.get_or_init(build_programs) {
+        Ok(directory) => directory,
+        Err(failure) => panic!("{failure}"),
+    };
+    let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        path.is_file(),
+        "{} is not there. Either `{name}` is not one of `inillucent-cli`'s binaries, or \
+         this is an `inillucent-testrun --no-build` run and the programs were never built: \
+         run `cargo build -p inillucent-cli`",
+        path.display()
+    );
+    path
+}
+
+/// Builds the command surface into the calling test's own profile directory,
+/// once, and returns that directory, or the reason it could not.
+///
+/// The failure is kept as a value rather than raised here: a panic inside
+/// `OnceLock::get_or_init` leaves it empty, and every later case would run the
+/// failing build again.
+fn build_programs() -> Result<PathBuf, String> {
+    let mut directory = std::env::current_exe()
+        .map_err(|error| format!("this test cannot find its own executable: {error}"))?;
     directory.pop();
     directory.pop();
+    let prebuilt = std::env::var_os(PROGRAMS_BUILT).is_some_and(|value| !value.is_empty());
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    build_into(&cargo, directory, prebuilt)
+}
+
+/// Builds `inillucent-cli` into one profile directory with the given cargo,
+/// and returns that directory, or the reason it could not, with cargo's
+/// standard error in it.
+///
+/// Separate from [`build_programs`] so a test can hand it a cargo that fails
+/// without changing the environment every other test in the process reads.
+///
+/// @param cargo - the cargo to run
+/// @param directory - the profile directory, whose parent is the target directory
+/// @param prebuilt - true when the runner already built the programs, so nothing runs
+fn build_into(cargo: &str, directory: PathBuf, prebuilt: bool) -> Result<PathBuf, String> {
+    if prebuilt {
+        return Ok(directory);
+    }
     let mut build = Command::new(cargo);
     build
         .current_dir(crate::workspace_root())
-        .args(["build", "-p", "inillucent-cli"]);
+        .args(["build", "-p", "inillucent-cli"])
+        .stdin(Stdio::null());
     let profile = directory
         .file_name()
         .map(|part| part.to_string_lossy().into_owned())
@@ -82,13 +151,25 @@ pub fn program(name: &str) -> Option<PathBuf> {
     if let Some(target) = directory.parent() {
         build.arg("--target-dir").arg(target);
     }
-    let built = build.status().ok().is_some_and(|status| status.success());
-    let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    let found = (built && path.is_file()).then_some(path);
-    if found.is_none() {
-        crate::differential::skipping(&format!("{name} did not build"));
+    // `output()` and not `status()`: cargo's error has to reach the message,
+    // and a cargo that inherits this test's standard output holds the pipe of
+    // whatever is reading it, which is how task-2071's runner waited for ever.
+    let produced = build
+        .output()
+        .map_err(|error| format!("{cargo} did not start: {error}"))?;
+    if produced.status.success() {
+        return Ok(directory);
     }
-    found
+    Err(format!(
+        "`cargo build -p inillucent-cli` failed ({}), so the programs these tests run \
+         were not built. This is a failure of the build and not a missing \
+         prerequisite. Cargo said:\n{}",
+        match produced.status.code() {
+            Some(code) => format!("exit code {code}"),
+            None => "ended by a signal".to_string(),
+        },
+        String::from_utf8_lossy(&produced.stderr)
+    ))
 }
 
 /// Runs a program with its standard input closed, and returns what it produced.
@@ -359,6 +440,40 @@ mod tests {
             rows(printed),
             vec![vec!["note".to_string()], vec!["docs".to_string()]]
         );
+    }
+
+    /// A cargo that fails is reported with its exit code and its own standard
+    /// error, as a failure of the build rather than a missing prerequisite.
+    ///
+    /// The cargo here is this test binary, which libtest refuses to start with
+    /// `build -p ...` as its arguments: it exits non-zero and says why on
+    /// standard error, which is all a failed cargo does from the caller's side.
+    #[test]
+    fn a_failed_build_carries_cargos_own_words() {
+        let this = std::env::current_exe().expect("this test's own executable");
+        let failed = build_into(
+            &this.to_string_lossy(),
+            std::env::temp_dir().join("inillucent-cliproc-never-built"),
+            false,
+        )
+        .expect_err("a cargo that exits non-zero has to be an error");
+        assert!(failed.contains("exit code"), "{failed}");
+        assert!(failed.contains("not a missing prerequisite"), "{failed}");
+        assert!(
+            failed.contains("Unrecognized option"),
+            "the message does not carry what the failed program printed:\n{failed}"
+        );
+    }
+
+    /// Under the runner nothing is started, even a cargo that does not exist.
+    #[test]
+    fn a_prebuilt_run_starts_no_cargo() {
+        let directory = std::env::temp_dir().join("inillucent-cliproc-prebuilt");
+        let found = build_into("no-such-cargo-task-2106", directory.clone(), true);
+        assert_eq!(found, Ok(directory));
+        let refused = build_into("no-such-cargo-task-2106", PathBuf::from("x/debug"), false)
+            .expect_err("a cargo that does not exist has to be an error");
+        assert!(refused.contains("did not start"), "{refused}");
     }
 
     /// A string's escapes are resolved, which is what a Windows path needs.

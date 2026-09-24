@@ -349,9 +349,7 @@ fn read_while_held(shell: &Path, database: &Path, timeout_ms: u64) -> String {
 /// The value asserted is the count the reader printed, not a duration.
 #[test]
 fn a_reader_with_a_timeout_waits_and_then_reads() {
-    let (Some(binary), Some(shell)) = (program("inillucent"), program("inillucent-shell")) else {
-        return;
-    };
+    let (binary, shell) = (program("inillucent"), program("inillucent-shell"));
     let directory = area("reader-waits");
     let database = prepared(&binary, &directory);
 
@@ -381,9 +379,7 @@ fn a_reader_with_a_timeout_waits_and_then_reads() {
 /// constant, and a refusal naming `0 ms` is the pragma.
 #[test]
 fn a_reader_with_no_timeout_is_refused_and_names_its_budget() {
-    let (Some(binary), Some(shell)) = (program("inillucent"), program("inillucent-shell")) else {
-        return;
-    };
+    let (binary, shell) = (program("inillucent"), program("inillucent-shell"));
     let directory = area("reader-refused");
     let database = prepared(&binary, &directory);
 
@@ -409,9 +405,7 @@ fn a_reader_with_no_timeout_is_refused_and_names_its_budget() {
 /// A writer given a timeout waits for a busy file and then writes.
 #[test]
 fn a_writer_with_a_timeout_waits_and_then_succeeds() {
-    let (Some(binary), Some(shell)) = (program("inillucent"), program("inillucent-shell")) else {
-        return;
-    };
+    let (binary, shell) = (program("inillucent"), program("inillucent-shell"));
     let directory = area("waits");
     let database = prepared(&binary, &directory);
 
@@ -440,9 +434,7 @@ fn a_writer_with_a_timeout_waits_and_then_succeeds() {
 /// and what separates this from the case above is a row that is not there.
 #[test]
 fn a_writer_with_no_timeout_is_refused_and_writes_nothing() {
-    let (Some(binary), Some(shell)) = (program("inillucent"), program("inillucent-shell")) else {
-        return;
-    };
+    let (binary, shell) = (program("inillucent"), program("inillucent-shell"));
     let directory = area("refused");
     let database = prepared(&binary, &directory);
 
@@ -482,9 +474,7 @@ fn a_writer_with_no_timeout_is_refused_and_writes_nothing() {
 /// compares it to how long anything took.
 #[test]
 fn a_timeout_shorter_than_the_hold_gives_up_and_names_its_budget() {
-    let (Some(binary), Some(shell)) = (program("inillucent"), program("inillucent-shell")) else {
-        return;
-    };
+    let (binary, shell) = (program("inillucent"), program("inillucent-shell"));
     let directory = area("short");
     let database = prepared(&binary, &directory);
 

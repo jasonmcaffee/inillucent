@@ -38,10 +38,13 @@
 //! codes cannot describe - a red run is information and a run that never ends is
 //! not.
 //!
-//! It needs nobody to kill anything, either. `interchange::our_shell` runs cargo
+//! It needs nobody to kill anything, either. `interchange::our_shell` ran cargo
 //! through `Command::status()`, which inherits standard output, so every rustc
-//! cargo starts holds the runner's pipe. A cargo that outlives its test binary
-//! by any means hangs the run.
+//! cargo started held the runner's pipe, and a cargo that outlived its test
+//! binary by any means hung the run. Since task-2106 no suite the runner starts
+//! runs cargo for the programs, and `cliproc::program` captures cargo's output
+//! when a plain `cargo test` makes it build, but any child a suite starts with
+//! inherited standard output can still do the same thing.
 //!
 //! ## What counts as progress, and why it is not elapsed time
 //!

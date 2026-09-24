@@ -71,9 +71,7 @@ fn empty_database(binary: &Path, directory: &Path) -> PathBuf {
 /// it from a syntax error would start rewording perfectly good SQL.
 #[test]
 fn an_agent_session_runs_end_to_end() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("agent");
     let database = empty_database(&binary, &directory);
     let mut session = Session::start_with(
@@ -299,9 +297,7 @@ fn backs_up_and_checks_itself(session: &mut Session, directory: &Path) {
 /// A `tools/call` before `initialize` is refused, and the server carries on.
 #[test]
 fn a_call_before_the_handshake_is_refused() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("before-handshake");
     let database = empty_database(&binary, &directory);
     let mut session = Session::start_silent(&server, &database, &[]);
@@ -337,9 +333,7 @@ fn a_call_before_the_handshake_is_refused() {
 /// next `call` would have to skip past.
 #[test]
 fn a_malformed_line_does_not_end_the_session() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("malformed");
     let database = empty_database(&binary, &directory);
     let mut session = Session::start_with(&server, &database, &[]);
@@ -369,9 +363,7 @@ fn a_malformed_line_does_not_end_the_session() {
 /// sends the second and the fix has to treat it as the same nothing.
 #[test]
 fn a_blank_line_does_not_end_the_session() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("blank-line");
     let database = empty_database(&binary, &directory);
     let mut session = Session::start_with(&server, &database, &[]);
@@ -409,9 +401,7 @@ fn a_blank_line_does_not_end_the_session() {
 /// one every MCP client sends - would otherwise be a way to end the session.
 #[test]
 fn an_unknown_method_is_refused_over_the_wire_and_the_session_carries_on() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("unknown-method");
     let database = empty_database(&binary, &directory);
     let mut session = Session::start_with(&server, &database, &[]);
@@ -446,9 +436,7 @@ fn an_unknown_method_is_refused_over_the_wire_and_the_session_carries_on() {
 /// correctly and then left the server unusable would pass the first assertion.
 #[test]
 fn a_protocol_version_mismatch_is_answered_with_the_supported_one() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("version-mismatch");
     let database = empty_database(&binary, &directory);
     let mut session = Session::start_silent(&server, &database, &[]);
@@ -503,9 +491,7 @@ fn a_protocol_version_mismatch_is_answered_with_the_supported_one() {
 /// did before.
 #[test]
 fn a_deeply_nested_request_is_refused_and_the_session_carries_on() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("deep-nesting");
     let database = empty_database(&binary, &directory);
     let mut session = Session::start_with(&server, &database, &[]);
@@ -559,9 +545,7 @@ fn a_deeply_nested_request_is_refused_and_the_session_carries_on() {
 /// tell "refused me" from "died on me".
 #[test]
 fn a_request_past_the_size_limit_is_refused_and_ends_the_session() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("too-large");
     let database = empty_database(&binary, &directory);
 
@@ -621,9 +605,7 @@ fn a_request_past_the_size_limit_is_refused_and_ends_the_session() {
 /// server that works.
 #[test]
 fn two_requests_in_flight_are_both_answered() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("in-flight");
     let database = empty_database(&binary, &directory);
     let mut session = Session::start_with(&server, &database, &[]);
@@ -663,9 +645,7 @@ fn two_requests_in_flight_are_both_answered() {
 /// process still holds.
 #[test]
 fn closing_the_pipe_mid_statement_leaves_no_stale_lock() {
-    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
-        return;
-    };
+    let (server, binary) = (program("inillucent-mcp"), program("inillucent"));
     let directory = area("stdin-closed");
     let database = empty_database(&binary, &directory);
     let path = database.to_string_lossy().to_string();

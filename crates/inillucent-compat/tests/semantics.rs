@@ -2252,24 +2252,6 @@ fn reference() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Returns this workspace's shell, building it first.
-fn ours() -> Option<PathBuf> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Command::new(cargo)
-        .current_dir(workspace_root())
-        .args(["build", "-p", "inillucent-cli"])
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    let mut directory = std::env::current_exe().unwrap_or_default();
-    directory.pop();
-    directory.pop();
-    let path = directory.join(format!("inillucent-shell{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
-}
-
 /// Runs one script through one shell over a fresh database.
 ///
 /// Each case gets its own directory, because several of them attach a second
@@ -2423,10 +2405,11 @@ fn kinds_of(group: &str) -> &'static [&'static str] {
 ///
 /// @param group - the group's name, as `GROUPS` spells it
 fn check(group: &str) {
-    let (Some(reference), Some(ours)) = (reference(), ours()) else {
-        inillucent_compat::differential::skipping("a shell is missing");
+    let Some(reference) = reference() else {
+        inillucent_compat::differential::skipping("the pinned SQLite shell is not built");
         return;
     };
+    let ours = inillucent_compat::cliproc::program("inillucent-shell");
     let graded = grade(group, &reference, &ours);
     assert!(
         graded.total > 0,

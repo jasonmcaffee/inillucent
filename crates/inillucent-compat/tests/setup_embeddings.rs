@@ -54,7 +54,7 @@ fn area(name: &str) -> PathBuf {
 /// guard could see it. `cliproc::program` reads the profile and the target
 /// directory back off the calling test's own path, which is the same problem
 /// task-1962 solved for twelve other suites.
-fn binary() -> Option<PathBuf> {
+fn binary() -> PathBuf {
     inillucent_compat::cliproc::program("inillucent")
 }
 
@@ -66,8 +66,8 @@ fn binary() -> Option<PathBuf> {
 ///
 /// @param root - the install root
 /// @param arguments - what to pass after the verb
-fn run(root: &PathBuf, arguments: &[&str]) -> Option<(bool, String, String)> {
-    let binary = binary()?;
+fn run(root: &PathBuf, arguments: &[&str]) -> (bool, String, String) {
+    let binary = binary();
     let output = Command::new(binary)
         .current_dir(workspace_root())
         .arg("setup-embeddings")
@@ -77,12 +77,12 @@ fn run(root: &PathBuf, arguments: &[&str]) -> Option<(bool, String, String)> {
         .env_remove("ORT_DYLIB_PATH")
         .env_remove("INILLUCENT_EMBED_RESIDENCY")
         .output()
-        .ok()?;
-    Some((
+        .unwrap_or_else(|error| panic!("inillucent did not start: {error}"));
+    (
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
-    ))
+    )
 }
 
 /// How many bytes a directory holds, counting everything under it.
@@ -116,10 +116,7 @@ fn bytes_under(path: &PathBuf) -> u64 {
 #[test]
 fn a_bare_invocation_installs_nothing() {
     let root = area("bare");
-    let Some((ok, stdout, _)) = run(&root, &[]) else {
-        inillucent_compat::differential::skipping("the binary would not build");
-        return;
-    };
+    let (ok, stdout, _) = run(&root, &[]);
     assert!(ok, "a bare invocation succeeds: {stdout}");
     assert!(
         stdout.contains("setup-embeddings all"),
@@ -137,10 +134,7 @@ fn a_bare_invocation_installs_nothing() {
 #[test]
 fn status_on_an_empty_machine_says_what_is_missing() {
     let root = area("status");
-    let Some((ok, stdout, _)) = run(&root, &["--status"]) else {
-        inillucent_compat::differential::skipping("the binary would not build");
-        return;
-    };
+    let (ok, stdout, _) = run(&root, &["--status"]);
     assert!(ok, "status succeeds even with nothing installed: {stdout}");
     assert!(stdout.contains("ONNX Runtime: not installed"), "{stdout}");
     assert!(stdout.contains("setup-embeddings runtime"), "{stdout}");
@@ -156,10 +150,7 @@ fn status_on_an_empty_machine_says_what_is_missing() {
 #[test]
 fn status_reports_readiness_as_a_field() {
     let root = area("status-json");
-    let Some((ok, stdout, _)) = run(&root, &["--status", "--output", "json"]) else {
-        inillucent_compat::differential::skipping("the binary would not build");
-        return;
-    };
+    let (ok, stdout, _) = run(&root, &["--status", "--output", "json"]);
     assert!(ok, "{stdout}");
     assert!(stdout.contains("\"ready\": false"), "{stdout}");
     assert!(stdout.contains("\"runtime\": null"), "{stdout}");
@@ -171,10 +162,7 @@ fn status_reports_readiness_as_a_field() {
 #[test]
 fn an_unknown_component_is_refused_before_anything_is_fetched() {
     let root = area("component");
-    let Some((ok, stdout, stderr)) = run(&root, &["everything"]) else {
-        inillucent_compat::differential::skipping("the binary would not build");
-        return;
-    };
+    let (ok, stdout, stderr) = run(&root, &["everything"]);
     assert!(!ok, "an unknown component fails: {stdout}");
     let said = format!("{stdout}{stderr}");
     assert!(said.contains("everything"), "the refusal names it: {said}");
@@ -191,10 +179,7 @@ fn an_unknown_component_is_refused_before_anything_is_fetched() {
 #[test]
 fn an_unknown_residency_profile_is_refused_before_anything_is_fetched() {
     let root = area("residency");
-    let Some((ok, stdout, stderr)) = run(&root, &["all", "--residency", "sometimes"]) else {
-        inillucent_compat::differential::skipping("the binary would not build");
-        return;
-    };
+    let (ok, stdout, stderr) = run(&root, &["all", "--residency", "sometimes"]);
     assert!(!ok, "an unknown profile fails: {stdout}");
     let said = format!("{stdout}{stderr}");
     assert!(said.contains("sometimes"), "the refusal names it: {said}");
@@ -216,15 +201,12 @@ fn an_unknown_residency_profile_is_refused_before_anything_is_fetched() {
 #[test]
 fn setting_only_the_profile_records_it_and_downloads_nothing() {
     let root = area("profile-only");
-    let Some((ok, stdout, _)) = run(&root, &["--residency", "resident"]) else {
-        inillucent_compat::differential::skipping("the binary would not build");
-        return;
-    };
+    let (ok, stdout, _) = run(&root, &["--residency", "resident"]);
     assert!(ok, "{stdout}");
     assert!(stdout.contains("Residency profile: resident"), "{stdout}");
 
     // Recorded, so the next process reads it back rather than the default.
-    let (_, again, _) = run(&root, &["--status"]).expect("the binary still builds");
+    let (_, again, _) = run(&root, &["--status"]);
     assert!(again.contains("Residency profile: resident"), "{again}");
 
     // The state file is the only thing written, and it is under a kilobyte.

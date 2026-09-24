@@ -343,12 +343,8 @@ const CALLS: [(&str, &str, &str); 28] = [
 /// tool call would pass all of them.
 #[test]
 fn every_tool_answers_over_one_session() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(server) = program("inillucent-mcp") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let server = program("inillucent-mcp");
     let database = populated(&binary);
     let directory = database
         .parent()
@@ -438,12 +434,8 @@ fn every_tool_answers_over_one_session() {
 /// never for an `INSERT`, a write pragma, an `ATTACH` or a `VACUUM INTO`.
 #[test]
 fn a_read_only_server_refuses_every_write_and_leaves_the_file_alone() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(server) = program("inillucent-mcp") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let server = program("inillucent-mcp");
     let database = populated_at(&binary, "readonly");
     let before = std::fs::read(&database).expect("the database reads");
 
@@ -501,12 +493,8 @@ fn a_read_only_server_refuses_every_write_and_leaves_the_file_alone() {
 /// pass the first assertion on its own.
 #[test]
 fn a_read_only_server_can_run_dot_commands_and_still_refuses_a_write() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(server) = program("inillucent-mcp") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let server = program("inillucent-mcp");
     let database = populated_at(&binary, "readonly-run");
     let before = std::fs::read(&database).expect("the database reads");
 
@@ -561,12 +549,8 @@ fn a_read_only_server_can_run_dot_commands_and_still_refuses_a_write() {
 /// server's standard output, which is the JSON-RPC channel.
 #[test]
 fn a_server_refuses_the_dot_commands_that_reach_outside_it() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(server) = program("inillucent-mcp") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let server = program("inillucent-mcp");
     let database = populated_at(&binary, "confined");
     let root = database
         .parent()
@@ -646,12 +630,8 @@ fn a_server_refuses_the_dot_commands_that_reach_outside_it() {
 /// 0xC00000FD and a client whose next request is never answered.
 #[test]
 fn a_statement_past_the_depth_limit_does_not_end_the_server() {
-    let Some(binary) = program("inillucent") else {
-        return;
-    };
-    let Some(server) = program("inillucent-mcp") else {
-        return;
-    };
+    let binary = program("inillucent");
+    let server = program("inillucent-mcp");
     let database = populated_at(&binary, "deep");
     let mut session = Session::start(&server, &database);
     let deep = format!("SELECT {}1{}", "abs(".repeat(2_000), ")".repeat(2_000));
