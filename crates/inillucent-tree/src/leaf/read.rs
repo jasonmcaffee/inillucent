@@ -1429,3 +1429,6 @@ impl<'p> MiniColumn<'p> {
         Ok(read_slot_offset(slice, narrow))
     }
 }
+
+#[cfg(test)]
+mod tests;
