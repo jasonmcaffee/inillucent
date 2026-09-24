@@ -32,25 +32,18 @@ credential. The proxy serves it: both `@latest` and `@v/list` answer 200 to a si
 the repository was made public, which is why `packaging/PUBLISHING.md` carried the route as
 tagged and uninstallable for three releases.
 
-Four more package managers serve the current release:
+Five more package managers serve the current release:
 
 | | |
 |---|---|
 | **npm** | `npm install -g inillucent`, or `npx inillucent help` with nothing installed |
 | **pip** | `pip install inillucent` — the wheel carries the four programs and an in process driver |
+| **cargo** | `cargo install inillucent-cli` — builds from source, and works on any platform with a Rust toolchain |
 | **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
 | **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
 Each of them installs the same four programs, and each downloader checks the release's published
 SHA-256 before unpacking the archive.
-
-**cargo builds from the repository, not from crates.io.** crates.io carries five of the workspace's
-library crates and not `inillucent-cli`, so `cargo install inillucent-cli` finds nothing. This
-works on any platform with a Rust toolchain:
-
-```sh
-cargo install --git https://github.com/Black-Rainbow-Labs/Inillucent inillucent-cli
-```
 
 **macOS is a universal build**, for Apple silicon and Intel: a `.tar.gz` archive, and a `.pkg`
 installer signed with a Developer ID and notarised by Apple. Both are on the GitHub release and on

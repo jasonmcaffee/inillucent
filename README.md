@@ -66,7 +66,7 @@ directory, and need no administrator rights.
 | pip | `pip install inillucent` |
 | Go | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest && inillucent-install` |
 | Composer | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
-| cargo | `cargo install --git https://github.com/Black-Rainbow-Labs/Inillucent inillucent-cli` |
+| cargo | `cargo install inillucent-cli` |
 
 A signed macOS installer, `.deb` and `.rpm` packages, and plain archives for every platform are on
 [inillucent.com](https://inillucent.com) and the
