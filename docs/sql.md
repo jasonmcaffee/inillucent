@@ -3,8 +3,8 @@
 inillucent speaks SQLite's SQL dialect on its own storage. This page says which SQL runs and which
 cases out of 416 do not produce SQLite's exact bytes.
 
-**Nothing is refused.** Thirteen cases are not byte for byte: seven answer differently, and six are
-vector search features SQLite has no equivalent for. None of the thirteen is silent. Each answers,
+**Nothing is refused.** Twelve cases are not byte for byte: six answer differently, and six are
+vector search features SQLite has no equivalent for. None of the twelve is silent. Each answers,
 and each reports something a caller can read. [Feature comparison](feature-comparison.md) is the same
 material in full, table by table.
 
@@ -56,8 +56,8 @@ for. `inillucent functions` prints 213 rows because it prints one row per name a
 
 It also names what the connection itself has registered - anything an application defined through
 `create_scalar_function` or `create_aggregate_function`, and `embed(TEXT)` in a build carrying the
-`embed` feature, where the count is 214. Those rows carry `builtin = 0`. Until task-1952 the register
-read the static built-in list alone, so `embed` answered `SELECT length(embed('hello'))` with 3072
+`embed` feature, where the count is 214. Those rows carry `builtin = 0`. Until this was fixed, the
+register read the static built-in list alone, so `embed` answered `SELECT length(embed('hello'))` with 3072
 and `inillucent functions embed` printed nothing.
 
 **Where a registered function may be called from is decided by its flags.** A registration is
@@ -133,7 +133,7 @@ any eponymous module a caller registers.
 Every extension's shadow tables are ordinary trees in the same file, so they commit and roll back
 with the transaction that wrote them.
 
-## The thirteen cases that are not byte for byte
+## The twelve cases that are not byte for byte
 
 ### Six are vector search, which SQLite does not have
 
@@ -161,19 +161,19 @@ pcache overflow bytes are facts about SQLite's allocator.
 Printing SQLite's numbers in these three would mean printing facts about a library that is not here.
 That is a fabrication rather than compatibility, so none of the three will ever be closed.
 
-### Three are decisions this engine made, and each was measured
+### Two follow from a decision this engine made, and it was measured
 
-Both experiments below were run against the earlier 3.83x weighted headline. Today's run is 4.30x,
-and neither experiment has been taken again. What each measures is the *difference* between two
-settings, and that difference is what is quoted here.
+The experiment below was run against the earlier 3.83x weighted headline and has not been taken
+again. What it measures is the *difference* between two settings, and that difference is what is
+quoted here.
 
 **`PRAGMA page_size` reports 32768** where SQLite reports 4096. Both were measured on the same gate:
 32768 gave 3.83x weighted with the `schema` family at 1.15x; 4096 with a matched cache budget gave
 3.44x with `schema` at **6% slower than SQLite**, under the floor the performance contract requires.
 The pragma reports what the file is, which is its job.
 
-**`PRAGMA locking_mode` reports `normal`**, where SQLite also reports `normal`, so this is no
-longer a difference. It is the default because `exclusive` never releases the file between
+**`PRAGMA locking_mode` used to be a third row here and is not any more.** It reports `normal`, where
+SQLite also reports `normal`. It is the default because `exclusive` never releases the file between
 statements, so a second process either waits out the whole life of the first or reads state from
 before it. `exclusive` is still a real switch, and a program that never opens a second connection
 can take it for the throughput: releasing the file between statements means reading the meta record
@@ -186,8 +186,8 @@ Rows in the file equal commits acknowledged, which
 
 **`.recover`** differs on one line of nineteen, and it is the line that names the page size.
 
-Adopting SQLite's values in the first two would take the byte for byte number from 403 to 406, at a
-measured cost to the performance bars.
+Adopting SQLite's 4,096 byte page would close both `PRAGMA page_size` and `.recover`, and take the
+byte for byte number from 404 to 406, at the measured cost to the `schema` family above.
 
 ### One is the two pinned reference artifacts disagreeing with each other
 
@@ -235,7 +235,7 @@ transaction: attempting it leaves the connection unable to read that table.
 
 ### Four smaller differences, each with a test that holds it still
 
-task-2066's correctness audit measured these and they are not fixed. Each one has a test asserting
+A correctness audit measured these and they are not fixed. Each one has a test asserting
 the behaviour as it is, so a change to any of them is a change somebody made on purpose.
 
 | | inillucent | SQLite 3.53.4 |

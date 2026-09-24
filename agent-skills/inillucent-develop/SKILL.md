@@ -41,7 +41,7 @@ the workspace cannot build — the pinned SQLite oracle, a fixture corpus, a liv
 *reports success* when it is absent. `--strict` counts and names those, so a green on a bare machine
 cannot be mistaken for a green.
 
-**The exit code has three values, and the third is the one to know about** (task-2047):
+**The exit code has three values, and the third is the one to know about**:
 
 | code | what happened |
 |---|---|
@@ -146,6 +146,9 @@ Read three neighbouring files before writing one. The conventions that carry wei
 - **`forbid(unsafe_code)`** unless the crate is on `policy.rs`'s allow-list with a SAFETY note per
   call.
 - `cargo fmt` before finishing; `policy.rs` fails on an unformatted governed crate.
+- No ticket numbers (`task-NNNN`) in a published document: the readmes, the changelog, `AGENTS.md`,
+  `docs/`, `agent-skills/` and `packaging/`. Say what the change did. `tools/doc-facts/check.mjs`
+  fails on one.
 
 ## Before you say it is done
 

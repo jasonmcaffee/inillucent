@@ -399,6 +399,41 @@ function privateReferences() {
   return { label: 'no tracked file carries a private reference', problems, scanned: files };
 }
 
+/**
+ * The documents a reader outside the project reads, as repository-relative paths.
+ *
+ * These are the pages the repository and inillucent.com publish. Design documents under
+ * `tasks/` and `tests/` are named after the ticket that wrote them and are not in this list.
+ */
+const PUBLISHED_DOCUMENT = /^(README|CHANGELOG|AGENTS|CLAUDE|GEMINI|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT)\.md$|^(docs|agent-skills)\/.*\.md$|^drivers\/README\.md$|^examples\/.*README\.md$|^packaging\/[^/]*\.md$/;
+
+/** A ticket number, unless it is part of a path to a design document under `tasks/`. */
+const TICKET_NUMBER = /(?<!tasks\/)\btask-\d+/g;
+
+/**
+ * Reports every internal ticket number in a published document.
+ *
+ * **A ticket number means nothing outside the project.** It names a card on a private board,
+ * so a sentence that credits "task-2074" tells a reader of the public repository nothing they
+ * can look up. They were taken out of the documentation once and came back within two weeks,
+ * several hundred of them, because nothing checked. A path such as
+ * `tasks/task-1998-postgres-parity-tdd.md` is a file name and stays.
+ */
+function ticketNumbers() {
+  const problems = [];
+  let files = 0;
+  for (const relative of trackedFiles()) {
+    if (!PUBLISHED_DOCUMENT.test(relative)) continue;
+    const text = fs.readFileSync(path.join(ROOT, relative), 'utf8');
+    files += 1;
+    for (const match of text.matchAll(TICKET_NUMBER)) {
+      const line = text.slice(0, match.index).split('\n').length;
+      problems.push(`${relative}:${line} carries \`${match[0]}\` — an internal ticket number`);
+    }
+  }
+  return { label: 'no published document carries an internal ticket number', problems, scanned: files };
+}
+
 /* --------------------------------------------- every release version pin agrees */
 
 /**
@@ -932,7 +967,7 @@ function passed(flag) {
 
 // Two assertions that are not counts: what a public repository must not carry, and
 // whether every packaged copy of the release version agrees with the workspace.
-const assertions = [privateReferences(), versionPins(), privateRepositorySentencesAgree()];
+const assertions = [privateReferences(), ticketNumbers(), versionPins(), privateRepositorySentencesAgree()];
 
 const checks = [
   assertWritten('command line verbs', verbs, /\b(\d+)\s+(?:command line )?(?:verbs|commands)\b(?!\s+(?:over MCP|served|an agent|as MCP))/i, /(?:dot|reference's)\s+$/),

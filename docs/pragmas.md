@@ -90,7 +90,7 @@ one: its name, the columns its answer has, and whether it takes an argument.
 `busy_timeout` starts at **5000** milliseconds. It is how long a statement waits
 for a file another process holds before it is refused with `busy`, and setting it
 to 0 makes a contended statement fail at once. It governs the wait between
-processes as well as the one inside a process; before task-1980 the cross-process
+processes as well as the one inside a process; before this the cross-process
 wait was a constant this pragma could not reach.
 
 `locking_mode` starts at **normal**, which is SQLite's default too: the file lock

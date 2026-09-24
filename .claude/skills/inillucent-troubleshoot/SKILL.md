@@ -94,8 +94,26 @@ file and a `.migration-report.md` are left beside the destination — that is th
 litter. A leftover staging file makes the next run refuse rather than resume, because a server
 changes underneath a resumed migration.
 
+A digest that disagrees re-reads that one table and prints what differs: how many rows each side
+holds, which columns were compared, and up to three rows each side holds alone as `name=value`. A
+`VIRTUAL` generated column is left out of the digest on both sides, because no file stores it, and a
+separate `columns.<table>` check compares the declared column list.
+
 Login failures carry the server's own code: `postgres 28P01: …`, `mysql 1045 (28000): …`. Match on
 the code, not on the sentence — the sentence follows the server's locale.
+
+## "Is this file damaged?"
+
+```sh
+inillucent --db app.rdb integrity-check
+```
+
+It exits 0 with `"ok": true` only when every check answered exactly `ok`. Anything else, including no
+answer at all, is the status `corrupt` with the rows that say what is wrong: a page two tables both
+claim, a page the free map says is free while a table uses it, an index entry with no row, or
+`Page N: never used`. `PRAGMA quick_check` reads every tree and accounts for every page;
+`PRAGMA integrity_check` does that and then reads each index against its table, which is the slow
+part. A file whose free page chain loops is refused at open, naming the chain, rather than hanging.
 
 ## "The test suite is green and I do not believe it"
 
@@ -114,7 +132,7 @@ headers of `crates/inillucent-remote/tests/live_postgres.rs` and `live_mysql.rs`
 
 Two different things, and the second one is not the runner.
 
-**Exit code `2` means the run did not happen** (task-2047) — the build failed, a named selection
+**Exit code `2` means the run did not happen** — the build failed, a named selection
 matched nothing, `--filter` matched no test. Nothing was graded, so nothing in that run is evidence
 of anything. `1` means the run happened and was red, and `0` means it happened and passed. Branch on
 the code rather than on the last line.
@@ -126,7 +144,7 @@ target/debug/inillucent-testrun --changed | tail -40 ; echo $?   # tail's 0, alw
 target/debug/inillucent-testrun --changed > run.log 2>&1 ; echo $?   # the runner's
 ```
 
-That is what made a failed build read as a passing suite on task-2041, and it cost 60 KB of log to
+That is what made a failed build read as a passing suite, and it cost 60 KB of log to
 find out.
 
 ## Still stuck

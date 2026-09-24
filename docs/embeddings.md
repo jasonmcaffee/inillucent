@@ -121,7 +121,7 @@ sits beside `DbError::unsupported`, which carries the other answer.
 It printed `Error [syntax]: bad parameter or other API misuse` in the 0.1.2 archives. The sentence
 above was written and thrown away: it was built with `inillucent_base::error::misuse`, which puts
 what it is given into the diagnostic detail rather than into the message, and the detail does not
-leave the process unless the database was opened with diagnostics on. task-1952 has the whole of it.
+leave the process unless the database was opened with diagnostics on.
 
 A model that is installed and will not load is a second refusal, naming the runtime:
 `inillucent setup-embeddings runtime` installs it on its own. What the runtime itself said stays in
@@ -139,8 +139,8 @@ SELECT id, body FROM note
 ORDER BY vector_distance_cos(v, embed('what time is my plane')) LIMIT 10;
 ```
 
-The three write shapes were refused with the `unsupported` status and exit code 3 until task-1911:
-the write path compiled its expressions against a space built from a table's layout rather than from
+The three write shapes were refused with the `unsupported` status and exit code 3 until this was
+fixed: the write path compiled its expressions against a space built from a table's layout rather than from
 a catalog, so the function body was not there to be found and the translation refused by name. It now
 takes the catalog as a parameter, which is why a `RowSpace` still carries no lifetime.
 

@@ -110,11 +110,11 @@ operator's mistake.
 The limit that choice still accepts is `caching_sha2_password` **full**
 authentication, whose RSA exchange is refused with the two ways around it.
 
-### TLS, and why it is not a crate either (task-1894)
+### TLS, and why it is not a crate either
 
 The first version of this had **no TLS**: `sslmode=require` was refused by name
 and a migration to a server across a network sent its password and then every
-row in the clear. The review that found it is `task-1892`, and the fix had three
+row in the clear. This was found in review, and the fix had three
 candidates.
 
 `rustls` is the obvious crate and it was rejected on the argument two paragraphs
@@ -147,7 +147,7 @@ make those calls, and every block in them has a SAFETY note that
 falling back is the defect this replaced, and a fallback nobody sees is worse
 than the refusal.
 
-### The HTTP client, and the two archive formats (task-1900)
+### The HTTP client, and the two archive formats
 
 `inillucent setup-embeddings` downloads ONNX Runtime from GitHub and the weights from Hugging Face,
 verifies both against pinned SHA-256 digests, and takes one shared library out of a zip or a gzipped
@@ -184,7 +184,7 @@ Two properties matter here, because they are what a downloader gets wrong:
 
 ## The edges into the retired engine, and the ratchet on them
 
-The rearchitecture (task-1816) replaced `inillucent-storage`, `inillucent-transaction`
+The rearchitecture replaced `inillucent-storage`, `inillucent-transaction`
 and `inillucent-vm` with `inillucent-pool`, `inillucent-tree`, `inillucent-wal`,
 `inillucent-txn` and `inillucent-exec`. `inillucent-vm` is gone from the workspace
 now, along with `inillucent-session`, `inillucent-legacy` and `inillucent-capi` -
@@ -209,7 +209,7 @@ argue for in a review.
 | `inillucent-sqlite-reader` | it reads **SQLite's** file format and uses the old pager *as* the format reader | a second b-tree reader, not a dependency edit |
 | `inillucent-compat` | test-only; reading a SQLite file through `inillucent-storage`'s pager to migrate away from it is what it is for | nothing — a test-only crate cannot put an edge in a shipped binary |
 
-**task-1894 removed `inillucent-ext`** from that list, which was the only entry
+**`inillucent-ext` was removed** from that list, which was the only entry
 the *new* engine links — and therefore the only one that put two storage models
 in a shipped binary rather than merely in the workspace. Its
 `inillucent-transaction` edge was never used by a line of code. Its

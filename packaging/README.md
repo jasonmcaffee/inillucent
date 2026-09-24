@@ -45,9 +45,9 @@ The one exception is `cargo install inillucent-cli`, which builds from source
 because that is what cargo does. It is also the fallback the other five point at
 when a platform has no prebuilt archive.
 
-## What a release refuses, and why (task-1894)
+## What a release refuses, and why
 
-Before task-1894 the release scripts staged whatever was in the working tree and
+Before this was fixed, the release scripts staged whatever was in the working tree and
 labelled it with whatever `--version` said. Four things were possible and none
 of them was detectable from the archive afterwards:
 
@@ -90,7 +90,7 @@ One machine. The Windows box builds Windows, both Linux architectures and both
 Apple architectures, signs and notarises macOS, packages everything, signs the
 checksums and publishes the site.
 
-That was not true until task-1995. The macOS half used to run on a MacBook,
+That was not always true. The macOS half used to run on a MacBook,
 because `lipo`, `codesign`, `pkgbuild`, `productbuild`, `notarytool` and
 `stapler` are macOS programs. Each of them now has a replacement that runs here:
 `rcodesign` for five of them, `tools/macos-pkg` for the two that build the
@@ -113,7 +113,7 @@ version to pass here.
 
 The five targets `release-all.ps1` needs are named in `rust-toolchain.toml`,
 which is what installs them; the two Apple ones were missing from that list until
-task-1951, so on a machine holding only the pinned toolchain the default run
+this was fixed, so on a machine holding only the pinned toolchain the default run
 stopped at its macOS step with `error[E0463]: can't find crate for std`.
 
 `packaging/macos/release-macos.ps1` runs on its own too, for a macOS-only
@@ -146,9 +146,9 @@ reach them before anything on the site mentions them.
 **The distribution point is inillucent.com.** Both GitHub repositories are
 private, and a private repository's release assets are private too: an
 unauthenticated request for one answers 404, which was checked with no credential
-of any kind in task-1951. So GitHub carries nothing a user downloads. It used to
+of any kind. So GitHub carries nothing a user downloads. It used to
 be the transport that carried the macOS artifacts from the MacBook to the Windows
-box; since task-1995 there is nothing to carry, because the machine that builds
+box; there is nothing to carry now, because the machine that builds
 them is the machine that publishes them.
 
 One route does not survive that: `go install` resolves through

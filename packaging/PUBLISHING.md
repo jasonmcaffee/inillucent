@@ -17,7 +17,7 @@ Updated 2026-09-14, at **0.1.2**. Both one-line installers work, verified by
 running them as written against the live site: Windows, and Ubuntu 24.04. Three
 archives are published - Windows, Linux x86-64 and Linux aarch64.
 
-**Checked against the bytes the site is serving, on 2026-09-14 (task-1951).** All
+**Checked against the bytes the site is serving, on 2026-09-14.** All
 four published files were downloaded off `inillucent.com` and hashed with
 `sha256sum` rather than `Get-FileHash`, which is the one check a vanished cmdlet
 cannot fake. All four match the published `SHA256SUMS`, and all four are
@@ -28,7 +28,7 @@ macOS archive.
 **What 0.1.2 is for.** `inillucent setup-embeddings all` downloads 620 MB of ONNX
 Runtime and weights, and every archive up to 0.1.1 was built without
 `--features inillucent-cli/embed`, so the program that downloaded them answered
-`no such function: embed`. task-1900 put the flag in the release scripts;
+`no such function: embed`. A later change put the flag in the release scripts;
 0.1.1 was cut before that, so cutting 0.1.2 was the whole of the fix. The
 published Windows and Linux archives both answer
 `SELECT length(embed('hello'))` with `3072`, the Linux one after
@@ -39,14 +39,14 @@ published Windows and Linux archives both answer
 | **inillucent.com, Windows** | **live at 0.1.2** - `irm .../install.ps1 \| iex` installs and runs | nothing |
 | **inillucent.com, Linux x86-64** | **live at 0.1.2** - `curl -fsSL .../install.sh \| sh` installs and runs | nothing |
 | **inillucent.com, Linux aarch64** | **published at 0.1.2**, and **never run** - there is no ARM machine here. `tools/release-verify-linux.sh` reads its glibc floor, its shared libraries and its modes out of the archive and passes; L4 and L5 skip themselves | a machine that can run it |
-| **inillucent.com, macOS** | **no archive, at 0.1.1 or 0.1.2** - and it cannot be produced on this machine, nor by anything else: `task-1968` removed the GitHub workflows and there is no CI at all now. See [the macOS archive](#the-macos-archive-the-one-thing-that-needs-a-different-machine) | **a Mac, an Apple Developer Program membership, two Developer ID certificates and a stored `notarytool` profile.** Then one command on it: `./packaging/macos/release-macos.sh --version 0.1.2 --upload` |
+| **inillucent.com, macOS** | **no archive, at 0.1.1 or 0.1.2** - and it cannot be produced on this machine, nor by anything else: the GitHub workflows were removed and there is no CI at all now. See [the macOS archive](#the-macos-archive-the-one-thing-that-needs-a-different-machine) | **a Mac, an Apple Developer Program membership, two Developer ID certificates and a stored `notarytool` profile.** Then one command on it: `./packaging/macos/release-macos.sh --version 0.1.2 --upload` |
 | **SHA256SUMS signature** | not signed, at 0.1.1 or 0.1.2. The signing path itself is verified: run with a throwaway key it signs, the signature verifies, and a different public key is rejected on the key id | **a minisign key pair**, created once. `packaging/sign-sums.ps1` reads the secret key from `INILLUCENT_MINISIGN_KEY`, and `packaging/inillucent.pub` has to exist before it will sign at all |
 | **the .deb and the .rpm** | **not published, and the packaging is verified** - both were built from the published 0.1.2 Linux archive, the `.deb` was extracted in WSL and the program it carries wrote, reopened and read a database, and the `.rpm` header lists the same nine paths with the same modes | an OpenPGP key. `packaging/linux/package-linux.ps1` signs by default because `apt` and `dnf` will not install an unsigned package from outside a distribution's own repository. `gpg` is on the box with an empty keyring |
-| **GitHub release** | **cut for 0.1.2** on 2026-09-14, on the `v0.1.2` tag whose tree is the released tree, with all five assets. Every one was downloaded back off the release and hashed: all five match the published `SHA256SUMS` and `dist/` byte for byte. **Visible to everybody** since task-1961 made both repositories public: `tools/check-public-urls.mjs` fetches every URL a shipped package names with no credential and all nine answer 200 | nothing |
+| **GitHub release** | **cut for 0.1.2** on 2026-09-14, on the `v0.1.2` tag whose tree is the released tree, with all five assets. Every one was downloaded back off the release and hashed: all five match the published `SHA256SUMS` and `dist/` byte for byte. **Visible to everybody** since both repositories were made public: `tools/check-public-urls.mjs` fetches every URL a shipped package names with no credential and all nine answer 200 | nothing |
 | **Go** | **published**. `packages/go/v0.1.2` is pushed and `proxy.golang.org` serves the module to a caller with no credential: `/@latest` and `/@v/list` both answer 200, checked by `tools/check-public-urls.mjs` in `tools/validate`. See [the Go route](#the-go-route-verified-through-the-module-proxy) for what was and was not run | nothing |
 | **npm** | **token is the only step** - three tarballs packed, installed and run | an account token |
 | **PyPI** | **token is the only step** - wheel installed into a clean venv and run | an account with 2FA, and a token minted from it |
-| **crates.io** | **token is the only step** - `--workspace --dry-run` clean for every publishable crate. The source is public as of task-1961 | a token |
+| **crates.io** | **token is the only step** - `--workspace --dry-run` clean for every publishable crate. The source is public now | a token |
 | **Packagist** | **one step** - `composer install` works end to end, the package itself is ready, and the repository the submit form has to read is public now | a Packagist account (GitHub OAuth) |
 | **Homebrew** | **waiting on the macOS archive, and on nothing else.** `update.sh` fills both Linux checksums from `dist/SHA256SUMS` correctly and reports the macOS one as missing, which was run to check | the macOS archive; then the tap repository. `brew install --HEAD` additionally needs the repository to be public, because the formula's `head` spec clones it |
 
@@ -118,7 +118,7 @@ it, and it is what found each of these.
 
 ### What cutting 0.1.2 found in the gate itself
 
-None of these is reachable by building the workspace (task-1934):
+None of these is reachable by building the workspace:
 
 - **Five checks spoke a handshake `inillucent-mcp` no longer accepts.** It
   enforces the MCP lifecycle now - `initialize` needs `protocolVersion`,
@@ -139,7 +139,7 @@ None of these is reachable by building the workspace (task-1934):
   the standard library for the target still has to be installed.
   `rust-toolchain.toml` names it now.
 
-### What running the rest of the packaging found (task-1951)
+### What running the rest of the packaging found
 
 None of these is reachable by reading the scripts. Each came from running one.
 
@@ -222,7 +222,7 @@ attached, because deleting them would remove the record of what was published.
 
 ## The macOS archive: the one thing that needs a different machine
 
-Added 2026-09-14 (task-1951).
+Added 2026-09-14.
 
 There is no macOS archive at 0.1.1 or at 0.1.2, and it is the single artifact that blocks the most:
 the macOS download on inillucent.com, the Homebrew formula, and two of the four npm platform
@@ -255,13 +255,13 @@ three exist and says which is missing.
 
 ### There is no CI, and what went with it
 
-**`task-1968` removed `.github/workflows/` outright.** `task-1922` had already measured the reason:
+**`.github/workflows/` was removed outright.** An earlier review had already measured the reason:
 56 runs on this repository, none of them green, and every run after 9 September produced no jobs at
 all. Nothing on a runner builds, tests or packages this repository now. `tools/validate.ps1` and
 `tools/validate.sh`, on the machine making the change, are the whole gate.
 
 **Two things stopped existing with the workflows.** The nightly fuzz run, which `SECURITY.md` says.
-And `macos-latest` in the `validate` matrix, which `task-1932` had added a fortnight earlier -- the
+And `macos-latest` in the `validate` matrix, added a fortnight earlier -- the
 only place the workspace was ever built and tested on a real Mac. The Mach-O binaries this box cross
 compiles are now compiled and never run, by anybody, before they are published. Read the rest of
 this page on that basis: there is no second machine that will notice.
@@ -282,14 +282,14 @@ error[E0463]: can't find crate for `std`
 note: the `aarch64-apple-darwin` target may not be installed
 ```
 
-This is the same fault task-1934 fixed for `aarch64-unknown-linux-gnu`, which is why no release
+This is the same fault fixed earlier for `aarch64-unknown-linux-gnu`, which is why no release
 before 0.1.2 carried an ARM Linux archive. It was invisible for the Apple pair because
 `target/aarch64-apple-darwin/release` already held binaries from 2026-09-12, built before the pin,
 and nothing rebuilt them. `rust-toolchain.toml` names all five targets now.
 
 ### What Jason has to run, and where
 
-**Since task-1995 there is no second machine.** `packaging/release-all.ps1` on
+**There is no longer a second machine.** `packaging/release-all.ps1` on
 the Windows box builds, signs, packages and notarises macOS as well, because
 `rcodesign` and `tools/macos-pkg` replace every Apple program the release used
 and Apple's notary service is an HTTPS API. `packaging/macos/README.md` is the
@@ -320,8 +320,8 @@ pwsh packaging/publish-site.ps1 -Version 0.1.2 -Stage
 ```
 
 `fetch-macos-artifacts.ps1` refuses rather than warns when it cannot read the signatures, and it
-writes nothing into `dist/SHA256SUMS` unless every check passed. That was not true until task-1951;
-what it did instead is in [what running the rest of the packaging found](#what-running-the-rest-of-the-packaging-found-task-1951).
+writes nothing into `dist/SHA256SUMS` unless every check passed. That was not true until this was fixed;
+what it did instead is in [what running the rest of the packaging found](#what-running-the-rest-of-the-packaging-found).
 
 and on any Mac, against the bytes the site is then serving:
 
@@ -335,7 +335,7 @@ and only once that passes:
 pwsh packaging/publish-site.ps1 -Version 0.1.2 -Link
 ```
 
-task-1934 fixed `verify-macos.sh`'s A5 check before anybody had run it on a Mac: it spoke an MCP
+A later fix corrected `verify-macos.sh`'s A5 check before anybody had run it on a Mac: it spoke an MCP
 handshake `inillucent-mcp` refuses, and it read the answer through `grep -q`, which closes the pipe
 and made `set -o pipefail` report a correct answer as a failure. The script is the macOS release
 gate, and it was failing for two reasons before it had ever been run.
@@ -344,7 +344,7 @@ gate, and it was failing for two reasons before it had ever been run.
 
 ## `dist/` and `packages/npm/staged/`: generated, ignored, and not a source of truth
 
-Recorded here because a review asked which they were (task-1961, D4), and reading
+Recorded here because a review asked which they were, and reading
 `packaging/release.ps1` is what answers it.
 
 Both are **build output**, both are in `.gitignore`, and neither is tracked:
@@ -365,16 +365,16 @@ either directory out of a clone. What a reader needs from a release is the archi
 
 ## The GitHub mirror: what it holds, and what it is for
 
-Added 2026-09-14 (task-1951).
+Added 2026-09-14.
 
-### Both repositories are public, as of task-1961
+### Both repositories are public
 
 There are two. `jasonmcaffee/inillucent` is where releases are cut: 335 commits, `main` at
 `40a8e3b`, the tags `v0.1.1` and `v0.1.2`, and no GitHub releases at all.
 `Black-Rainbow-Labs/Inillucent` is the one every published package names: ten commits, `main` at
 `135c5cc`, and the `v0.1.0` and `v0.1.1` releases with their assets attached.
 
-Both answered 404 to everybody who was not signed in as the owner until task-1961 made them public.
+Both answered 404 to everybody who was not signed in as the owner until they were made public.
 Re-checked on 2026-09-14 with no credential of any kind, no token and no cookie:
 
 | URL | was | is |
@@ -388,14 +388,14 @@ Re-checked on 2026-09-14 with no credential of any kind, no token and no cookie:
 `tools/check-public-urls.mjs` is that check, kept so it does not have to be done by hand again. It
 reads every `github.com` URL out of the tracked files a package ships, fetches each one with no
 `Authorization` header and no cookie, and prints what an anonymous reader gets. It is a
-`tools/validate` stage as of task-1961: nine links, all of them reachable without signing in. It
+`tools/validate` stage now: nine links, all of them reachable without signing in. It
 was left out of the script on purpose while it was red, because a check that is red for a reason
 nobody intends to fix teaches people to ignore the script it is in.
 
 This is the same fault the Unluminous release had, found separately: a release whose download link
 answers 404 for every visitor while looking correct to the person who published it.
 
-### What being private cost, until task-1961
+### What being private cost, until both were made public
 
 **Nothing that a user installs.** Every archive download in every installer is `inillucent.com`:
 `install.sh`, `install.ps1`, the Homebrew formula's three release URLs, the Go
@@ -503,8 +503,8 @@ every release tag on the mirror holds the released tree
 
 The 0.1.2 commit and tag are **pushed**, and the v0.1.2 release is **cut**, with all five assets.
 None of that was a visibility decision: the repository was private before that day's work and
-private after it, so it published nothing to anybody at the time - the flip came later, in
-task-1961. What it did was make the mirror's record true and give the macOS upload something to
+private after it, so it published nothing to anybody at the time - the flip came later.
+What it did was make the mirror's record true and give the macOS upload something to
 attach to - `release-macos.sh --upload` runs `gh release create "v$version"`
 when the release is absent, and with no `v0.1.2` tag on the remote that would have created one from
 the default branch, which held 0.1.1's tree.
@@ -571,8 +571,8 @@ pwsh packaging/publish-site.ps1 -Version 0.1.4 -Stage
 pwsh packaging/publish-site.ps1 -Version 0.1.4 -Link
 ```
 
-**The distribution point is inillucent.com**, and since task-1995 GitHub carries
-nothing at all: there are no macOS artifacts to move between machines, because
+**The distribution point is inillucent.com**, and GitHub carries
+nothing at all now: there are no macOS artifacts to move between machines, because
 the machine that builds them is the machine that publishes them.
 
 `release.ps1` refuses to build an untagged archive, so the tag comes first.
@@ -733,7 +733,7 @@ is Go's own rule for a nested module.
 
 ### The Go route, verified through the module proxy
 
-**It was not installable by anybody until task-1961 made the repository
+**It was not installable by anybody until the repository was made
 public.** `go install` does not clone the repository itself; it asks
 `proxy.golang.org`, and the proxy clones on its behalf with no credential. While
 the repository was private that read:
@@ -812,7 +812,7 @@ Submit `https://github.com/Black-Rainbow-Labs/Inillucent` at
 <https://packagist.org/packages/submit>, then add the GitHub webhook Packagist
 offers so a tag updates the package.
 
-**This needs the repository to be public**, which it is as of task-1961.
+**This needs the repository to be public**, which it is now.
 Packagist reads the repository to find `composer.json` and to list the tags, and
 a private one answered 404 to it exactly as it did to everybody else.
 

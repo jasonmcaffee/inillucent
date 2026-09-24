@@ -9,7 +9,7 @@ This is what that took, on a real mailbox rather than a fixture: **64,378 messag
 whether to do the same thing, so it leads with what went wrong.
 
 **Read section 2 as history.** Both failures it describes are fixed: the recovery ordering that
-corrupted a database when a `CREATE TABLE` followed a reopen went in task-1888, and each is now
+corrupted a database when a `CREATE TABLE` followed a reopen is fixed, and each is now
 pinned by a test named where it is described. The section is kept rather than deleted because what
 it says about *how* a corruption of that shape is diagnosed — restoring log segments one at a time
 and reading after each — is the part worth having, and because a report that quietly dropped its
@@ -93,7 +93,7 @@ The consequence for the application was larger than the incident: **Nikaya could
 The queue that would remove its worst remaining regression was written, reconciled against the real
 corpus and deliberately not shipped, because shipping it corrupted the corpus.
 
-#### Fixed in task-1888, and this is what it was
+#### Fixed, and this is what it was
 
 Recovery collected the `AllocPage` records it replayed into one list and the `FreePage` records into
 another, then claimed every page in the first list and released every page in the second. The frees
@@ -323,7 +323,7 @@ The application's answer to that is the same one it used for the embedding backl
 queue table written by the transactions that create the work and drained by the ones that finish it
 turns the empty case into one seek. It is written, it reconciles against the real corpus correctly
 (66,793 documents checked, none queued), **and it is not shipped**, because the `CREATE TABLE` that
-created it corrupted the database. That was section 2, and task-1888 fixed it.
+created it corrupted the database. That was section 2, and it is now fixed.
 
 `status.counts` is five `count(*)` over 600,000 row tables. PostgreSQL spreads that across parallel
 workers; this engine walks a covering index on one core. There is no application-side trick for it

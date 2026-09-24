@@ -28,9 +28,10 @@ go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-i
 It downloads the release archive for your platform and puts `inillucent` on your `PATH`, the same
 files the installer above writes.
 
-`npm install -g inillucent`, `pip install inillucent`, `cargo install inillucent-cli`,
+`npm install -g inillucent`, `pip install inillucent`,
 `brew install black-rainbow-labs/inillucent/inillucent` and `composer require black-rainbow-labs/inillucent`
-are what the other five will be, and none of them answers yet. Use the two commands above meanwhile.
+also install the current release. `inillucent-cli` is not on crates.io, so from cargo it is
+`cargo install --git https://github.com/Black-Rainbow-Labs/Inillucent inillucent-cli`.
 Every route installs the same four programs and verifies the release's published SHA-256 first.
 
 From a clone: `cargo build --release -p inillucent-cli`, and the binaries land in `target/release`.

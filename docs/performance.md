@@ -12,8 +12,8 @@ every interval and every control. This page is the summary.
 Measured at 100,000 rows on Windows, over the ten workload families the performance contract weights,
 30 paired rounds per run, four consecutive runs, medians of the two middle runs.
 
-**Measured 2026-09-23 on `main` at `6f84ce6` with task-2082's `7f93661` applied**, which is `main` as
-it stood apart from task-2081 (`3a39c94`), which merged after the run. task-2081 changes how `%`, `/`
+**Measured 2026-09-23 on `main` at `6f84ce6` with `7f93661` applied**, which is `main` as
+it stood apart from `3a39c94`, which merged after the run. That commit changes how `%`, `/`
 and `||` read the connection's settings, and it rewrote the two selective correlated workloads to
 filter with `a.id % 100 = 0` in place of `a.id + 0 > 396`, which keeps the same four rows. Every
 number on this page is that run unless a section says otherwise. It was taken in a
@@ -68,12 +68,12 @@ real too: it is what this gate reports on this machine when nothing is pinned, a
 someone else taking the same measurement without a mask may see. It is not a property of either
 engine, because it changes with where the scheduler puts each process.
 
-**This also explains a difference that looked like a regression.** task-2074's two gates of
-`420e68a` on 2026-09-22 read `scan.aggregate` at 1.80 and 1.76 ms, and task-2082's passes of the same
+**This also explains a difference that looked like a regression.** Two gates of
+`420e68a` on 2026-09-22 read `scan.aggregate` at 1.80 and 1.76 ms, and later passes of the same
 commit on 2026-09-23 read it at 2.96 to 2.98 ms. Those are the two core types. The 2026-09-20 run
 this page used to carry read `scan.aggregate` at 1.70 to 1.73 ms against SQLite's 92.5 to 93.8 over
 its four runs, which is the performance core figure on both arms, so on that day both processes
-landed on the performance cores without being asked. Since task-2085 the gates pin themselves and
+landed on the performance cores without being asked. The gates now pin themselves and
 print which cores each arm ran on; [Reproducing it](#reproducing-it) says how.
 
 ### What moved since 2026-09-20
@@ -92,12 +92,12 @@ print which cores each arm ran on; [Reproducing it](#reproducing-it) says how.
 | `schema` | 1.37x | 1.31x | 5% slower |
 | **weighted** | **4.53x** | **4.97x** | **10% faster** |
 
-The write family is most of it, and task-2074 is most of the write family: a leaf's delta area is
+The write family is most of it: a leaf's delta area is now
 sized by the page's free space rather than capped at 32 rows, and a compaction whose rows fit the
 page's existing column widths splices them in. `write.insert.batch` went from about 0.60x to
 **1.47x**, `write.update.indexed` to 3.37x and `write.delete` to 4.16x. `extension.fts.build` rode
 the same change from 0.69x to 0.95x, which is most of `extension`'s move. `open.prepare` is
-`prepare.trivial` going from 0.49x to 0.57x after task-2026 took a compile from 24 allocations to 13.
+`prepare.trivial` going from 0.49x to 0.57x after a compile went from 24 allocations to 13.
 
 `schema` moved the other way within its own noise: it is one workload, run once a round, and its
 median ratio went from 1.37x to 1.31x while its interval, bootstrapped from three values, is the
@@ -105,12 +105,61 @@ widest on the page.
 
 **The processor figure got worse, and most of the reason is four workloads the 2026-09-20 plan did
 not have.** It was 0.400 of SQLite's and is 0.500 now. The plan gained the four `read.correlated`
-workloads since then (task-2066 section 4.3.1 and task-2076), and on this engine's arm they take
+workloads since then, and on this engine's arm they take
 182 ms of each round against under half a millisecond on SQLite's; see
 [the workloads that are slower](#the-workloads-that-are-slower). The contract does not weight them
 into the elapsed time headline, but the processor figure is one round of the whole plan, so they are
 in it. The four runs read 0.470, 0.520, 0.500 and 0.500 against a bar of 0.400, so the processor bar
 is missed on all four.
+
+### Measured again at `52c4b5f` on 2026-09-24, and not graded
+
+**The figures above are still the latest graded run.** A further run took four full gate passes of
+`main` at `52c4b5f`, pinned to the performance cores, 30 rounds each, and the gate refused to grade
+every one of them: SQLite's arm ran **6.71% to 7.42% slower** than on the machine's recorded idle
+reference, against a limit of 3%. Firefox and WebView were using about 1.2 cores throughout. They
+belong to the machine's owner and were not stopped. A busy machine slows SQLite's arm more than this
+engine's, so every ratio from these passes is too high, and they read 5.31x to 5.47x weighted. That
+is not a new headline and it is not compared with 4.97x anywhere in this documentation.
+
+Against the graded 2026-09-23 run, SQLite's own times in these passes are 2% to 5% slower on most
+workloads and this engine's are 2% to 8% faster. Some differences are far larger than a 7% bias can
+explain, and they are the reason this section exists:
+
+| workload | graded 2026-09-23 | at `52c4b5f`, not graded | SQLite at `52c4b5f` |
+|---|---|---|---|
+| `correlated.exists`, 400 outer rows | 59.69 ms | **0.40 ms** | 0.30 ms |
+| `correlated.in`, 400 outer rows | 118.19 ms | **0.92 ms** | 0.10 ms |
+| `correlated.exists.selective` | 2.11 ms | **19.5 µs** | 23.7 µs |
+| `correlated.scalar.selective` | 2.11 ms | **17.9 µs** | 22.3 µs |
+| `join.range`, a probe | 57.1 µs | **53.7 µs** | 51.2 µs |
+| `range.lookaside`, a probe | 57.4 µs | **52.4 µs** | 57.8 µs |
+| processor time, one round of the plan | 555 ms | **367 ms** | 1,102 ms |
+| peak resident set, one round of the plan | 40.76 MiB | 40.88 MiB | 37.22 MiB |
+
+- **The correlated subqueries are 99% cheaper.** Every execution of a correlated block used to grow
+  a slot array to 100,001 entries, 3.2 MB, and `correlated.exists` made and freed 58 of them each
+  time it ran: 45,414 page faults an execution, and 91,390 for `correlated.in`. A later change keeps
+  the engine's own parameters in a list of their own, and those faults are now 0. The two selective
+  forms are faster than SQLite. `correlated.exists` is 35% slower and `correlated.in` 809% slower,
+  where they were 21,332% and 118,020% slower.
+- **The processor figure follows from that.** The four correlated workloads took 182 ms of each
+  round on 2026-09-23 and take under 2 ms now, so one round of the whole plan is 367 ms of processor
+  against SQLite's 1,102: a ratio of 0.335, under the contract's 0.400 bar, where 0.500 missed it. A
+  busy machine inflates processor time less than elapsed time, but the pass was not graded, so the
+  bar is not claimed as met.
+- **`join.range` is 6% cheaper a probe**, from a leaf column being read once and a probe key whose
+  affinity changes nothing no longer being copied. It reads 0.95x, within the busy bias of
+  1.00x.
+- **`range.lookaside` reads 1.10x**, faster than SQLite for the first time, but that is also within
+  the bias, so it stays on the list below until a graded pass says otherwise.
+- **Memory did not move**, and it is the one figure a busy machine does not bias.
+
+The workloads that depend on the disk moved between the four passes by more than any engine change:
+`txn.autocommit` read 1.88x, 1.91x, 0.99x and 1.00x, and `extension.fts.build` 0.63x, 0.69x, 0.99x
+and 0.99x, mostly because SQLite's arm of each changed. Nothing is concluded from them here.
+
+The next graded run replaces the figures at the top of this page.
 
 Both engines get the same memory budget: a pool of 4,096 frames of 32 KiB here, 128 MiB, and
 `PRAGMA cache_size = -131072` on SQLite's arm, also 128 MiB. Both run under `synchronous = FULL`.
@@ -126,12 +175,12 @@ taken inside a running program.
 it, expressed as the family's own ratio.
 
 **The two lower bound columns are two different statistics.** `pooled` is what every gate printed
-until task-2093: both workloads' rounds in one list, bootstrapped, from the four runs above. That
+before the gates changed how they compute this: both workloads' rounds in one list, bootstrapped, from the four runs above. That
 bound mostly measures how far apart a family's workloads are. `per round` is what the gates print
 now: one value a round, the mean of that round's log ratios over the family's workloads, with the
-rounds resampled. It is the lowest and highest of four pinned passes task-2093 took of `main` at
+rounds resampled. It is the lowest and highest of four pinned passes taken of `main` at
 `16c01a4` with the change applied, on 2026-09-23. [How a family's interval is
-computed](#how-a-familys-interval-is-computed-task-2093) has both statistics side by side, printed
+computed](#how-a-familys-interval-is-computed) has both statistics side by side, printed
 from the same samples.
 
 | family | weight | what it measures | measured | 95% lower bound, pooled | 95% lower bound, per round | bar |
@@ -171,13 +220,13 @@ runs above printed pooled lower bounds of 2.73x, 2.83x, 2.78x and 2.90x, with th
 4.21x. `join.selective` reads 20.94x and `join.range` **0.84x**, and the pooled bound is set by how
 far apart those two are: it can be predicted from the two ratios alone to within 0.07x. Four pinned
 passes of `main` with the per round statistic read the bound at 4.27x, 4.08x, 4.18x and 4.19x.
-[How a family's interval is computed](#how-a-familys-interval-is-computed-task-2093) has the change,
+[How a family's interval is computed](#how-a-familys-interval-is-computed) has the change,
 and [`read.join`'s bar under the per round statistic](#readjoins-bar-under-the-per-round-statistic)
 has the decision to keep the bar at 3.00x, with what the family reads on five builds back to
-task-1819. `join.range` is still slower than SQLite, and task-2086 found it lost 26% of this
-engine's time since task-1833; [Why `read.join` misses its 3.00x bar, and when it last met
+`57e87b0`. `join.range` is still slower than SQLite, and a pinned measurement back through history found it lost 26% of this
+engine's time since `b0ba286`; [Why `read.join` misses its 3.00x bar, and when it last met
 it](#why-readjoin-misses-its-300x-bar-and-when-it-last-met-it) has that history, and [Where the
-rest of `join.range`'s time went](#where-the-rest-of-joinranges-time-went-57e87b0-to-head-task-2099)
+rest of `join.range`'s time went](#where-the-rest-of-joinranges-time-went-after-57e87b0)
 names the commits.
 
 A join-only run reads the family much higher - 6.46x, 6.26x, 6.14x and 5.60x, with lower bounds of
@@ -186,7 +235,7 @@ that is the measurement this page used to carry. **A family measured on its own 
 measurement as the same family inside the whole plan**, because the plan's other workloads decide
 what is in the pool when the join runs. The figure in the table above is the whole-plan one, which is
 what the contract grades. In that run of the join family alone `join.selective` read 35.49x and `join.range` 1.17x.
-The bounds before task-1911's chain reuse were 2.97x, 3.00x, 3.00x and 2.99x against the same 3.00x
+The bounds before the chain reuse change were 2.97x, 3.00x, 3.00x and 2.99x against the same 3.00x
 bar.
 
 **`transaction` is 2.37x, and the reason is what a commit costs.** A commit is one append to the log
@@ -204,7 +253,7 @@ not:
 
 | workload | family | ratio | how much slower | per operation | why |
 |---|---|---|---|---|---|
-| `prepare.trivial` | `open.prepare` | 0.57x | **75% slower** | 729 ns against 407 | `SELECT 1` compiled on every call. `inillucent-prepareprofile` counts **13 allocations** on the path the gate times, where it counted 24: task-2006 removed three and task-2026 eight more. **Nine of the thirteen leave with the compiled statement** - the bound result columns, the column's name, the `Box<BoundSelect>`, the projection expression tree and the output names - so what is left is the compile's answer rather than its scratch |
+| `prepare.trivial` | `open.prepare` | 0.57x | **75% slower** | 729 ns against 407 | `SELECT 1` compiled on every call. `inillucent-prepareprofile` counts **13 allocations** on the path the gate times, where it counted 24: one change removed three and a later one eight more. **Nine of the thirteen leave with the compiled statement** - the bound result columns, the column's name, the `Box<BoundSelect>`, the projection expression tree and the output names - so what is left is the compile's answer rather than its scratch |
 | `join.range` | `read.join` | 0.84x | **18% slower** | 57.1 µs against 48.6 | an index range and a probe per entry, where SQLite amortises one statement's overhead over two hundred rows |
 | `extension.fts.build` | `extension` | 0.95x | **5% slower** | 10.9 µs a document against 10.4 | it was 45% slower on 2026-09-20. FTS5's build is four ordinary row writes a document, so it moved with the write path |
 | `range.lookaside` | `read.range` | 0.96x | **4% slower** | 57.4 µs against 55.7 | the same shape as `join.range`, 200 rowid probes |
@@ -227,11 +276,15 @@ the processor and memory figures above.
 | `correlated.exists.selective`, a filter keeps 4 outer rows | 2.11 ms | 0.022 ms | **9,395% slower** |
 | `correlated.scalar.selective`, a scalar block, 4 outer rows | 2.11 ms | 0.021 ms | **9,839% slower** |
 
-task-2068 made a correlated block 340% faster and task-2076 stopped answering blocks for rows the
-filter throws away, which is why the two selective arms are 2 ms rather than 55. Both said the target
-was not met, and it is not: SQLite answers these as a join and this engine answers every block by
-running it. If an application writes correlated subqueries against large tables, write them as joins
-on this engine. **These four are also the one place where the core count changed the answer:**
+A change made a correlated block 340% faster and a later one stopped answering blocks for rows the
+filter throws away, which is why the two selective arms are 2 ms rather than 55. **The table above is
+out of date by two orders of magnitude and is kept because it is the last graded run.** At
+`52c4b5f`, measured on a machine the gate called busy, the four read 0.40 ms, 0.92 ms, 19.5 µs and
+17.9 µs, because a later change stopped each execution building and freeing a 3.2 MB slot array;
+[Measured again at `52c4b5f`](#measured-again-at-52c4b5f-on-2026-09-24-and-not-graded) has the
+table. The two selective forms are faster than SQLite there, and a correlated `IN` over 400 outer
+rows is still 809% slower, so a correlated `IN` against a large table is still worth writing as a
+join. **These four are also the one place where the core count changed the answer:**
 `correlated.exists` took 59.69 ms pinned to the eight performance cores, 46.35 ms pinned to the
 sixteen efficiency cores and 38.74 ms with all twenty four available, while every other workload was
 faster on the performance cores. Why is not investigated here.
@@ -280,7 +333,7 @@ written once and synced once at the commit and the bytes are not what the worklo
 | **making room** | **23.97 ms** | 5.10 ms | **18.87 ms** |
 
 **Making room was 54% of the transaction** when that table was taken. It is **36%** now, 10.57 ms of
-29.60, and it has been split into the four passes it actually is (task-2024). Medians of five runs,
+29.60, and it has been split into the four passes it actually is. Medians of five runs,
 same fixture, same geometry:
 
 | | with both indexes | without either |
@@ -293,7 +346,7 @@ same fixture, same geometry:
 | - the encode | 2.22 | 0.35 |
 
 **The merge is the one pass that does not grow with the page size** - it is per delta row and a delta
-area held at most thirty-two when this was measured (task-2074 sized it by the free gap instead, and
+area held at most thirty-two when this was measured (a later change sized it by the free gap instead, and
 took the sweep's compactions from 1,624 to 423; see `docs/closed-items.md`) - and the other three roughly double between an 8 KiB page and this
 one, because a 32 KiB leaf keeps four times as many rows. An attribution of this stage taken at 8 KiB
 understates it by about half, and the gate runs at 32 KiB.
@@ -348,7 +401,7 @@ is the one the contract grades and the one quoted.
 
 **One number per index count, because the gate's fixture has one index count.** `main_table` carries
 two secondary indexes, so a change aimed at index maintenance measured on `write.insert.batch` is one
-point of a curve. task-2074 added the sweep: `inillucent-writeprofile --sweep` inserts 5,000 rows in
+point of a curve. The delta area change added the sweep: `inillucent-writeprofile --sweep` inserts 5,000 rows in
 one transaction into a 100,000 row table carrying 0, 2, 5 and 10 indexes, in process, with the write
 path's own counters; `inillucent-perfhistory --only insert.indexes` inserts 20,000 rows into a 20,000
 row table carrying the same index counts, beside SQLite. The indexes are built after the rows are
@@ -392,7 +445,7 @@ write only the new rows' values. SQLite's own cost jumps at 10 indexes on this t
 fixture at a 32 KiB page, the base commit against this one, 30 rounds each, alternated twice in one
 quiet window. The workloads that moved:
 
-| workload | base | base | task-2074 | task-2074 |
+| workload | base | base | after | after |
 |---|---:|---:|---:|---:|
 | `write.insert.batch` | 0.88x | 0.81x | 1.52x | 1.52x |
 | `write.update.indexed` | 2.13x | 2.10x | 3.77x | 3.52x |
@@ -410,60 +463,62 @@ updates that lengthen a text value in place, and making heap room for a longer v
 area down by the value's size - the area is larger now, so each move copies more. **`join.range`
 moved by about as much as the two base runs differ from each other**, but it is the workload that
 holds `read.join`'s lower bound, and that bound went from 3.14x and 3.04x to 2.92x and 2.98x against
-a bar of 3.00x. Both are task-2082, and the next section is what it found.
+a bar of 3.00x. Both were measured again by the change that made a lookup past a leaf's last delta
+key cost one comparison, called the fix below, and the next section is what it found.
 
-### The two workloads task-2074 cost, measured again
+### The two workloads the format 2 leaf cost, measured again
 
-**Neither regression survives pinning the gate to one kind of core.** task-2082 measured both
+**Neither regression survives pinning the gate to one kind of core.** The fix, which makes a lookup
+past a leaf's last delta key cost one comparison, measured both
 again with `inillucent-fullgate` on the medium fixture at a 32 KiB page, 30 rounds, the builds
 alternated. The pass that decides it was taken with the gate process pinned to this machine's
 performance cores: affinity mask `0xC03C03`, logical processors 0, 1, 10 to 13, 22 and 23 on a Core
 Ultra 9 285. SQLite runs as a child of the gate and inherits the mask, and the mask was read back
-from the SQLite child on every pass: `0xC03C03` each time. task-2064 found why this matters.
+from the SQLite child on every pass: `0xC03C03` each time. An earlier measurement found why this matters.
 Unpinned, the scheduler put this engine on the efficiency cores and SQLite on the performance cores,
-so an unpinned pass measures the two engines on different hardware (task-2085 makes the gates pin
+so an unpinned pass measures the two engines on different hardware (a later change makes the gates pin
 themselves).
 
-The test was written down before the pinned passes ran: the regression is real only if task-2074's
-mean is at least 3% slower than the build before it **and** every task-2074 pass is slower than
-every pass before it. The fix counts only if it is at least 2% faster than task-2074 on the mean
+The test was written down before the pinned passes ran: the regression is real only if the delta area change's
+mean is at least 3% slower than the build before it **and** every one of its passes is slower than
+every pass before it. The fix counts only if it is at least 2% faster than the delta area change on the mean
 **and** every one of its passes is faster.
 
 Pinned, 14:50 to 15:18:51Z on 2026-09-23 in quiet windows, this engine's time in milliseconds:
 
 | build | `txn.large`, each pass | mean | `join.range`, each pass | mean |
 |---|---|---:|---|---:|
-| before task-2074 (`420e68a`) | 2.838, 2.803 | 2.821 | 27.55, 27.37 | 27.46 |
-| task-2074 (`abf042c`) | 2.845, 2.837, 2.899, 2.827 | 2.852 | 27.46, 27.43, 27.53, 27.59 | 27.50 |
-| task-2082 | 2.726, 2.672, 2.726 | 2.708 | 27.46, 27.25, 27.27 | 27.33 |
+| before the delta area change (`420e68a`) | 2.838, 2.803 | 2.821 | 27.55, 27.37 | 27.46 |
+| the delta area change (`abf042c`) | 2.845, 2.837, 2.899, 2.827 | 2.852 | 27.46, 27.43, 27.53, 27.59 | 27.50 |
+| the fix | 2.726, 2.672, 2.726 | 2.708 | 27.46, 27.25, 27.27 | 27.33 |
 
-- **`txn.large` did not regress.** task-2074 is 1.1% slower on the mean, under the 3% the test asks
+- **`txn.large` did not regress.** The delta area change is 1.1% slower on the mean, under the 3% the test asks
   for, and its fastest pass (2.827) is faster than the slowest pass before it (2.838).
 - **`join.range` did not regress**, 0.1% on the mean. SQLite's arm read 23.8 to 24.1 ms on every
   pinned pass, and the `read.join` lower bound read 2.80x to 2.86x on all three builds, the build
-  before task-2074 included. So the bar is missed, but task-2074 did not cause it. The 3.14x and
-  3.04x quoted above for the build before task-2074 were taken when both arms ran on performance cores.
-- **The fix is 5.0% faster than task-2074 on `txn.large`**, and its slowest pass is faster than
-  task-2074's fastest.
+  before the delta area change included. So the bar is missed, but the delta area change did not cause it. The 3.14x and
+  3.04x quoted above for the build before the delta area change were taken when both arms ran on performance cores.
+- **The fix is 5.0% faster than the delta area change on `txn.large`**, and its slowest pass is faster than
+  the delta area change's fastest.
 
 The rest of the write family, pinned means in milliseconds:
 
-| workload | before task-2074 | task-2074 | task-2082 |
+| workload | before the delta area change | the delta area change | the fix |
 |---|---:|---:|---:|
 | `write.insert.batch` | 24.47 | 14.02 | 13.90 |
 | `write.update.indexed` | 33.91 | 20.35 | 20.40 |
 | `write.delete` | 20.49 | 16.08 | 16.28 |
 
-task-2074's gain is intact. `write.delete` reads 1.3% slower with the fix, from three passes against
+The delta area change's gain is intact. `write.delete` reads 1.3% slower with the fix, from three passes against
 four, and every pass of each build is inside 15.8 to 16.4 ms.
 
 **What the fix is.** Counted on the `write` and `transaction` families alone, which put the tables
 in the state `txn.large` meets, all but a few of its 2,000 statements either update in place or
-match nothing. The in-place update's code did not change in task-2074, so the carve was not the
+match nothing. The in-place update's code did not change in the delta area change, so the carve was not the
 cause. `Bind::Scatter` picks rowids up to `main_table`'s row count and `side_table` holds a quarter
 of that, so three in four of the updates look up a rowid past the end of `side_table` and land in
 its last leaf. `write.insert.autocommit` appended 100 rows to that leaf earlier in the round. With
-the 32 row limit they were packed every 32; since task-2074 they stay in the delta area until the
+the 32 row limit they were packed every 32; since that change they stay in the delta area until the
 free gap fills, and each lookup past the end binary searched them, decoding one delta key per
 halving. `LeafRef::delta_search` now compares the last directory entry first. A probe above it is
 past the whole area and is answered after that one comparison. The same search runs twice for every
@@ -478,21 +533,20 @@ unreferenced bytes than the splice would leave free changed no count on the gate
 
 **The unpinned passes, kept as evidence, are efficiency core figures.** 27 unpinned passes in two
 quiet windows (11:35 to 12:13:31Z and 12:35 to 13:06Z) gave the same two answers under the same test and
-different absolute times: `txn.large` 3.12 and 3.20 ms before task-2074 in the two windows, 3.20
-and 3.19 on task-2074, and 3.04 with
+different absolute times: `txn.large` 3.12 and 3.20 ms before the delta area change in the two windows, 3.20
+and 3.19 with the delta area change, and 3.04 with
 the fix; `join.range` 33.0 to 33.6 ms on every build while SQLite's arm drifted from 24.8 to 31.6 ms
 and pulled the `read.join` lower bound between 2.57x and 3.16x. Two of the pinned passes of the
-build before task-2074 exited at once, because the worktree it was built in had lost its link to
+build before the delta area change exited at once, because the worktree it was built in had lost its link to
 the SQLite oracle; they are not counted. The gate refuses without the oracle, but only a pass that
-takes two seconds instead of two and a half minutes shows it. Every output is in
-`_agent_output/task-2082-txn-large/` in the main checkout.
+takes two seconds instead of two and a half minutes shows it.
 
 ### Why `read.join` misses its 3.00x bar, and when it last met it
 
-task-2086 answered this with 60 pinned passes on 2026-09-23. Every pass ran with the gate process
+A further measurement answered this with 60 pinned passes on 2026-09-23. Every pass ran with the gate process
 pinned to affinity mask `0xC03C03` from outside, which is the only way to pin the builds from before
-task-2085, and the mask was read back from the SQLite child on every pass. It read `0xC03C03` all 60
-times. Builds from before task-2085 cannot pin themselves, so HEAD was pinned the same way, from
+the gates could pin themselves, and the mask was read back from the SQLite child on every pass. It read `0xC03C03` all 60
+times. Builds from before that change cannot pin themselves, so HEAD was pinned the same way, from
 outside, rather than left to pin itself. Passes 1 to 3 ran while one test target of another ticket
 was running at 6 to 9% box load. Every other pass ran on an empty box.
 
@@ -501,7 +555,7 @@ was running at 6 to 9% box load. Every other pass ran on an empty box.
 **1. The 3.00x bar was never measured.** It is the "low estimate" column of the performance
 contract in `tasks/task-1816-rearchitecture-tdd.md`, a table headed "Targets are estimates unless
 marked measured", written when `read.join` read 0.154x. `inillucent-readgate` first graded it at
-task-1819 (`57e87b0`), which read the family at 4.87x with a lower bound of 3.32x.
+`57e87b0`, which read the family at 4.87x with a lower bound of 3.32x.
 `inillucent-fullgate` carried it over unchanged.
 
 **2. The family's lower bound mostly measures how far apart its two workloads are.** Every gate
@@ -517,8 +571,8 @@ to within 0.07x on every clean pass, at every build. For the bound to reach 3.00
 
 Resampling rounds instead, with each round's value the mean of that round's two log ratios (the
 statistic `weighted_headline` already uses for every family), reads 4.15x [4.11x, 4.21x] and 4.17x
-[4.16x, 4.25x] on two pinned passes of HEAD. task-2093 made that the statistic every gate uses; see
-[How a family's interval is computed](#how-a-familys-interval-is-computed-task-2093).
+[4.16x, 4.25x] on two pinned passes of HEAD. A later change made that the statistic every gate uses; see
+[How a family's interval is computed](#how-a-familys-interval-is-computed).
 
 **3. `join.range` did lose time, 26% of this engine's time, in four steps.** On the read gate's plan,
 pinned, this engine in milliseconds, forward sweep / reverse sweep, with SQLite's arm at 23.9 to
@@ -526,18 +580,18 @@ pinned, this engine in milliseconds, forward sweep / reverse sweep, with SQLite'
 
 | build | `join.range` | |
 |---|---|---|
-| `57e87b0`, task-1819 | 22.21, 23.00, 22.39, 22.00 | the build the bar was first met on |
-| `b0ba286`, task-1833 | 22.37 / 22.62 | |
+| `57e87b0` | 22.21, 23.00, 22.39, 22.00 | the build the bar was first met on |
+| `b0ba286` | 22.37 / 22.62 | |
 | `ea03335` | 23.44 / 23.36 | **+1.0 ms** somewhere in the 15 commits before it |
 | `3322436`, `1334b80`, `59ccf91` | 23.27 to 23.72 | |
 | `71d014a` | 24.12 / 24.15 | **+0.8 ms** somewhere in the 30 commits before it |
-| `566c688`, task-1870's narrow slot | 24.23 / 24.01 | |
-| `a8f45b1`, task-1870's five follow-ups | 27.03 / 26.77 | **+2.8 ms in this one commit** |
-| `f9e2374`, task-1962 | 25.86 / 26.05 | 1.0 ms back, somewhere between |
+| `566c688`, the narrow integer slot change | 24.23 / 24.01 | |
+| `a8f45b1`, five follow-up changes | 27.03 / 26.77 | **+2.8 ms in this one commit** |
+| `f9e2374` | 25.86 / 26.05 | 1.0 ms back, somewhere between |
 | `b3ad244` to `a07036b` | 26.07 to 26.53 | |
 | `dcc65f2` | 27.37 / 27.52 | **+1.0 ms** somewhere in the 25 commits before it |
 | `36939dd`, `5353eb4` | 27.03 to 27.59 | |
-| `d389021`, task-2085 | 27.96 / 27.88 | **+0.9 ms** somewhere in the 25 first parent commits before it (41 with the merged branches) |
+| `d389021` | 27.96 / 27.88 | **+0.9 ms** somewhere in the 25 first parent commits before it (41 with the merged branches) |
 | HEAD | 27.88 / 28.00 | |
 
 The two sweeps agree at every build to within 0.4 ms. The full gate's plan shows the same drift:
@@ -549,15 +603,14 @@ full plan, which is the one the contract grades, no build ever met it when pinne
 2.20x and 2.38x, because `join.selective` was 11x at the time. The ticket asked whether the join path
 lost something or whether the bar was set from a flattering measurement. The join path did lose 5.7
 ms. The bar was not set from any measurement at all, and the statistic it is graded by would have
-missed it on the full plan even with that 5.7 ms back. Each of these is now its own ticket. Every
-output is in `_agent_output/task-2086-read-join/` in the main checkout.
+missed it on the full plan even with that 5.7 ms back. Each of these is now its own ticket.
 
-#### What the +2.8 ms at `a8f45b1` is made of (task-2091)
+#### What the +2.8 ms at `a8f45b1` is made of
 
 `a8f45b1` did five things, and three of them have a switch: the frame of reference is the constant
 `FRAME_OF_REFERENCE`, the `(u16, u16)` heap pair is `heap_slot_width`, and `panic = "abort"` with
 `strip = true` is the release profile, which `CARGO_PROFILE_RELEASE_PANIC` and
-`CARGO_PROFILE_RELEASE_STRIP` override. task-2091 built `inillucent-readgate` at `a8f45b1` with each
+`CARGO_PROFILE_RELEASE_STRIP` override. A later measurement built `inillucent-readgate` at `a8f45b1` with each
 switched off, with all three off together, and with the profile alone changed, plus `566c688` with
 and without the new profile and HEAD (`40ca955`) with and without `panic = "unwind"`. 39 passes in
 two quiet windows on 2026-09-23 and 24, medium fixture, 30 rounds, every pass pinned to `0xC03C03`
@@ -623,16 +676,15 @@ every workload's digest agreeing with SQLite's on all eight passes:
 `join.range` is 2.04 to 2.55 ms faster in every adjacent pair, against a 0.5 ms threshold set before
 the passes ran. That is more than the 1.2 ms `a8f45b1`'s read code cost. This paragraph used to
 give a reason that had not been measured, that later code calls `column` more often per probe.
-task-2099 counted the calls and it is not true: one `join.selective` and one `join.range` make 512
+A further measurement counted the calls and it is not true: one `join.selective` and one `join.range` make 512
 `column` calls at every build from `566c688` to HEAD. What changed is what each call cost, which is
 in the next section. `join.range` is at 0.92x after it, still slower than SQLite, and 3.9 ms slower
 than it was at `57e87b0`; the next section accounts for the rest. `range.lookaside` is faster than
 SQLite for the first time on this plan.
-Every output is in `_agent_output/task-2091-join-range/` in the main checkout.
 
-#### Where the rest of `join.range`'s time went, `57e87b0` to HEAD (task-2099)
+#### Where the rest of `join.range`'s time went after `57e87b0`
 
-task-2099 walked the whole history again with task-2091's change applied, because a build without
+That measurement walked the whole history again with the column read fix applied, because a build without
 it pays the old four lookups in `LeafRef::column` and a build with it does not. Measured with the
 change on one side only, a step appears wherever the change landed rather than where the time went.
 
@@ -663,7 +715,7 @@ C:.
 | `d389021` 27.30 | HEAD 27.17 | -0.13 | |
 
 HEAD (`01f37bb`) read 27.17 ms tonight against 22.73 for `57e87b0` fixed. The box read about 3%
-slower than on task-2091's night, so these figures are comparable with each other and not with the
+slower than on the earlier measurement's night, so these figures are comparable with each other and not with the
 tables above.
 
 **`dcc65f2` cost `column` calls that cost more, not more `column` calls, and HEAD does not pay
@@ -674,21 +726,21 @@ least 8 ns at `dcc65f2`. The number of calls did not move: a build with a counte
 `--families read.join --rounds 1 --repeat N`, makes 512 calls per `join.selective` and `join.range`
 pair at `566c688`, `59ccf91`, `71d014a`, `a07036b`, `dcc65f2`, `5353eb4`, `d389021` and HEAD alike.
 The same code became more expensive to call between those two commits, which is what a change in how
-`column` is compiled and inlined looks like. task-2091's change removes it, so nothing is left in HEAD.
+`column` is compiled and inlined looks like. The column read fix removes it, so nothing is left in HEAD.
 
 **`d389021`'s step is `6f84ce6`, and it is still in HEAD.** The change saves the same amount before
 and after the step: 2.09 ms at `5353eb4` and 2.13 at `d389021`. With the change at every build of
 the 21 that touch the engine between `5353eb4` and `d389021`, the one step over 0.5 ms in both
 sweeps is from `6833582` to `6f84ce6`: 26.38 to 27.07 ms reversed, and 27.37 to 28.81 forward. As a
 ratio to SQLite's arm it is 1.013 to 1.072, and every build after it stays there. `6f84ce6` is
-task-2083, "an index seek converts its key the way SQLite does". It fixed four wrong answers, and it
+the change where an index seek converts its key the way SQLite does. It fixed four wrong answers, and it
 put more work on the path every probe of an index nested loop takes: the probe key goes through the
 comparison's affinity rather than a `CAST`, each key position asks whether it is unconverted, and the
 seek checks the key and its bounds for NULL before it searches. That is about 0.7 to 1.4 ms a round,
 7 to 14 ns a probe over the 100,500 probes a round makes. Nothing measured says which of those it
 is.
 
-**`a8f45b1`'s step is still about 2.2 ms with the change applied at both ends.** task-2091 found the
+**`a8f45b1`'s step is still about 2.2 ms with the change applied at both ends.** The earlier ablation found the
 step made of about 1.1 ms of `panic = "abort"` code generation and about 1.2 ms of read code, and
 measured the abort part at nothing at HEAD. With the lookup removed from both builds, what is left of
 the read code is the `base == 0` test in every integer read, the width match in every heap slot read
@@ -714,12 +766,10 @@ those four commits. `81855a7` and `0f24df5` change `inillucent-pool`'s `pool.rs`
 journal and file locking, which is on every page fetch.
 
 **So of HEAD's 4.4 ms over `57e87b0` tonight**, about 2.2 ms is `a8f45b1`, about 0.9 ms is
-`6f84ce6`, about 1.05 ms is the two task-1833 commits and about 0.5 ms is `c401bb2..71d014a`. The
-smaller steps between them add or remove a few tenths each. Every output, the scripts that rebuild each binary and
-the decision rules written before each window are in `_agent_output/task-2099-join-range/` in the
-main checkout.
+`6f84ce6`, about 1.05 ms is `34e026e` and `9d3d84d` and about 0.5 ms is `c401bb2..71d014a`. The
+smaller steps between them add or remove a few tenths each.
 
-#### Two of those steps, ablated at HEAD (task-2110)
+#### Two of those steps, ablated at `52c4b5f`
 
 `6f84ce6`'s per probe cost is the probe key's affinity. Since that commit a nested loop's key passes
 through `ApplyAffinity` once per probe, and it copied the key into an owned `Value` and back even
@@ -743,14 +793,14 @@ reversed, and not against SQLite.
 | v3: v2 without the `base == 0` test and the width match | 26.52, 26.43, 26.87 | 26.60 |
 
 - The affinity change is worth about 0.23 ms a round, 2.3 ns a probe, and the two builds' passes do
-  not overlap. That is part of the 0.7 to 1.4 ms task-2099 put on `6f84ce6`. Nothing else it added
+  not overlap. That is part of the 0.7 to 1.4 ms the full history walk put on `6f84ce6`. Nothing else it added
   is on the per probe path, so the rest is not placed.
 - The two read branches cost nothing measurable: v3 is no faster than v2.
-- Turning the two formats off saved about 0.7 ms here, where task-2099 found it recovered nothing.
+- Turning the two formats off saved about 0.7 ms here, where the full history walk found it recovered nothing.
   That is a change to what is written on disk, traded against file size, and it is not made here.
   This one comparison needs repeating on a settled machine before it decides anything.
 
-### How a family's interval is computed (task-2093)
+### How a family's interval is computed
 
 **Every gate grades a family on one value a round now.** That value is the mean of that round's log
 ratios over the family's workloads, and the bootstrap resamples the rounds. The headline has always
@@ -760,7 +810,7 @@ that computes it, and `inillucent-fullgate`, `inillucent-readgate`, `inillucent-
 which any workload of the family has no usable time is left out whole. Keeping the other workloads'
 values would give that one round a different mix of workloads.
 
-**Until task-2093 the gates put every workload's every round into one list and bootstrapped that
+**Before a later change, the gates put every workload's every round into one list and bootstrapped that
 list.** A resample of that list draws the workloads in random proportions. When a family's workloads
 are far apart, the proportion moves the mean much more than timing noise does, so the interval
 measured the distance between the workloads. `read.join` is the clearest case: `join.selective`
@@ -770,7 +820,7 @@ not a random quantity.
 
 **How it was measured.** 22 passes on 2026-09-23, 20:21:56 to 20:52:09Z, in a quiet window with the
 other two agents in this repository paused and their process lists empty. Every pass was started by
-`_agent_output/task-2093-family-statistic/pinned-walk.ps1` (main checkout), which sets affinity mask
+a pinned walk script that sets affinity mask
 `0xC03C03` on the gate process and reads the mask back from the SQLite child. The child read
 `0xC03C03` on all 22 passes, and the passes of `main` also printed that mask in their own
 configuration. Medium fixture, 30 rounds, the full gate at a 32 KiB page. `main` was `16c01a4` with
@@ -816,7 +866,7 @@ workloads that move together have.
 
 #### What was written down before the passes ran, and what happened to it
 
-These five tests were posted on task-2093 before any pinned pass, with the statement that a failure
+These five tests were posted before any pinned pass, with the statement that a failure
 of any of them would reject the per round statistic.
 
 1. **The two statistics agree on the centre.** With every workload running the same rounds, the per
@@ -858,14 +908,12 @@ statistic computed inside one pass can see it. The per round interval states how
 pass measured the family. It does not state what the next pass will read. **So a family whose per
 round bound is within about 5% of its bar has not settled its verdict in one pass.** `extension` is
 that family today: 1.54x at its lowest against 1.50x. The published figures on this page are four
-runs for this reason, and grading from more than one pass is task-2095.
+runs for this reason, and grading from more than one pass is what the next section covers.
 
-### What moves a family between passes (task-2095)
+### What moves a family between passes
 
-task-2095 set out to find what is constant within a pass and different between passes before
-deciding how many passes a verdict needs. The tests were posted on the ticket before any pass ran:
-`_agent_output/task-2095-between-pass/preregistration.md` in the main checkout. The raw data is in
-the same folder.
+This section set out to find what is constant within a pass and different between passes before
+deciding how many passes a verdict needs. The tests were posted before any pass ran.
 
 **Two options on `inillucent-fullgate` made the measurement possible. Both are off by default, so no
 published number moves.** `--samples <file>` appends every round's raw time for both arms and every
@@ -876,7 +924,7 @@ which of the two the run used.
 
 **The SQLite arm is a measure of how fast the box was.** It is the same `sqlite-bench.exe` on every
 pass, whichever build is under test. So its time over the read workloads, against its fastest pass,
-says how fast the machine was during that pass. In task-2093's window it read +5% to +7% on the first
+says how fast the machine was during that pass. In the family statistic window it read +5% to +7% on the first
 four passes, +10% to +15% on the read gate passes that ran right after the two write gate passes,
 and +0.2% to +1.1% on the last four. The pass that put `read.join` at 4.37x was the first pass of
 that window. Without it, `read.join`'s four passes of `main` span 1.7% instead of 5.2%.
@@ -887,7 +935,7 @@ rounds, mask `0xC03C03` in each pass's own configuration, every workload agreed 
 order was A B B A A B B A A B B A, where A is the default and B is `--engine-child`, so a drift
 across the window cannot appear as a difference between A and B. The SQLite arm's speed stayed
 within 0.4% to 1.4% of its fastest pass for all 29 minutes, so this window had none of the slowdown
-task-2093's had.
+the family statistic window had.
 
 | family | A pass centres, 6 passes | B pass centres, 6 passes | one pass's interval contains another pass's ratio, A | the same, B |
 |---|---|---|---|---|
@@ -943,7 +991,7 @@ component that stays the same through a pass and changes between passes.
    of each family or to its noise, and on that evidence B is a different measurement, not a
    correction.
 5. **The first pass of this window was not slow** (SQLite +1.25% against a range of 0.36% to
-   1.39%), so the first pass slowdown in task-2093's window did not repeat here.
+   1.39%), so the first pass slowdown in the family statistic window did not repeat here.
 
 **Five more passes, 2026-09-24 05:19:03 to 05:33:10Z, on a machine that was not quiet.** This second
 experiment was meant to test whether the box stays slow for minutes after heavy work stops. It ran
@@ -970,14 +1018,14 @@ the median time of the six default passes of the settled window. Bold is outside
 window's range. **Every bold value is above the range.**
 
 **A busy machine slows SQLite's arm about twice as much as this engine's, so it makes this engine
-look faster.** That is the same signature as the first pass of task-2093's window, which put
+look faster.** That is the same signature as the first pass of the family statistic window, which put
 `read.join` at 4.37x with SQLite's arm 5% to 7% slow. **Why SQLite's arm suffers more is not
 established.** It is not the number of page faults: SQLite's child takes 11,634 to 11,640 a round on
 every pass, and this engine's arm took about 147,400. One difference the passes point at is that
 SQLite's arm is a new process each round and fills its cache from its file while a workload is timed,
 where this engine's pool is warmed before the clock starts. Nothing here tested that.
 
-**Those 147,400 faults were one allocation, and task-2110 removed it.** 93% of them were in two
+**Those 147,400 faults were one allocation, and a later change removed it.** 93% of them were in two
 workloads, `correlated.in` (91,390 an execution) and `correlated.exists` (45,414). A correlated block
 reads the outer row through parameters numbered from 100,000, and the parameter set was one vector
 indexed by number, so the first such write grew it to 100,001 entries, 3.2 MB. The set is copied once
@@ -987,17 +1035,17 @@ full plan takes 4,196 to 4,285 faults a round after the first, against SQLite's 
 those are `schema.index`. In a debug build `correlated.exists` went from 75 ms an execution to 7.2 ms
 and `correlated.in` from 138 ms to 17.7 ms. Every published `read.correlated` ratio predates this.
 
-### How a verdict should be taken (task-2095)
+### How a verdict should be taken
 
 1. **Not from several consecutive passes.** What moved the ratios between passes was the state of the
    machine, and consecutive passes share it. The five busy passes above were all biased the same way,
-   and so were the first four passes of task-2093's window. The mean of several such passes carries
+   and so were the first four passes of the family statistic window. The mean of several such passes carries
    the same bias, with a narrower interval that makes it look more certain.
 2. **From one pass, taken on a machine the pass itself shows was quiet.** SQLite's arm is the same
    program in every pass, so its speed against a recorded quiet reference is a measurement of the
    machine. Over the twelve quiet passes that index was at most 1.39% for a whole pass. On every busy
    pass seen, in either window, it was at least 4%. A pass above 3% should not be graded. **Since
-   task-2110 the three gates do this.** Each prints a "was the machine quiet" section with the pass's
+   that change the three gates do this.** Each prints a "was the machine quiet" section with the pass's
    index over the point, range, join and analytical workloads, the reference file and when it was
    recorded. Above 3% every verdict reads NOT GRADED and the gate exits 4, where 1 is a miss and 2 is
    a run that measured nothing. The reference is kept per machine, outside the checkout
@@ -1013,21 +1061,21 @@ and `correlated.in` from 138 ms to 17.7 ms. Every published `read.correlated` ra
    hide the bias, because the bias is upward and a wider interval around an inflated centre can still
    pass. `--engine-child` stays a diagnostic.
 
-`extension` reading 1.54x at its lowest in task-2093's window, which made this ticket, came from the
+`extension` reading 1.54x at its lowest in the family statistic window, which prompted this measurement, came from the
 same kind of pass. On the quiet window its lowest per round bound in six default passes was 1.58x
 and its centre was 1.68x to 1.79x.
 
 ### `read.join`'s bar under the per round statistic
 
 **The bar stays at 3.00x.** Under the per round statistic, pinned, the family's lower bound on five
-builds back to task-1819, two passes each except `main`:
+builds back to `57e87b0`, two passes each except `main`:
 
 | build | full plan, per round | full plan, pooled | read gate plan, per round | read gate plan, pooled | `join.selective` and `join.range`, full plan |
 |---|---|---|---|---|---|
-| `57e87b0`, task-1819, the first build graded | no full gate | no full gate | 4.69x, 4.52x | 3.23x, 3.18x | no full gate |
-| `b0ba286`, task-1833 | **3.23x, 3.18x** | 2.42x, 2.38x | 4.42x, 4.35x | 3.11x, 3.07x | 11.15x and 0.97x, 11.03x and 0.95x |
-| `a8f45b1`, task-1870 | 4.17x, 4.07x | 2.78x, 2.76x | 4.39x, 4.37x | 2.91x, 2.96x | 20.89x and 0.85x, 20.32x and 0.85x |
-| `f9e2374`, task-1962 | 4.33x, 4.21x | 2.92x, 2.82x | 4.56x, 4.20x | 3.04x, 2.97x | 21.27x and 0.90x, 20.62x and 0.87x |
+| `57e87b0`, the first build graded | no full gate | no full gate | 4.69x, 4.52x | 3.23x, 3.18x | no full gate |
+| `b0ba286` | **3.23x, 3.18x** | 2.42x, 2.38x | 4.42x, 4.35x | 3.11x, 3.07x | 11.15x and 0.97x, 11.03x and 0.95x |
+| `a8f45b1` | 4.17x, 4.07x | 2.78x, 2.76x | 4.39x, 4.37x | 2.91x, 2.96x | 20.89x and 0.85x, 20.32x and 0.85x |
+| `f9e2374` | 4.33x, 4.21x | 2.92x, 2.82x | 4.56x, 4.20x | 3.04x, 2.97x | 21.27x and 0.90x, 20.62x and 0.87x |
 | `main` at `16c01a4` | 4.27x, 4.08x, 4.18x, 4.19x | 2.90x, 2.75x, 2.78x, 2.81x | 4.19x, 4.06x | 2.86x, 2.81x | 20.36x to 21.68x and 0.86x to 0.88x |
 
 **Every build since the family was first graded meets 3.00x on both plans under the per round
@@ -1048,15 +1096,15 @@ statistic, and under the pooled one no build ever met it on the full plan.** The
    drops under 3.00x if `join.selective` falls from about 21x to about 10.5x, or if `join.range` falls
    from 0.86x to about 0.43x. Either is a loss of half a workload's speed, which is what a family bar
    is for.
-4. **The bar does not catch the 26% `join.range` lost since task-1833**, and it is not meant to.
+4. **The bar does not catch the 26% `join.range` lost since `b0ba286`**, and it is not meant to.
    That loss moved the family 8% on the read gate's plan (4.71x at `57e87b0` to 4.32x on `main`, the
-   mean of two passes each), and it has its own tickets, task-2091 and task-2092.
+   mean of two passes each), and it has its own follow-up work.
 
 `join.range` is still slower than SQLite, at 0.84x to 0.88x. The TDD's reason column for this family
 calls `join.range` at 0.015x "a planner bug" and expected the hash join to fix it. It went from 0.015x
 to 0.86x and stopped short of SQLite. It is listed in
 [the workloads that are slower](#the-workloads-that-are-slower), and the family bar says nothing
-about it. Every output is in `_agent_output/task-2093-family-statistic/` in the main checkout.
+about it.
 
 ### What a statement costs before it reaches a tree
 
@@ -1114,7 +1162,7 @@ it has to perform the same 2,000 updates.
 
 ### What an `UPDATE` that changes a value's length used to cost
 
-Until task-1890 a heap slot could only be written over by a value of **exactly** the same length, so
+Before a later change, a heap slot could only be written over by a value of **exactly** the same length, so
 `txn.large` replaces an eight byte `note 1234` with a forty-two byte
 `row 1234 lorem ipsum ...`, so it took none of the in-place path at all. Every statement became a
 tombstone plus an insert into the leaf's delta area, and every thirty-second one a compaction over
@@ -1138,8 +1186,8 @@ redo buffer to 512 KiB, stopping the index build holding three copies of the tre
 version log that nothing was collecting, and capping the allocator's free list in bytes as well as in
 blocks. What took it from 43% to 14% was the **file**, not another buffer.
 
-**What took it from 14% to 9.5% was the index build stopping going through the page pool** (task-2000,
-design 2). A bulk build wrote each page into a pool frame, which then had to be written out and
+**What took it from 14% to 9.5% was the index build stopping going through the page pool** (design 2
+of [the performance design](../tasks/task-2000-inillucent-performance-tdd.md)). A bulk build wrote each page into a pool frame, which then had to be written out and
 evicted; it writes the page into the file directly and the frame is never taken. `schema.index` is
 what sets this plan's high water mark, so the frames it no longer occupies are the peak:
 
@@ -1197,7 +1245,7 @@ So most of what is left is the operating system's, which neither engine escapes,
 decimal places**, with 0.66 MiB private either way. It has no initial reservation to size down: it is a
 size-classed free list whose lists start empty and which hands a block back to the system allocator
 when a class is full, so the first allocation is the first one a program makes. That answers the
-question task-2000's design 10 asked - whether two to three of these mebibytes were the allocator's
+question design 10 asked - whether two to three of these mebibytes were the allocator's
 arena - with a no, and it is why **the resident set bar stays missed at 1.00x** rather than being
 closed by sizing something down. What is left to attack is the file the pool holds and the index
 build's own arena, and nothing else is a buffer anybody chose.
@@ -1235,14 +1283,14 @@ correlated workloads joined the plan, the high-water mark after every workload:
 | every remaining workload | 40.75 | nothing |
 
 The whole plan held **30.20 MiB** until it built an index, and building one added ten and a half - it
-added twelve and a half before task-2000's design 2 stopped the build going through the page pool.
+added twelve and a half before design 2 stopped the build going through the page pool.
 On 2026-09-23 the plan holds 31.46 MiB before the index build, because of the correlated workloads,
 and the build adds 9.33 to reach the same 40.8. So the bar is not missed by a buffer that is slightly too big everywhere; it is missed by
 one statement, and by the arena its sort holds.
 
-That arena is the one lever left, and it is priced rather than pulled: task-1869 measured spilling
+That arena is the one lever left, and it is priced rather than pulled: an earlier design measured spilling
 the sorted run to a temporary file at about **8 ms on a 27 ms statement**, which puts the `schema`
-family under the 1.00x floor the contract sets. Buying memory with a floor is the trade that ticket
+family under the 1.00x floor the contract sets. Buying memory with a floor is the trade that design
 declined and this one declines again.
 
 ## Disk
@@ -1302,10 +1350,10 @@ since has been measured on Linux.
   the one a caller has. `inillucent-fullgate --api connection` drives `Connection::prepare` and
   `Statement::step` instead, and `--api both` runs the two in the same round so the difference is
   paired rather than compared across two runs of the binary on a machine that moved in between
-  (task-2066 section 4.3.10). What sits between them is the plan cache lookup, the parameter count,
+  (the performance review). What sits between them is the plan cache lookup, the parameter count,
   a `String` per result column per execution, and the dirty frame walk on release.
 - **A table larger than the buffer pool.** `story_large_table_nightly` builds one in the `nightly`
-  tier and scans, sorts and deletes half of it (task-2066 section 4.4.5). Nothing on this page is
+  tier and scans, sorts and deletes half of it (the performance review). Nothing on this page is
   measured at that size, and the families here all fit in the pool - so a number here says what the
   engine does when its working set is resident, and that story says what it does when it is not.
 
@@ -1345,7 +1393,7 @@ since has been measured on Linux.
   `Connection` and never steps a `Statement`, so none of the figures on this page include what an
   application pays for taking the file lock, asking whether another process has written, and giving
   the lock back - which `locking_mode = normal` makes a statement do whenever it is not inside a
-  transaction. task-2046 measured that path and found `SELECT 1` costing 132,884 nanoseconds
+  transaction. A later measurement of that path found `SELECT 1` costing 132,884 nanoseconds
   outside a transaction against 1,126 inside one, on the same connection over the same file. It is
   10,095 against 727 now. Both readings were taken on a box with two other agents working, minutes
   apart, so the ratio is the claim and the nanoseconds are not.
@@ -1379,7 +1427,7 @@ target/release/inillucent-shellrss                        # peak memory, one she
 ```
 
 **Every program that times this engine against SQLite pins itself to one class of core before it
-times anything (task-2085).** The machine these figures come from is an Intel Core Ultra 9 285, with
+times anything.** The machine these figures come from is an Intel Core Ultra 9 285, with
 8 performance cores and 16 efficiency cores. With no affinity set, Windows sometimes ran
 `inillucent-fullgate` on the efficiency cores and its `sqlite-bench` child on the performance cores,
 so the two arms of one round ran on different hardware. On the read families that made this engine's
@@ -1397,13 +1445,12 @@ so the two arms of one round ran on different hardware. On the read families tha
 - A child such as `sqlite-bench` or a shell inherits the mask. The launcher reads the child's mask
   back and refuses to time it when it differs, and `crates/inillucent-compat/tests/affinity.rs` fails
   if a child can end up on other processors.
-- Pinning makes one workload slower. `read.correlated` uses more than one thread, and task-2064
-  measured `correlated.exists` at 59.69 ms on the 8 performance cores, 46.35 ms on the 16 efficiency
+- Pinning makes one workload slower. `read.correlated` uses more than one thread, and a separate
+  measurement found `correlated.exists` at 59.69 ms on the 8 performance cores, 46.35 ms on the 16 efficiency
   cores and 38.74 ms unpinned on all 24.
 
-The run at the top of this page was taken before task-2085 landed, with the same mask set on the
-gate process from outside it. The scripts that did that, and every transcript behind the page, are in
-`_agent_output/task-2064-perf/` in the main checkout, which is not checked in.
+The run at the top of this page was taken before the gates could pin themselves, with the same mask set on the
+gate process from outside it.
 
 The gate binaries and the shell install `inillucent-alloc` as their global allocator. It is part of
 the build in the same way fat link time optimisation and a single codegen unit are: SQLite ships its

@@ -25,8 +25,8 @@ agent:  $ inillucent --db greek-philosophy.rdb query \
 
 That is what a local Qwen answered the first time it was asked, through opencode, with nothing to go
 on but `AGENTS.md` and the question — screenshots below. It is reproduced as it ran, which is why the
-query has the question in a subquery: until task-1911, writing `embed` directly in the `ORDER BY`
-called the model once per row and took 105 seconds instead of one and a half. Both shapes still
+query has the question in a subquery: writing `embed` directly in the `ORDER BY` used to
+call the model once per row and take 105 seconds instead of one and a half. Both shapes still
 return the same five passages; the plain one is the one to write now.
 
 ## Setup
@@ -121,7 +121,7 @@ That is the other thing [vector search](../../docs/vector-search.md) tells you t
 left off here on purpose: 2,661 passages is an exhaustive cosine over 8 MB of vectors, and that page
 already says to build the index when the search is slow rather than before it is.
 
-Building one works. Until task-1911 it did not, and the way it failed is the reason
+Building one works. It used to not work, and the way it failed is the reason
 `scripts/verify-indexed.sh` exists: an index built over a table that already held rows reported those
 rows in the session that built it and held none the next time the file was opened, and an empty
 vector index answers zero rows rather than failing — so `CREATE INDEX` silently turned a working

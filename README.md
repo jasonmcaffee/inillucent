@@ -24,8 +24,10 @@ tables, a full text index and a vector index, and all three commit and roll back
 | **9.5% more memory than SQLite** | 40.8 MiB against 37.2. The one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
 
 [Performance](docs/performance.md) carries every figure with its 95% interval, and names the six
-weighted workloads that are slower than SQLite along with what each one costs, and the correlated
-subqueries, which are far slower.
+weighted workloads that are slower than SQLite along with what each one costs. These are the graded
+run of 2026-09-23. Four passes at `52c4b5f` on 2026-09-24 were not graded because the machine was
+busy; they show the correlated subqueries 99% cheaper and the processor figure at 67% less, and
+Performance has them in their own section.
 
 ---
 
@@ -57,7 +59,7 @@ outside your home directory and neither needs administrator rights.
 | **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
 | **npm** | `npm install -g inillucent`, or `npx inillucent help` with nothing installed |
 | **pip** | `pip install inillucent` - the wheel carries the programs and an in-process driver |
-| **cargo** | `cargo install inillucent-cli` - builds from source, and works on any platform |
+| **cargo** | `cargo install --git https://github.com/Black-Rainbow-Labs/Inillucent inillucent-cli` - builds from source, and works on any platform. `inillucent-cli` is not on crates.io yet, so `cargo install inillucent-cli` on its own finds nothing |
 | **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest && inillucent-install` |
 | **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
@@ -214,16 +216,13 @@ triggers, foreign keys with all five referential actions, `ATTACH`, partial and 
 `RETURNING`, `ON CONFLICT DO UPDATE`, 190 built in function names,
 the 68 pragmas this engine recognises. 416 cases were run
 through this engine and through a pinned `sqlite3` 3.53.4 over a fresh database each, and every byte
-of both streams compared: **403 produce SQLite's exact bytes, none are refused and 7 answer
-differently**. Window functions were the last twelve to close: `OVER (...)`, `PARTITION BY`, the
-`ROWS`, `RANGE` and `GROUPS` frame clauses, every `EXCLUDE` bound and all eleven window-only
-functions now match the pinned SQLite exactly.
-
-**This figure has read 403 before, so you may remember a different number for it.** It was first
-measured at 403 through a shell that still ran an engine this project has since retired. Re-measured against the engine that ships, it read 391, because twelve window function
-cases were reaching a pipeline builder that refused them. The window path is connected now, and the
-probe reads 403 again against the shipping engine. →
-[SQL support](docs/sql.md)
+of both streams compared: **404 produce SQLite's exact bytes, none are refused, 6 answer differently
+and 6 are vector search features SQLite has no equivalent for**. Window functions were the last
+twelve to close: `OVER (...)`, `PARTITION BY`, the `ROWS`, `RANGE` and `GROUPS` frame clauses, every
+`EXCLUDE` bound and all eleven window-only functions now match the pinned SQLite exactly. The six
+that answer differently are a page size this engine chose, the `.recover` line that prints it, a
+build option the two pinned SQLite artifacts disagree about, and three reports about SQLite's own C
+structures. → [SQL support](docs/sql.md)
 
 **Vector search in the same file.** A `VECTOR(N)` column, `vector_distance_cos`, `vector_distance_l2`
 and `vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and a planner that turns
@@ -360,9 +359,12 @@ each cost and how each was fixed:
   is being done about it. The autocommit `UPDATE` joined that list by getting seven times faster - it
   was 669% slower - and 2,000 updates in one transaction used to lead it at 1,011% slower and are now
   280% *faster*.
-- **A correlated subquery is run once per outer row**, where SQLite turns it into a join. Over 400
-  outer rows a correlated `EXISTS` takes 59.69 ms against SQLite's 0.29 ms (21,332% slower) and a
-  correlated `IN` 118.19 ms against 0.10 ms. Write it as a join on this engine.
+- **A correlated subquery is run once per outer row**, where SQLite turns it into a join. The last
+  graded run put a correlated `EXISTS` over 400 outer rows at 59.69 ms against SQLite's 0.29 ms.
+  A later fix stopped each execution building a 3.2 MB array, and at `52c4b5f`, on passes the gate
+  did not grade because the machine was busy, the same `EXISTS` takes 0.40 ms against 0.30 (35%
+  slower) and a correlated `IN` 0.92 ms against 0.10 (809% slower). A correlated `IN` against a
+  large table is still worth writing as a join.
 - **On Linux the same binary measured 53% faster** where Windows measured 279% at the time. That
   difference was traced to what SQLite pays the operating system on each platform rather than to
   anything this engine does differently there, and the finding is in
@@ -371,9 +373,8 @@ each cost and how each was fixed:
 - **Publishing a retrieval generation costs the whole corpus.** Adding content folds each new row
   into the published generation. Writing the generation still reads and writes the full index,
   however few rows changed, because a generation is one serialised structure. A build from scratch,
-  which is what `INSERT INTO t(t) VALUES('compact')` asks for, is 132.6 s over 185,078 passages on
-  one thread.
-- **There is no macOS archive yet**, because each platform's archive is built on that platform.
+  which is what `INSERT INTO t(t) VALUES('compact')` asks for, is 16.8 s over 185,078 passages at
+  768 dimensions, using every core. It was 129.7 s on one thread.
 
 ## Building it
 

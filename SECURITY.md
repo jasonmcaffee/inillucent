@@ -62,8 +62,8 @@ guess:
 
 - **Fuzz targets** under `fuzz/`, over the file format, the SQL parser and the
   record codec. They are run by hand -- `fuzz/README.md` has the commands --
-  and nothing runs them on a schedule since `task-1968` removed the GitHub
-  workflows. What runs on every checkout instead is the deterministic
+  and nothing runs them on a schedule since the GitHub
+  workflows were removed. What runs on every checkout instead is the deterministic
   counterpart each target has in the ordinary suite, listed in that same
   README: a seeded generator rather than coverage feedback, on the pinned
   stable toolchain.

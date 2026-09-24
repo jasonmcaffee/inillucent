@@ -42,7 +42,7 @@ declared list beside it, so a `VIRTUAL` column that was dropped or moved is stil
 Folding it would compare two engines evaluating an expression rather than comparing a copy, which is
 not a check this tool can make - it has no SQLite evaluator and does not require a SQLite install.
 Before it was left out, **every** database holding a `VIRTUAL` generated column failed its own
-verification and was deleted with its rows correct (task-2050).
+verification and was deleted with its rows correct.
 
 ## From a running PostgreSQL or MySQL
 

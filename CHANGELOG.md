@@ -17,19 +17,19 @@ rows. A compaction that finds the new rows fit the page's existing column widths
 rather than packing every row again. On the index count sweep, 5,000 inserts into a 100,000 row
 table, the cost of each secondary index went from 5.2 µs a row to 2.0, and at ten indexes the
 workload went from 0.43x SQLite to 1.28x. A page's checksum also covers its LSN now, which it did
-not (task-2066 section 4.2, item 17).
+not.
 
 **A lookup past the last key of a leaf that has been written to costs one comparison in its delta
 area**, where it cost a binary search of it. Appending at the end of a table does this twice a row,
 and so does a lookup of a rowid past the end, so rows appended since the leaf was packed no longer
 slow either down; the gate's `txn.large` went from 2.852 ms to 2.708 pinned to the performance cores,
 5.0% faster, and a range
-probe into such a leaf now reads only the rows inside its bounds (task-2082).
+probe into such a leaf now reads only the rows inside its bounds.
 
 **This build reads every earlier file**, written by any release from 0.1.1 on, and a file becomes
 format 2 at the first checkpoint after this build writes to it. **No earlier release reads a format
 2 file**: 0.1.5 and later refuse it by name as `unsupported`, and 0.1.1 to 0.1.3 report it as
-malformed. `docs/relational-architecture.md` section 5a has the details (task-2074).
+malformed. `docs/relational-architecture.md` section 5a has the details.
 
 **A search table can filter inside the search: `FACET` columns.** A column of an `inillucent_search`
 table declared `live FACET` is stored and can be constrained in a search - `WHERE docs MATCH ?1 AND
@@ -74,12 +74,13 @@ table of sixty out-of-line values the whole page walk cost 4 page fetches on top
 takes an out-of-line value's pages from the reference in the leaf rather than by reading the value.
 The pinned SQLite 3.53.4 draws it in the same place.
 
-**Two leaks this found are not yet fixed, and neither pragma reports one.** A rolled-back
-`CREATE TABLE` or `CREATE INDEX` keeps its tree's root page, and `DROP TABLE` keeps every page the
-table's out-of-line values sat on; `DELETE FROM t` before the drop gives that space back, and so
-does `VACUUM`. Both are dead space rather than lost data, and closing either changes when the engine
-hands a page back - so they are their own change. The walk that finds them is
-`ImportedDatabase::report_leaked_pages`.
+**The two page leaks this found are fixed.** A rolled-back `CREATE TABLE` or
+`CREATE INDEX` kept its tree's root page, and `DROP TABLE` kept every page the table's out-of-line
+values sat on. Both were dead space rather than lost data. Abandoning a transaction now gives back
+every tree it built, a commit that drops a table frees the pages its out-of-line values used, and a
+`REINDEX` gives back the pages of the index it replaced. A leak is now a state no statement
+produces, and `PRAGMA integrity_check` reports one as `Page N: never used`, as SQLite does.
+`docs/relational-architecture.md` has the details.
 
 **A commit is one append to the log and one sync of it.** It used to be a
 checkpoint: the log folded into the file, and a rollback journal holding the
@@ -193,7 +194,7 @@ half of the file SQLite has no equivalent of, and the half a format change is mo
 `tests/interop/retrieval.sql` asks it now, of an `approximate` table over twelve vectors compacted
 into a stored generation, and 0.1.1 through 0.1.7 answer every question identically to this build.
 
-**Measured against SQLite 3.53.4 on 2026-09-23 (task-2064)**, four consecutive
+**Measured against SQLite 3.53.4 on 2026-09-23**, four consecutive
 30-round runs at 100,000 rows in a quiet window, with both engines pinned to the
 performance cores:
 
@@ -210,8 +211,8 @@ performance cores:
 has 8 performance cores and 16 efficiency cores, and unpinned, Windows ran the
 gate process, which is this engine's arm, on the efficiency cores and the SQLite
 child on the performance cores. The same run unpinned reads 4.40x. The published
-figure pins both; `docs/performance.md` has the evidence, and since task-2085 the
-gates pin themselves.
+figure pins both; `docs/performance.md` has the evidence, and the gates now pin
+themselves.
 
 **The processor ratio got worse** because the plan gained four correlated
 subquery workloads, which this engine answers once per outer row and SQLite as a
@@ -220,8 +221,11 @@ join: 182 ms of each round against under half a millisecond.
 **Known not to do.** Six of the thirty weighted workloads are still slower than
 SQLite: compiling `SELECT 1` on every call, a join over an index range, building
 an FTS5 index, a range scan of the join's shape, `json_extract`, and an
-autocommit `UPDATE` of one row. A correlated subquery is 9,395% to 118,020%
-slower than SQLite, depending on the shape. The resident set is 9.5% more than
+autocommit `UPDATE` of one row. In that run a correlated subquery was 9,395% to
+118,020% slower than SQLite, depending on the shape; the correlated fix under
+"Speed without a change in answers" below takes a correlated `EXISTS` over 400
+outer rows from 59.69 ms to 0.40 ms, measured on passes the gate did not grade
+because the machine was busy. The resident set is 9.5% more than
 SQLite's against a bar asking for 5% less, and the allocator is measured out of
 the difference: a trivial binary's floor is 3.62 MiB with it and 3.62 MiB
 without. At 600,000 rows this engine spends 30% more processor than SQLite on the
@@ -271,7 +275,148 @@ differences from SQLite beside them.**
 - A path a confined process may not reach is reported as `invalid_state` rather
   than as a syntax error.
 
-### The test and performance review (task-2066)
+### The release blockers
+
+The review before release named fifteen defects that had to be fixed before the
+next release. Fourteen are fixed, each with a test that fails without the fix.
+
+- **`inillucent integrity-check` answered `"ok": true` and exit 0 on a corrupt
+  database.** It listed the pragma's rows without reading them. It now returns
+  the status `corrupt` for any answer that is not exactly `ok`, including no
+  rows at all.
+- **`--params-file` read any file on the machine**, past `--root` and
+  `--readonly`, and `query` and `exec` both take it over MCP. The path is
+  confined now, `-` is refused on a confined server, and the file is capped at
+  one mebibyte.
+- **One request could stop the MCP server.** A line of 120,000 `[` overflowed
+  the JSON parser's stack. Nesting is bounded at 1,000 levels, the server
+  answers such a request with `-32700 nested more than 1000 deep`, and it
+  answers the next request normally.
+- **A free map chain that loops made `Database::open` run forever**, from every
+  command including `integrity-check`. The open now refuses in under a second
+  and names the chain.
+- **`migrate --kind sqlite` did none of the checks it documents.** A database
+  whose only content was an FTS5 table migrated to an empty file and reported
+  success. The verb now runs the same verified migration as `inillucent-migrate`,
+  and it carries `application_id` and `user_version` across.
+- **`PRAGMA cache_size = -1000000000` grew the process to 3.3 GB.** The cache
+  has a hard maximum now, `INILLUCENT_LIMIT_CACHE_SIZE`, and a request above it
+  is refused in 74 ms.
+- **`substr`, `trim`, `ltrim` and `rtrim` replaced bytes that are not valid
+  UTF-8** with U+FFFD, and were quadratic in the length. They borrow the bytes
+  now and follow SQLite's rule for a character: `substr(x'fffe80',1,2)` is
+  `x'fffe80'`, as in SQLite.
+- **Recovery dropped log records and counted them as applied.** A dropped record
+  is now counted, reported by the driver and printed by the command line.
+- **The HNSW and BM25 readers sized allocations from a count in the file**, so a
+  damaged file could stop the process. The first fuzzing campaign found one of
+  these, reachable from an ordinary `SELECT`.
+- **Three C ABI entry points read a caller's pointer before checking it**:
+  `inillucent_txn_execute`, `inillucent_txn_commit` and
+  `inillucent_clear_bindings`. A freed handle is now answered from a table of
+  live handles and is never read.
+- **An outer `ORDER BY ... LIMIT` over a recursive CTE applied the limit
+  before sorting**, so it returned the first rows generated rather than the
+  first rows in order.
+- **A vector query failed as soon as its HNSW index existed.** With an index,
+  the literal `'[1,0,0]'` was read as seven raw bytes and refused against a
+  three dimension index. One vector parser now serves both plans.
+- **`dump` left out every row of a table whose name or a column name is a
+  reserved word**, at exit 0, and dropped a column named `""`.
+- **A blob came out of `--output json` as the text `x'00ff'`**, typed `text`, so
+  bytes could be written and not read back by the Node, Go and PHP wrappers or
+  the Python subprocess path. A blob is now `{"blob":"<hex>"}` in both
+  directions, the column type says `blob`, and all four wrappers decode it.
+
+The fifteenth, how an integer above 2^53 is carried in JSON, is not done. The
+wrappers disagree today: given 9007199254740993, Node answers 9007199254740992,
+and Python and PHP answer 9007199254740993. Changing the format would change
+what the correct callers receive, so it has its own ticket.
+
+### Correctness fixes after the review
+
+Each of these was found by comparing against the pinned SQLite 3.53.4 or by a
+test that reopens the file, and each has a test that fails without the fix.
+
+**Rows that were lost or changed.**
+
+- `ALTER TABLE t DROP COLUMN b` on a table `(a, b, c, d)` left `c` holding
+  `b`'s values and `d` holding `c`'s, and it survived a reopen. Dropping the last
+  column was correct, which is why nothing caught it.
+- A rolled-back `DROP TABLE` followed by `CREATE TABLE` lost every row of the
+  dropped table, durably, and `PRAGMA integrity_check` said `ok`. A dropped
+  tree's pages are now freed when the transaction commits, not while the
+  statement runs.
+- A rolled-back `ALTER TABLE` left the connection reading and writing a tree
+  the catalog no longer named, for the rest of the connection's life.
+- An index built on pages that a `DROP` or an `ALTER TABLE ADD COLUMN` had just
+  freed could come back damaged after a reopen, because redo replayed what those
+  pages held before.
+- `ALTER TABLE ADD COLUMN` and `DROP COLUMN` on an attached database failed with
+  an I/O error, and altered the table in `main` when one of the same name was
+  there. Every `ALTER` on a `TEMP` table was refused. All three work now.
+- Below the default 32 KiB page size, an ordinary `INSERT` could answer
+  `SQLITE_CORRUPT` or lose rows: two hundred FTS5 documents at a 4,096 byte
+  page refused on row 42, and the third `CREATE TABLE` in a 512 byte database
+  refused. Every page size the engine accepts now writes and reads back.
+- Opening a database whose header was one checkpoint behind cut live pages off
+  the end of the file, and every open after that failed. The trim now happens
+  only after the open has read the schema, so an open that refuses leaves the
+  file as it found it.
+
+**Answers that differed from SQLite.**
+
+- `SELECT count(*) AS n FROM t HAVING n > 0` was a syntax error. A `HAVING`
+  without a `GROUP BY` filters the one group an aggregate makes, and the shapes
+  SQLite refuses are refused in its words.
+- `SELECT 1 UNION ALL SELECT count(*) FROM t` was refused, and with a
+  `GROUP BY` on the later arm it returned one blank row per group. An aggregate
+  or window function in any arm of a compound select now answers.
+- Each `BETWEEN` bound is compared with its own operand's affinity and
+  collation, and a `COLLATE` inside an operand, as in `'B' = 'b' || '' COLLATE
+  NOCASE`, reaches the comparison around it.
+- A `COLLATE` inside an aggregate or window call, as in `max(s COLLATE NOCASE)`,
+  and each `CASE WHEN` decide their own comparison.
+- An index seek converts its key with the comparison's affinity rather than the
+  column's declared type, so a join into an untyped column or one of another
+  affinity finds the rows SQLite finds, and a `NULL` key matches nothing.
+- A seek key that is a `CAST` or a built in call, as in `id = CAST('8' AS
+  INTEGER)` or `k = abs(-4)`, is evaluated rather than refused.
+
+**Command line and migration.**
+
+- `export --out <file>`, `.once` and `.output` wrote an empty file, answered
+  `"ok": true`, and returned the rows in the response instead, including inside
+  a script run by `run` over MCP. The rows go to the file now.
+- Migrating a SQLite database with a `VIRTUAL` generated column failed its
+  digest check and deleted a correct result. The digest compares the columns
+  the source stores, a new `columns.<table>` check compares the declared list,
+  and a digest failure now names the rows that differ.
+
+**Speed without a change in answers.**
+
+- A whole table `DELETE` below the default page size was quadratic: 8,000 rows
+  took 1,301 ms and take 17.5 now. A `DELETE` visits the table and each index
+  in that tree's own order, which makes the 32 KiB delete about 10 times
+  cheaper a row.
+- A correlated subquery is evaluated only for rows the query's cheaper
+  conditions keep, and it no longer builds and frees a 3.2 MB slot
+  array on every execution. `correlated.exists` made 45,414 page
+  faults an execution and makes none, and the full gate plan now takes about
+  4,200 page faults a round against SQLite's 11,638. Over 400 outer rows a
+  correlated `EXISTS` went from 59.69 ms to 0.40 ms and a correlated `IN` from
+  118.19 ms to 0.92, measured on passes the gate did not grade because the
+  machine was busy.
+- `LeafRef::column` reads its directory entry once, and a probe key whose
+  affinity changes nothing is no longer copied: `join.range` went from 28.4 ms
+  a round to 26.1.
+- A statement that uses `%`, `/`, `||` or a bitwise operator is kept and run
+  again from its compiled form. It used to be compiled again on every run,
+  because those operators read the connection's settings through the same path
+  as `changes()` and `random()`. A kept statement now records the settings it
+  was built under and is rebuilt only when they change.
+
+### The test and performance review
 
 **A retrieval index holds a fifth less of itself in memory.** The BM25 postings
 were a `HashMap<String, Vec<Posting>>` beside a second `Vec<String>` of the same
@@ -296,16 +441,29 @@ INDEXED WHERE a = 3 AND b = 100` on a 600 row table with two indexes planned as
 mattered beyond the plan: `inillucent integrity-check` reads every table
 `SELECT * FROM "t" NOT INDEXED` to build its digest, on the argument that the
 clause is what makes the digest a fact about the rows - and a table whose index
-disagreed with it was being digested through the index. `INDEXED BY` still does
-not force the index it names; that difference is written down in
-`docs/feature-comparison.md` rather than left to be found.
+disagreed with it was being digested through the index.
 
-**`printf` prints what SQLite prints for `%e` and `%g`.** The sixteen digit cap
-reached `%f` alone, so the other two carried on printing the decimal expansion of
-the nearest double past the sixteenth digit: `printf('%.20g', 3.14159265358979)`
-was `3.1415926535897900074` here and `3.14159265358979` there. 222 of 675
-generated statements disagreed with the pinned shell; 7 do now, all in the last
-digit of the mantissa on doubles in the exponent tail.
+**`INDEXED BY` forces the index it names.** It used to be checked for
+a name that exists and then ignored. The planner now offers the named index and
+nothing else, walks it whole when nothing seeks it, and refuses a statement the
+index cannot answer with `no query solution`, as SQLite does. `UPDATE` and
+`DELETE` obey it on their target, and `INDEXED BY` or `NOT INDEXED` on an
+`UPDATE` or `DELETE` inside a trigger body is refused in SQLite's words. Two
+planner defects went with it: a partial or expression index was never usable on
+a `FROM` term after the first, and `SELECT count(*) FROM s CROSS JOIN h WHERE
+h.b > 595` was refused with exit code 3.
+
+**`printf` and every printed double use SQLite's own digits.** The
+sixteen digit cap reached `%f` alone at first, so `printf('%.20g',
+3.14159265358979)` was `3.1415926535897900074` here and `3.14159265358979` there.
+Capping `%e` and `%g` took the disagreements from 222 of 675 generated statements
+to 7, all in the last digit of a double in the exponent tail. Those 7 are closed
+by printing through a transcription of SQLite's `sqlite3FpDecode`, whose last
+digit is not always the correctly rounded one: `1.1304293785495057e251` printed
+`...058e+251` here and prints `...057e+251` now, as SQLite does. The `!` and `,`
+flags follow SQLite too: `printf('%!.25f', 0.1)` is `0.1000000000000000056` and
+`printf('%,.10g', 1234567.0)` is `1,234,567`. The test population grew from 224
+values to 1,024 and every statement must now match the pinned shell exactly.
 
 **`.show` reports what was set.** `explain`, `stats` and `output` were written
 into its format strings as `auto`, `off` and `stdout`, so `.explain on` then
@@ -317,11 +475,15 @@ where it used to hold every surviving row and be killed by the operating system.
 The sort also encodes each row's key once and compares byte strings, instead of
 dispatching on the value's type for every one of the `n log n` comparisons.
 
-**`NOCASE` and a NUL.** SQLite's `NOCASE` stops at the first NUL in the left
-operand and then compares the byte lengths; this engine reads every byte. The
-difference is reachable only through `CAST(x'..' AS TEXT)` or a bound parameter,
-because no SQL string literal can carry a NUL, and it is recorded in
-`docs/feature-comparison.md` with the reason it is not matched.
+**`NOCASE` stops at a NUL, as SQLite's does.** SQLite's `NOCASE`
+ends the comparison at a NUL both values hold at the same position and then
+compares the byte lengths. This engine used to read every byte. The difference is
+reachable only through `CAST(x'..' AS TEXT)` or a bound parameter, because no SQL
+string literal can carry a NUL. The comparison, the index key and the `CREATE
+INDEX` sort all follow SQLite's rule now. The same change found that a walk of a
+`BINARY` index was taken as the order for `ORDER BY`, `GROUP BY` and `DISTINCT`
+under `NOCASE`: with rows `b A a B c`, `GROUP BY x COLLATE NOCASE` answered five
+groups where SQLite answers three. It answers three now.
 
 **And the suite grew where it could not fail.** Sixteen fuzz targets that had
 never been run are run by `tools/run-fuzz.ps1`, with a row per target in
@@ -414,9 +576,9 @@ writing a file it no longer held the lock on. The crash record moved eight cut
 points from the new state to the old one, which is the evidence that the fix
 changed what the engine does under power loss rather than only what it reports.
 
-**Five things a statement stopped doing on its way out of the file** (task-1999),
-and a tombstoned document counts as one document rather than one per chunk
-(task-2001). An extent reference says what its value reads back as.
+**Five things a statement stopped doing on its way out of the file**,
+and a tombstoned document counts as one document rather than one per chunk.
+An extent reference says what its value reads back as.
 
 The part eight review closed thirteen defects across `inillucent-cli`, the bench
 crate and the schema function authorizer, and the suite's own honesty work landed
@@ -522,7 +684,7 @@ model once per row of the table, inside the statement that creates the index.
 `FunctionFlags::default()` exists for `builtin()`'s sake and is not what
 anything registered from outside wants.
 
-**And the binder consults it**, which it did not until task-1972.
+**And the binder consults it**, which it did not before this.
 `Registry::authorize_function` had no caller anywhere in the workspace, so
 `direct_only`, `innocuous` and `PRAGMA trusted_schema` were a policy with a
 passing unit test and no effect on the engine: a `CHECK`, an index expression,
@@ -583,7 +745,7 @@ they are the guarantee a caller has. There is no `authorize_module` at all.
 
 ### The census: sixty-one places that could report success having checked nothing
 
-The rest of this release is the task-1969 review's answer to one question - how
+The rest of this release is this review's answer to one question - how
 many places in this repository can print a green result without having checked
 anything - and the answer was 61, against a page that named 5.
 
@@ -690,7 +852,7 @@ This entry is written after the fact, because the release that cut the tag did
 not write one and a hole between 0.1.2 and 0.1.4 is the kind of thing a reader
 assumes is a mistake in their checkout.
 
-What is in it is task-1962: the public Rust surface reduced to one - the facade
+What is in it is the public Rust surface reduced to one - the facade
 is a re-export of the driver rather than a second API over the same engine -
 `Connection::begin`, the engine's `lib.rs` from 7,307 lines to 1,279 and
 `physical.rs` from 5,708 to 297, the parameter lists that were really types,

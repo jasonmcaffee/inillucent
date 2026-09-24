@@ -29,26 +29,32 @@ inillucent-install
 `go install` resolves the module through `proxy.golang.org`, which clones the repository with no
 credential. The proxy serves it: both `@latest` and `@v/list` answer 200 to a signed-out caller, and
 `tools/check-public-urls.mjs` checks that on every `tools/validate` run. It answered 404 until
-task-1961 made the repository public, which is why `packaging/PUBLISHING.md` carried the route as
+the repository was made public, which is why `packaging/PUBLISHING.md` carried the route as
 tagged and uninstallable for three releases.
 
-The other five package managers are not published yet. This is what each will be, and
-`packaging/PUBLISHING.md` says what each is waiting on:
+Four more package managers serve the current release:
 
 | | |
 |---|---|
 | **npm** | `npm install -g inillucent`, or `npx inillucent help` with nothing installed |
 | **pip** | `pip install inillucent` — the wheel carries the four programs and an in process driver |
-| **cargo** | `cargo install inillucent-cli` — builds from source, and the fallback on any platform with no prebuilt archive |
 | **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
 | **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
 Each of them installs the same four programs, and each downloader checks the release's published
 SHA-256 before unpacking the archive.
 
-There is no macOS archive yet, because every platform's archive is built on that platform, and
-`cargo install` needs a crates.io release there is not one of. On macOS, build from a checkout:
-`cargo build --release -p inillucent-cli`.
+**cargo builds from the repository, not from crates.io.** crates.io carries five of the workspace's
+library crates and not `inillucent-cli`, so `cargo install inillucent-cli` finds nothing. This
+works on any platform with a Rust toolchain:
+
+```sh
+cargo install --git https://github.com/Black-Rainbow-Labs/Inillucent inillucent-cli
+```
+
+**macOS is a universal build**, for Apple silicon and Intel: a `.tar.gz` archive, and a `.pkg`
+installer signed with a Developer ID and notarised by Apple. Both are on the GitHub release and on
+inillucent.com.
 
 `packaging/README.md` is how a release is cut. `packaging/windows/README.md` and
 `packaging/macos/README.md` record what a signed installer would take on each platform and what it
@@ -183,6 +189,13 @@ The values are typed rather than rendered as text, `total` is the true row count
 when `--limit` does, `more` says whether a `--limit` cut the answer short, and a failure carries the
 driver's own status name in place of `ok`. Parse that rather than the aligned table a terminal
 prints, which is also in the object as `text`.
+
+A blob comes back as `{"blob":"<hex>"}` and its column type is `blob`. That is also how `--params`
+takes one, so bytes read out of one result bind into the next statement unchanged:
+
+```sh
+inillucent --db app.rdb exec "INSERT INTO file (data) VALUES (?1)" --params '[{"blob":"00ff7f80"}]'
+```
 
 ## The exit codes
 

@@ -31,7 +31,7 @@ inillucent --db examples/rag-agent/greek-philosophy.rdb query \
 ```
 
 **`embed` runs once for the statement, not once per row**, because it is registered deterministic and
-its argument does not vary within one execution. Before task-1911 nothing read that flag and the same
+its argument does not vary within one execution. Before this was fixed, nothing read that flag and the same
 query took 105 seconds on that corpus instead of one and a half. A function you register yourself
 gets the same treatment only if you set `FunctionFlags::deterministic` — the default for anything
 registered from outside is `false`, which is the safe assumption about code this engine did not write.
@@ -72,12 +72,12 @@ reaching for it:
   neighbour it is ever compared against is wrong.
 
   The 0.1.2 archives printed `Error [syntax]: bad parameter or other API misuse` for that case, which
-  named neither the function nor the fix. task-1952 is the repair.
+  named neither the function nor the fix. This is now fixed.
 - **Nothing has to be exported after the install.** The engine finds the runtime and the weights
   where the command put them. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` still override.
 - **A registered function reaches the write path.** `INSERT ... VALUES`, `UPDATE ... SET` and
   `RETURNING` all take one, so `INSERT INTO note (body, v) VALUES (?1, embed(?1))` writes the vector
-  the function returns. Until task-1911 those three were refused with the `unsupported` status and
+  the function returns. Until this was fixed, those three were refused with the `unsupported` status and
   `INSERT ... SELECT` was the only shape that worked.
 - **Loading the model costs 650 to 800 ms and an embedding costs 12 to 36 ms**, so when it is in
   memory matters. `--residency resident` keeps it, `on-demand` drops it after every call, and the

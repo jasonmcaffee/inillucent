@@ -37,7 +37,7 @@ observe the request:
 
 ```
 $ python bindings/python/run_conformance.py
-24 capabilities reported
+45 capabilities reported
 ```
 
 ---
@@ -56,7 +56,7 @@ $ python bindings/python/run_conformance.py
 ## Which bindings link the C ABI, and which spawn the command line
 
 Two ways in, and the difference is not a detail: it decides what a value looks
-like on the way back, and every defect task-2066 §4.1.14 and §4.1.15 found was
+like on the way back, and every defect found while reviewing the bindings was
 on one side of this line.
 
 | binding | how it reaches the engine |
@@ -74,13 +74,13 @@ is a question about what `--output json` renders and what their own JSON parser
 does with it.
 
 - **Bytes are `{"blob": "<hex>"}`**, in both directions, which is what makes them
-  read back at all. Until task-2068 they went in as that and came out as the
+  read back at all. They used to go in as that and come out as the
   string `x'00ff'` typed `text`, so bytes could be written and not read by four
   of the six bindings.
 - **An integer past 2^53 is where the three differ from each other.** PHP's
   `json_decode` and Python's `json.loads` carry it exactly; JavaScript's
   `JSON.parse` and Go's decoder without `UseNumber()` do not. That is a property
-  of those parsers rather than of this engine, and it is task-2066 §4.1.14.
+  of those parsers rather than of this engine.
 
 `inillucent-driver` depends on `inillucent-engine` and nothing else in the
 workspace, and `inillucent-driver-capi` depends on `inillucent-driver` and

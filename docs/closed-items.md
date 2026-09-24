@@ -4,11 +4,29 @@ What came off [the roadmap](roadmap.md), with the measurement that closed each, 
 and will not be pursued, with the reason. A reader who remembers a roadmap number can find what
 happened to it here.
 
+## A macOS archive
+
+This was roadmap item 4, on the grounds that every platform's archive was built on that platform
+and there was no Mac. The release is built on the Windows machine instead: zig cross links the
+Mach-O, `rcodesign` signs it and replaces `lipo`, `codesign`, `productsign`, `notarytool` and
+`stapler`, and Apple's notary is an HTTPS API. 0.1.3 was the first release with macOS binaries, and
+0.1.7 publishes all of them:
+
+- `inillucent-0.1.7.pkg`, signed with a Developer ID and notarised by Apple, universal for Apple
+  silicon and Intel
+- `inillucent-0.1.7-universal-apple-darwin.tar.gz`, the same binaries
+- the npm packages `@blackrainbowlabs/cli-darwin-arm64` and `@blackrainbowlabs/cli-darwin-x64`
+- the PyPI wheel `inillucent-0.1.7-py3-none-macosx_13_0_universal2.whl`
+- the Homebrew formula in `black-rainbow-labs/inillucent`
+
+`tasks/task-1995-macos-releases-without-a-mac-tdd.md` records the three things Apple refused in the
+first `.pkg`, and `AGENTS.md` how the release is run.
+
 ## Memory
 
 **40.76 MiB against SQLite's 37.22, which is 9.5% more**, on the same 128 MiB budget, while running
 397% faster and spending 50% less processor (2026-09-23). It came down three times, from 102% more, then 43%, then
-14%. The last step was task-2000's design 2: a bulk index build used to write each page into a buffer
+14%. The last step was the second design in the performance TDD: a bulk index build used to write each page into a buffer
 pool frame that then had to be written out and evicted, and it writes into the file directly now, so
 `schema.index` - which is what sets this plan's high water mark - raises it by 10.73 MiB rather than
 12.50.
@@ -18,14 +36,14 @@ one `CREATE INDEX`. **The allocator is not part of it, and that is measured rath
 130 KB Rust program whose `main` reads its own working set and returns peaks at **3.62 MiB with
 `inillucent-alloc` installed and 3.62 MiB without it**, 0.66 MiB private either way. It has no initial
 reservation to size down - its free lists start empty and a full class hands its block back to the
-system allocator - so the question task-2000's design 10 asked, whether two to three of these mebibytes
-were the allocator's arena, is answered no. [Where the memory goes](performance.md#memory) attributes
+system allocator - so the question the tenth design in the performance TDD asked, whether two to
+three of these mebibytes were the allocator's arena, is answered no. [Where the memory goes](performance.md#memory) attributes
 every megabyte. Closed by decision: this is where it stays.
 
 ## `write.insert.batch` is faster than SQLite
 
 **It reads 1.47x on 2026-09-23, 7.0 µs a row against SQLite's 10.2**, where this was roadmap item 2
-under the title "`write.insert.batch` is about 67% slower than SQLite". task-2074 closed it: a leaf's
+under the title "`write.insert.batch` is about 67% slower than SQLite". A later change closed it: a leaf's
 delta area keeps a directory in key order and is sized by the page's free space rather than capped at
 32 rows, and a compaction whose rows fit the page's existing column widths splices them in. The `write`
 family went from 2.12x on 2026-09-20 to 3.04x. [Performance](performance.md#what-moved-since-2026-09-20)
@@ -33,7 +51,7 @@ has the run. What follows is the item as it stood when it was open, kept for the
 **About 0.60x**: 2,000 inserts in one transaction. It was 72% slower, then 43%, and it sits inside a
 family that clears its bar, so it blocks nothing.
 
-**task-2074 took the cost of an index from about 5.2 µs a row to about 2.0, on the index count
+**That same change took the cost of an index from about 5.2 µs a row to about 2.0, on the index count
 sweep.** The sweep is the measurement this item lacked: the gate's `main_table` has two secondary
 indexes, so a change aimed at index maintenance measured there is one point of a curve.
 `inillucent-writeprofile --sweep` inserts 5,000 rows in one transaction into a 100,000 row table
@@ -55,13 +73,13 @@ Against SQLite, net of process startup, the wall ratio at 2 indexes went from 0.
 `directory` and `directory-and-splice` in `tests/performance-history.tsv`.
 
 - **The delta area has a directory in key order and no count limit.** It compacted every 32 rows
-  whatever the leaf held, which the audit had priced as "the two indexes are 69% of this workload"
-  (task-2066, C1). With a directory a lookup is a binary search, so the area can take the whole free
+  whatever the leaf held, which the performance review had priced as "the two indexes are 69% of
+  this workload". With a directory a lookup is a binary search, so the area can take the whole free
   gap: 1,624 compactions became 423. The audit predicted 18 to 20% of the workload; it was 43% at two
   indexes, because the compaction count fell by 3.7x rather than the 8x the audit assumed and every
   compaction became cheaper as well.
 - **A compaction splices its delta rows into the packed page when the rows fit its widths**, instead
-  of reading, pricing and writing every kept row again (task-2066, C2). It is 7% to 15% on top of the
+  of reading, pricing and writing every kept row again. It is 7% to 15% on top of the
   first change at two indexes and more, and nothing without an index: a table's own tree appends at
   its right edge and rarely compacts.
 
@@ -72,7 +90,7 @@ format 2 file.
 **The 0.72x this item carried until now was measured by a gate that was not asking both arms the same
 question.** `inillucent-writegate` never ran a workload's own `pre`, and `sqlite_bench.c` runs one
 before it starts its clock - so on `txn.batched` and `txn.large`, which both carry
-`UPDATE side_table SET note = 'note ' || id`, SQLite did work this engine skipped. task-2029 fixed it
+`UPDATE side_table SET note = 'note ' || id`, SQLite did work this engine skipped. That was fixed
 in `aa140c7`, and every workload agrees again. Measured after that fix, four runs alternating between
 this build and a control, at a 32 KiB page: `write.insert.batch` reads **0.56x and 0.63x**, and the
 `write` family 1.67x and 1.80x against its 1.50x bar.
@@ -112,8 +130,8 @@ the four thousand index row insertions, against 2.4 µs for each of the two thou
 above say how many there were and not what they took. It read 23.97 ms of a 44.17 ms transaction
 then, 54% of it.
 
-**Making room is now 10.57 ms of 29.60, and it has been split into the four passes it actually is**
-(task-2024). `LeafRef::live_source` is `live_order` and then `materialise` - deciding which rows
+**Making room is now 10.57 ms of 29.60, and it has been split into the four passes it actually is.**
+`LeafRef::live_source` is `live_order` and then `materialise` - deciding which rows
 survive, then reading every one of them - and `compact_image` reports its sizing pass and its encode
 apart. Medians of five runs, 32 KiB page, the same fixture:
 
@@ -143,7 +161,7 @@ that fits whole had every prefix of it fit, and the layout the incremental loop 
 over the shapes of all the rows. `fit_all_widths_agrees_with_fit_widths` asserts the page bytes and
 not only the verdict.
 
-**What that is worth at the gate**, once task-2029 made the gate measure again. Four runs at a 32 KiB
+**What that is worth at the gate**, once the gate was fixed to measure again. Four runs at a 32 KiB
 page, alternating between this build and a control with the sizing pass put back, so that drift in
 the box shows up in both:
 
@@ -189,7 +207,7 @@ probe that matches still decodes, and the block itself costs a hash per insert a
 `crates/inillucent-compat/src/bin/writelogattrib.rs`'s own header already recorded that a previous fix
 to that decode "did not move the gate ratio"; this is the number behind that sentence.
 
-## What task-2000 closed
+## What the performance designs closed
 
 Four of its ten designs are built and measured; the pair of four-run gates that measures them was taken
 back to back on one box, because the same pinned SQLite binary reads 2.16x faster on a quiet box than
@@ -246,7 +264,7 @@ the engine, so they are not roadmap items.
 
 ## The operator chain is rebuilt on every execution
 
-Built in task-1911. A `Compiled` with no lifetime owns the borrow free part of a statement's chain and
+Built as part of the engine rework. A `Compiled` with no lifetime owns the borrow free part of a statement's chain and
 re-acquires the tree borrows inside `run`; `Cached::Select` carries a slot of `Untried | Reusable |
 Never`, and a re-entrant execution falls back to a fresh build rather than refusing. The index
 nested loop tower (`JoinRecipe` in `crates/inillucent-exec/src/compiled.rs`) and the same slot on
@@ -288,7 +306,7 @@ one box would measure the contention and not the platform.
 changes were built for it and measured. One bought nothing and was kept; the other cost half of
 query throughput and was reverted.
 
-**The doubled write, kept.** FTS5 used to do four tree writes per document; task-1911 made the last
+**The doubled write, kept.** FTS5 used to do four tree writes per document; the engine rework made the last
 two one row, `%_idx` carrying the doclist inline rather than an integer naming the `%_data` row it
 lived in. Measured as a genuine A/B with the change alternated in and out of the tree and a release
 rebuild each time, the paired ratio read 0.50x/0.56x before and 0.55x/0.53x after: the row count was
@@ -312,8 +330,8 @@ contract's 1.00x floor:
 
 The remaining cost was the manifest re-read from disk on every query, which could not be cached
 because a module had no hook that said "another connection may have committed since you last
-looked". That hook exists now: `VirtualTable::committed_elsewhere` and `schema_changed`
-(task-1932). Re-attempting the format with a cached manifest is what
+looked". That hook exists now: `VirtualTable::committed_elsewhere` and `schema_changed`.
+Re-attempting the format with a cached manifest is what
 [roadmap item 1](roadmap.md#1-the-extension-and-join-families-either-side-of-their-bars) names for
 the `extension` family.
 
@@ -343,12 +361,12 @@ alive, and that is a feature rather than a leftover. `policy.rs`'s
 
 ## A generation is one blob
 
-Adding content stopped rebuilding the graph in task-1894, when a commit became a **fold**: the
+Adding content stopped rebuilding the graph when a commit became a **fold**: the
 published generation is loaded and each entry of the delta log inserted into it, one graph insert
 per row written rather than one per row in the table. What was still proportional to the corpus was
 publishing, because a generation was one serialised index.
 
-Segmented generations closed that in task-1911: many small immutable segments merged at read time,
+Segmented generations closed that: many small immutable segments merged at read time,
 the way an LSM tree works, so both the graph work and the bytes written are proportional to the
 batch rather than to the corpus. `crates/inillucent-search/src/module.rs` and `merge.rs` hold it
 (`SegmentMeta`, `flush`, `merge_cascade`). The default delta log became a constant 1,024 entries at
@@ -356,9 +374,9 @@ the same time; it had been `max(1024, rows / 8)`.
 [Keeping a vector index current](relational-architecture.md#10-keeping-a-vector-index-current) has
 the measured range and how to choose `compact = N`.
 
-## What task-1911 closed
+## Eight items closed together
 
-Eight items came off the roadmap in task-1911. Each is named here so a reader who remembers the old
+Eight items came off the roadmap during the engine rework. Each is named here so a reader who remembers the old
 numbers can find what happened to them.
 
 - **A vector index answering zero rows instead of the rows it holds.** This is the wrong answer this
@@ -534,8 +552,8 @@ numbers can find what happened to them.
   skipped where every other record that belongs to no transaction is decided.
 
 - **The seventeen failing tests.** There were none. `schema_forms` 14, `planner` 5 and `ordering` 2
-  all pass, with the pinned `sqlite3` present rather than absent. task-1869 had already removed the
-  cause: `crates/inillucent-compat/src/interchange.rs` moves a database between the engines as
+  all pass, with the pinned `sqlite3` present rather than absent. An earlier change had already
+  removed the cause: `crates/inillucent-compat/src/interchange.rs` moves a database between the engines as
   `.dump` output replayed by the reference shell, instead of handing `sqlite3` a file it cannot read.
   This document was simply never updated.
 
@@ -543,7 +561,7 @@ numbers can find what happened to them.
 
 **Closed by `cdc58eb`.** It was roadmap item 6, described there in the past
 tense - the fix landed, the pair of tests landed, and the item stayed on the
-open list (task-1969, 6.3). What closed it is
+open list. What closed it is
 `replay_with_repair` in `crates/inillucent-engine/src/recovery.rs`, and what
 holds it closed is `crates/inillucent-compat/tests/torn_page_with_image.rs`.
 

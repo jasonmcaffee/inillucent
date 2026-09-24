@@ -42,8 +42,8 @@ ORDER  BY vector_distance_cos(v, ?1)
 LIMIT  10;
 ```
 
-Which of the two ought to be the default is a decision rather than a defect, and it is open
-(task-2066 section 4.3.8). Until it is made, every example on this page names the mode it is using
+Which of the two ought to be the default is a decision rather than a defect, and it is open.
+Until it is made, every example on this page names the mode it is using
 rather than leaving a reader to find out from a benchmark.
 
 ### Writing a vector
@@ -316,8 +316,8 @@ whatever this is set to.
 
 - **Adding content folds into the graph rather than rebuilding it.** A commit loads the published
   generation and inserts each entry of the delta log into it, so the cost is one graph insert per row
-  written rather than one per row in the table. **Publishing is proportional to the batch too, since
-  task-1911**: a flush builds a new immutable segment out of its own rows and writes nothing else,
+  written rather than one per row in the table. **Publishing is proportional to the batch too**:
+  a flush builds a new immutable segment out of its own rows and writes nothing else,
   and a search folds the live segments, with a newer one shadowing an older for the same row. The
   default flush trigger is a constant 1,024 entries rather than a share of the table, because the
   share existed only to make a whole-index rewrite rare and there is no longer a whole-index rewrite. The single-pass build over everything is still reachable, by
@@ -352,7 +352,7 @@ whatever this is set to.
   ```
 
   After it the file is **1,966,080 bytes, which is a fresh build of the same 2,000 rows to the
-  byte**. It was 2.5 times a fresh build until task-1980 stopped `VACUUM` writing a second copy of
+  byte**. It was 2.5 times a fresh build until a fix stopped `VACUUM` writing a second copy of
   every shadow table.
 
 ## Where to go next

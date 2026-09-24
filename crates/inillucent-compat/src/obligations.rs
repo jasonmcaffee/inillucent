@@ -162,9 +162,7 @@ pub fn pragma_page() -> String {
         "for a file another process holds before it is refused with `busy`, and setting it\n",
     );
     out.push_str("to 0 makes a contended statement fail at once. It governs the wait between\n");
-    out.push_str(
-        "processes as well as the one inside a process; before task-1980 the cross-process\n",
-    );
+    out.push_str("processes as well as the one inside a process; before this the cross-process\n");
     out.push_str("wait was a constant this pragma could not reach.\n\n");
     out.push_str(
         "`locking_mode` starts at **normal**, which is SQLite's default too: the file lock\n",

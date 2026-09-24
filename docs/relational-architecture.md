@@ -158,7 +158,7 @@ last, so a page **freed and then allocated again inside the replayed range** cam
 while it was live — and the next allocation was handed a page something else already owned. It is
 silent at write time: the statement that takes the page reports success, and nothing is wrong until
 something reads a row whose value lived there. A free-map bit carries no LSN, so nothing below
-recovery can catch a wrong answer about it. Fixed in task-1888; the case study in
+recovery can catch a wrong answer about it. This is fixed; the case study in
 [Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md)
 is where it was diagnosed.
 
@@ -172,8 +172,8 @@ device's write-behind cache, and the unlink passed `sync_dir: false`, so the dir
 was not durable either. A power loss in that window leaves the directory still naming a journal that
 looks perfectly hot and whose last bytes are torn - and the next cold open's `replay_hot_journal`
 puts that garbled pre-image back over a good page. The result is `database disk image is malformed`
-on a database whose commit had completed, which reads like a recovery failure and is not one. Fixed
-in task-1911: the journal's own bytes are synced before the handle goes, and the unlink syncs the
+on a database whose commit had completed, which reads like a recovery failure and is not one. This
+is fixed: the journal's own bytes are synced before the handle goes, and the unlink syncs the
 directory.
 
 **Then the same campaigns were run in `TRUNCATE` and `PERSIST` mode, which nothing had ever done,
@@ -240,7 +240,7 @@ That is the cost the default mode already pays, and it makes an interrupted chec
 every mode rather than in three of the five. `off` is the one mode that gets nothing, because that
 is what it asks for.
 
-All four are fixed in task-1911, and the evidence is checked in: `tests/crash/truncate-full-crash.txt`
+All four are fixed now, and the evidence is checked in: `tests/crash/truncate-full-crash.txt`
 and `tests/crash/persist-full-crash.txt` record 101 cut points each, every one recovering to the old
 database or the new one, with no detected damage at any of them. The files are seeded, so a diff on
 them is a change in what the engine does under failure.
@@ -248,7 +248,7 @@ them is a change in what the engine does under failure.
 **Checked by:** `crates/inillucent-compat/tests/new_engine_free_map_recovery.rs`,
 `new_engine_recovery_shapes.rs`, `wal_crash.rs`, `multi_database_crash.rs`, and the `durability`
 tier's fault campaigns, which crash at a chosen sync and then read back what the *file* holds.
-Those campaigns drove the retired engine until task-1911 deleted it; re-pointing them at this one is
+Those campaigns drove the retired engine until it was deleted; re-pointing them at this one is
 what found the journal defect above, and `new_engine_recovery_shapes.rs` did not, because it crashes
 at one fixed point rather than at every cut of a commit.
 
@@ -275,7 +275,7 @@ The rule it stands for:
   other "this build has not got that" gives. A number below 1 is reported as corruption, because
   there is no earlier format: a zero there is a header that has been overwritten.
 
-### Format 2: what changed, and how a format 1 file still opens (task-2074)
+### Format 2: what changed, and how a format 1 file still opens
 
 Two things in a page changed, and a build of format 1 can read neither:
 
@@ -311,7 +311,7 @@ file whose version has been edited by hand fails the checksum rather than openin
 ### What an extent reference's class bits are, and why the number did not move
 
 An **extent reference** is the sixteen bytes a leaf holds for a value stored outside its page: a
-page number and a length. Since task-1986 it also carries, in the two bits above the page number,
+page number and a length. It also carries, in the two bits above the page number,
 what the value reads back as - `CLASS_STATED`, and beside it `CLASS_TEXT`. Without them the column's
 declaration was the only thing that could say whether the bytes were text or a blob, so a column
 that would say the wrong thing could not have a value outside its page at all: `CREATE TABLE t (a)`
@@ -357,7 +357,7 @@ as a page number, found no such page, and a term with no doclist is a term in no
 
 That is the worst answer a compatibility break can give. An empty result set is a legitimate answer
 to a search, so an application has nothing to tell it apart from "there are no matching documents".
-0.1.1 is published and its answer can never be fixed. What task-2053 changed is the next one.
+0.1.1 is published and its answer can never be fixed. What changed is the next one.
 
 **Every durable layout in the file now names itself, and a reader that meets one it has not got
 refuses with the status `unsupported` and names the release that wrote it.** Three places, three
@@ -386,7 +386,7 @@ database has to open before the table in it can be dropped, and a database holdi
 reader cannot use is still a database whose other tables it can read perfectly well.
 
 **A missing record means "some layout up to and including this build's", and is read rather than
-refused.** Every file published before task-2053 has no FTS5 layout record, and a reader that
+refused.** Every file published before the change that made every durable layout name itself has no FTS5 layout record, and a reader that
 refused them would refuse every database in existence. The FTS5 record is written at
 `CREATE VIRTUAL TABLE` and again by `rebuild` and `delete-all` - the two places the whole index is
 written from scratch - and deliberately **not** by an ordinary insert, because a file 0.1.2 through
@@ -399,8 +399,8 @@ claiming something the file cannot support. Those mixed files are read by the pe
 - **A point release reads every file an earlier point release of the same minor version wrote**, and
   every layout inside it.
 - **A build reads a file written by any earlier build, or refuses it by name.** There is no version
-  this project has dropped: the file format version was 1 from the first release until task-2074
-  made it 2, and this build reads both. How far back that is *checked* is 0.1.1, the oldest release
+  this project has dropped: the file format version was 1 from the first release until a later
+  release made it 2, and this build reads both. How far back that is *checked* is 0.1.1, the oldest release
   with a fixture in `tests/interop/` - 0.1.0 was withdrawn the day after it was published and nobody
   is running it.
 - **A build reads a file written by a later build where the later build changed nothing, and refuses
@@ -448,8 +448,8 @@ does not exist and checks each refusal, including through the command line's exi
   rather than by listing the directory, because `inillucent_wal::segment::segment_name` makes the
   name a function of the base path and a sequence number - so no listing method was needed on the
   trait.
-- **This was not always true, and the difference is worth knowing.** Until task-1946's H2, the
-  rebuild used `std::fs` directly and `vacuum_in_place` reopened with `ImportedDatabase::open`,
+- **This was not always true.** Until the review before the
+  public release caught this, the rebuild used `std::fs` directly and `vacuum_in_place` reopened with `ImportedDatabase::open`,
   which constructs a fresh `OsVfs`. A connection on any other `Vfs` therefore got one of two
   things from `VACUUM` or `PRAGMA incremental_vacuum`: a failure to find its own database, or - if a
   real file happened to exist at the path string - a silent move onto the operating system's file
@@ -472,11 +472,12 @@ does not exist and checks each refusal, including through the command line's exi
 **The page pass is there because the other two cannot see a page two tables both own.** Each tree
 is a well formed tree and neither is an index of the other, so both of them pass over a file where
 `SELECT count(*) FROM p` answers with `q`'s rows. That state loses rows durably and without a
-symptom at the time, and `PRAGMA integrity_check` called it `ok` until task-2052.
+symptom at the time, and `PRAGMA integrity_check` called it `ok` until this check was added.
 
 **The third of those is a leak - dead space rather than lost data - and it reached the pragma only
-in task-2065**, because until then the engine left that state behind itself in two places, both
-measured in task-2052. A rolled-back `CREATE TABLE` or `CREATE INDEX` kept its tree's root page: the
+later, when a fix made a dropped tree, an abandoned `CREATE` and a `REINDEX` all give their pages
+back**, because until then the engine left that state behind itself in two places, both measured
+earlier, when the integrity check was extended to account for every page. A rolled-back `CREATE TABLE` or `CREATE INDEX` kept its tree's root page: the
 undo is row-level, so nothing gave the allocation back. And `DROP TABLE` kept every page the table's
 out-of-line values sat on, because `release_tree` gave back the interior pages and the leaves and
 `paged::free_extent` is reached only from the tree's own write paths. `DELETE FROM t` before the drop
@@ -489,7 +490,7 @@ values as the references their leaves held, so the commit calls `paged::free_ext
 value written as a run of whole pages takes its pages with it, and a value packed onto a page shared
 with other trees clears its slot and gives the page back only when the last live slot on it goes.
 
-Neither fix moves the boundary task-2043 got wrong. A drop's frees still happen at the commit and
+Neither fix moves that boundary. A drop's frees still happen at the commit and
 not at the statement, and a build's pages are released only on the path where there is going to be
 no commit. `ImportedDatabase::report_leaked_pages` is still there as a public entry point, because a
 leak is now the one state of the three that no statement produces - so showing the arm one means
@@ -503,7 +504,8 @@ tree's worth of pages per rebuild. Releasing it then turned up what the leak had
 caller, because they rewrite a row that goes on naming the tree it already named - so after a
 `REINDEX` the connection went on reading the index it had just replaced, and only a reopen moved it
 onto the new one. The rows agreed, so there was no symptom; the leaked page was the only trace. That
-is the same shape as task-2043, and it is why a page that nothing reaches is worth reporting even
+is the same shape as the earlier bug where a dropped page could be freed before its transaction
+committed, and it is why a page that nothing reaches is worth reporting even
 though it loses no data.
 
 **`PRAGMA quick_check` reads every tree and accounts for every page, and leaves out the index
@@ -616,7 +618,7 @@ generation. **The graph work is one insert per delta entry**, not one per row in
 inserts every chunk into a fresh graph, which is how the chunks a fold tombstoned leave the index.
 The command is an ordinary write, so it lands atomically in the caller's transaction like any other.
 
-Until task-1894 the commit path did the single-pass build. One ordinary `INSERT` could therefore pay
+The commit path used to do the single-pass build. One ordinary `INSERT` could therefore pay
 a whole-corpus graph construction — nine and a half minutes over 598,560 chunks — inside a
 transaction the application could neither schedule nor interrupt.
 
@@ -624,7 +626,7 @@ transaction the application could neither schedule nor interrupt.
 
 `inillucent-foldgate` runs both behaviours side by side: same corpus, same vectors, same commit
 boundaries, same generation sizes, one row per transaction, each arm in its own process. The `build`
-arm is the pre task-1894 behaviour, reproduced by declaring `compact = 0` and issuing the `compact`
+arm is the original single-pass behaviour, reproduced by declaring `compact = 0` and issuing the `compact`
 command at exactly the commits where the `fold` arm folds.
 
 40,000 documents, 64 dimensions, `mode = 'approximate'`, one row per transaction, on a
@@ -664,7 +666,7 @@ publishing commit that is slower, not ordinary writes.
 
 The gap narrows as the corpus grows — at 12,000 documents it was 1,215 ms against 881 ms, and at
 40,000 it is 5,189.0 ms against 4,085.1 ms — because graph construction grows faster than a byte copy
-did. **Segmented generations closed it in task-1911**, and the paragraph below says what they cost
+did. **Segmented generations closed the gap**, and the paragraph below says what they cost
 instead.
 
 ### The supported operating range
@@ -682,7 +684,7 @@ how much work one flush does rather than how much of the file it rewrites. Raisi
 larger segments — less to fold at query time, more work in the commit that flushes. Lowering it means
 the opposite. Leave it alone unless one of those two is what you are short of.
 
-**The default stopped being a share of the table in task-1911.** It was `max(1024, rows / 8)`, and the
+**The default stopped being a share of the table.** It was `max(1024, rows / 8)`, and the
 reason was sound at the time: a flush rewrote the whole base generation, so flushing often was
 expensive and the trigger had to grow with the table to keep a write's amortised cost independent of
 its size. Segments removed that premise — and while the trigger was still proportional to the table,

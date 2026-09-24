@@ -42,8 +42,11 @@ Everything here is measured, and each row links to the page carrying the run.
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading byte identical vectors | [Retrieval quality](retrieval-quality.md) |
 | **174% faster unfiltered and 6,169% faster filtered** than pgvector | median in the calling process, against the correctly configured baseline | [Retrieval quality](retrieval-quality.md#latency) |
 
-Six of the thirty weighted workloads are slower than SQLite, and so are the four correlated subquery
-workloads the contract does not weight, by far more. **Every family but one clears the 1.00x floor
+Six of the thirty weighted workloads are slower than SQLite. So were all four correlated subquery
+workloads the contract does not weight, by far more, in the graded run. At `52c4b5f`, on passes the
+gate did not grade because the machine was busy, two of those four are faster than SQLite and a
+correlated `EXISTS` over 400 outer rows takes 0.40 ms where it took 59.69; see
+[Performance](performance.md#measured-again-at-52c4b5f-on-2026-09-24-and-not-graded). **Every family but one clears the 1.00x floor
 the performance contract sets on all four runs**; `schema` went under it on three, with lower bounds
 of 0.81x to 0.95x against a 1.31x ratio - it is a family of one workload, with the widest interval on
 the page. The `transaction` family missed the floor on all four runs of two earlier measurements and now
@@ -105,8 +108,6 @@ index fits in memory everything PostgreSQL does to survive a power cut is overhe
   to choose `N`.
 - **Six of the thirty workloads are slower than SQLite**, listed on
   [the performance page](performance.md#the-workloads-that-are-slower).
-- **No macOS archive yet.** Build it from a checkout with `cargo build --release -p inillucent-cli`;
-  `cargo install` needs a crates.io release, and there is not one yet.
 
 ## In production
 

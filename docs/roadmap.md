@@ -17,25 +17,26 @@ three runs of four. `read.join` reads 4.21x with lower bounds of 2.73x, 2.83x, 2
 misses its 3.00x requirement on all four. [Performance](performance.md#by-family) has both. The rest
 of this item is how each got here.
 
-**Those lower bounds are the pooled statistic, and task-2093 replaced it.** A pooled bound mostly
-measures how far apart a family's workloads are. Graded one round at a time, four pinned passes of
-`main` read `read.join`'s lower bound at 4.27x, 4.08x, 4.18x and 4.19x, so **`read.join` meets its
-3.00x bar**, and the bar stays at 3.00x; every build since task-1819 meets it that way.
-`extension` reads 1.54x, 1.67x, 1.60x and 1.54x, so it meets its bar on all four passes, by 2.7% at
-the narrowest. task-2095 found that the passes that moved it were taken on a busy machine, which
-inflates every ratio, and on a quiet machine `extension`'s lowest bound in six passes was 1.58x.
-A verdict should come from one pass on a machine the pass shows was quiet, not from several passes;
-the gates do not check that yet
-([Performance](performance.md#how-a-verdict-should-be-taken-task-2095)).
-[Performance](performance.md#how-a-familys-interval-is-computed-task-2093) has both statistics for
+**Those lower bounds are the pooled statistic, and grading a family one round at a time replaced
+it.** A pooled bound mostly measures how far apart a family's workloads are. Graded one round at a
+time, four pinned passes of `main` read `read.join`'s lower bound at 4.27x, 4.08x, 4.18x and 4.19x,
+so **`read.join` meets its 3.00x bar**, and the bar stays at 3.00x; every build since has met it
+that way. `extension` reads 1.54x, 1.67x, 1.60x and 1.54x, so it meets its bar on all four passes,
+by 2.7% at the narrowest. A follow-up experiment found that the passes that moved it were taken on
+a busy machine, which inflates every ratio, and on a quiet machine `extension`'s lowest bound in six
+passes was 1.58x. A verdict should come from one pass on a machine the pass shows was quiet, not
+from several passes, and now the full, read and write gates check that themselves: a pass whose SQLite arm ran
+more than 3% slower than on a recorded idle reference is NOT GRADED and exits 4
+([Performance](performance.md#how-a-verdict-should-be-taken)).
+[Performance](performance.md#how-a-familys-interval-is-computed) has both statistics for
 every family. `read.join` stays on this list for `join.range`, which is still slower than SQLite.
 
-task-2086 walked `read.join` back through history, pinned, in
+A pinned walk back through `read.join`'s history is in
 [Performance](performance.md#why-readjoin-misses-its-300x-bar-and-when-it-last-met-it), and it has three follow-up tickets.
 
 **`read.join` was taken off this list on a run of the join family alone.** It was on it because its four lower bounds read 2.97x, 3.00x,
 3.00x and 2.99x against a 3.00x bar, and a number that straddles a threshold has not met it. The
-chain reuse that landed in task-1911 had never been measured against the family. Re-measured
+chain reuse that landed earlier had never been measured against the family. Re-measured
 2026-09-15, four consecutive runs on the same box, 30 rounds each, `--scale medium --page-size 32768
 --frames 4096`:
 
@@ -49,11 +50,11 @@ chain reuse that landed in task-1911 had never been measured against the family.
 Every lower bound clears the bar, by a third at the narrowest. `join.selective` reads 35.49x and
 `join.range` 1.17x; the range join is still the slow half and still the one an ordered probe reuse
 would reach. Inside the whole plan, which is what the contract grades, the family misses, as above;
-task-2082 found this engine's time for `join.range` unchanged across three builds, with the bound
+A pinned rerun found this engine's time for `join.range` unchanged across three builds, with the bound
 following SQLite's arm of the same workload.
-task-2086 then measured further back, pinned: this engine's `join.range` time rose from 22.4 ms
-at task-1833 to 28.0 ms at HEAD in four steps, and on the full plan no build it measured cleared
-the bar.
+That same walk then measured further back, pinned: this engine's `join.range` time rose from 22.4 ms
+at the oldest build it measured to 28.0 ms at HEAD in four steps, and on the full plan no build it
+measured cleared the bar.
 
 **`extension` missed, and re-applying the reverted segment format could not have closed it.** Four
 runs the same way, on 2026-09-15:
@@ -146,7 +147,7 @@ the doclist already is; the store the same way, a block per chunk; and the graph
 lists as fixed width pages. Each with its number on the performance page, and the acceptance
 unchanged - under 512 MiB resident, p50 within 1.5x and p99 within 2x, identical top k.
 
-### Landings 2 and 3, as far as no format change takes them (task-2066 §4.3.8)
+### Landings 2 and 3, as far as no format change takes them
 
 Both were done as *filings* rather than as blocks behind the buffer pool, which is less than the
 paragraph above asks for and needed no change to what is written on disk. An index written by any
@@ -226,7 +227,7 @@ one process did not.
 
 The line this replaces claimed two processes and zero lost writes over a stress campaign. That
 number came from `concurrency.rs`, which runs two *sessions* inside one process. Two real processes
-lost 43% of their acknowledged commits on every round until task-1980 (task-1979, section 4).
+lost 43% of their acknowledged commits on every round until this was fixed.
 
 **Built: `SharedDatabase`, which is serialized mode.** Any number of threads use one database,
 exactly one statement runs at a time, and a transaction holds its turn for its whole life. A web
@@ -258,14 +259,7 @@ transaction nobody opened.
 Statements still do not run in parallel. A parallel executor is not on this list, and
 [the architecture overview](architecture-overview.md) says so where a reader meets it.
 
-## 4. A macOS archive
-
-Every platform's archive is built on that platform, and there is no macOS build machine. `cargo
-install inillucent-cli` builds it from source in the meantime. Everything reachable without the
-machine is done; what is left is `packaging/macos/release-macos.sh --version <N> --upload` run on
-one, after which the Homebrew formula and the two npm platform packages that wait on it go live.
-
-## 5. Two command line lines still reach past the driver
+## 4. Two command line lines still reach past the driver
 
 `drivers/README.md` says the driver is the one surface an application reaches the engine through,
 and for an application that is true: the C ABI, the four language wrappers and every published
@@ -305,12 +299,12 @@ Done, now, means that decision is made. The claim in `drivers/README.md` is not 
 because it is about what an *application* reaches; it becomes false the day somebody reads it as
 being about this repository. Until the count is zero, this item is what says so.
 
-## 6. PostgreSQL parity: a server, a replica, readers beside a writer, roles and the dialect
+## 5. PostgreSQL parity: a server, a replica, readers beside a writer, roles and the dialect
 
 There is no listener, no replica, no reader that proceeds while a writer holds the file, no role
 and no password. A PostgreSQL client has nothing to connect to. What closing each of those looks
 like, in the order they are worked, is designed in
-[task-1998, the path from an embedded engine to PostgreSQL parity](../tasks/task-1998-postgres-parity-tdd.md):
+[the path from an embedded engine to PostgreSQL parity](../tasks/task-1998-postgres-parity-tdd.md):
 a server that runs as a service and speaks the PostgreSQL wire protocol first, a primary with a
 replica fed from the redo log second, snapshot readers alongside the one writer third, roles and
 row policies fourth, the PostgreSQL dialect fifth, and the operational verbs last.

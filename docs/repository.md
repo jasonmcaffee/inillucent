@@ -52,8 +52,9 @@ them out of `vcvars64.bat` once and export them into the shell before `cargo bui
 inillucent` gives `pub use inillucent_driver::*;` and nothing else: `Database::open`,
 `Database::session`, `Connection::query`, `Connection::prepare`, `Connection::begin` and the
 `Transaction` that rolls back when it is dropped. There were two public surfaces over one engine
-until task-1962, with different `Value`, `Error` and `Statement` types and nothing saying which to
-depend on; the driver won because it has the transaction, the `Rows` type, the cancel flag and the
+until the driver was unified into a single Rust API, with different `Value`, `Error` and `Statement`
+types and nothing saying which to depend on; the driver won because it has the transaction, the
+`Rows` type, the cancel flag and the
 capability table checked in both directions, and because the C ABI and the four language packages
 already reach the engine through it.
 
@@ -106,11 +107,12 @@ If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the ru
 failing binary, and has reported about a quarter of the suite.
 
 **One test fails today, and it is a pinned checksum rather than a behaviour.**
-`inillucent-testrun --strict` reports 1 failed over the 222 rows in `tests/selection.toml`:
+`inillucent-testrun --strict` reports 1 failed over the 231 rows in `tests/selection.toml`:
 `harness::the_retrieval_baseline_is_unchanged`, which pins the retrieval engine's source files by
-checksum so that work on the relational engine cannot disturb them. task-2000's design 9 changed three
-of those files deliberately - the distance kernel, the graph build and the index - and the amendment
-that records each file, its ticket and its new digest is written when that design is finished. The
+checksum so that work on the relational engine cannot disturb them. The design for a faster commit
+path deliberately changed three of those files - the distance kernel, the graph build and the index -
+and the amendment that records each file, its ticket and its new digest is written when that design
+is finished. The
 wall clock was 3,250 seconds on a 24 processor desktop, so read it as one run on one machine rather
 than as a figure to plan against.
 
@@ -148,7 +150,7 @@ table.
 | `mysql` | 1 | a live MySQL server, named by `INILLUCENT_TEST_MYSQL_URL` |
 | `narrow-slots` | 1 | the narrow integer slots compiled in, which is a constant in `crates/inillucent-tree/src/leaf.rs` |
 | `network` | 1 | outbound network access, turned on by setting `INILLUCENT_NETWORK_TESTS` |
-| `nikaya` | 1 | the Nikaya checkout at `C:/jason/dev/nikaya`, which the workload file is extracted from - the extract is tracked, so this is only needed to check it for staleness |
+| `nikaya` | 1 | a local checkout of the Nikaya application, which the workload file is extracted from - the extract is tracked, so this is only needed to check it for staleness |
 | `openssl` | 1 | the `openssl` command, which generates the certificates the TLS suite serves |
 | `postgres` | 1 | a live PostgreSQL server, named by `INILLUCENT_TEST_POSTGRES_URL` |
 | `previous-release` | 1 | a published release's binary, downloaded and verified by `pwsh tools/build-interop-fixture.ps1 -Version <version>` into the gitignored `tools/cross/bin/releases/` |
@@ -162,19 +164,20 @@ declare one fails `cargo test -p inillucent-compat --test selection`, and so doe
 declares one whose suite cannot skip - which is what keeps this table equal to the workspace rather
 than equal to the last time somebody looked.
 
-The last two joined the list in task-1913 and are not a new absence. Those twenty-nine cases sit
+The last two joined the list during a differential bug hunt that found tests that were not running,
+and are not a new absence. Those twenty-nine cases sit
 behind the `onnx` cargo feature, which the runner did not turn on, so they were in no binary at all
 and nothing reported them - the source read as coverage while no run had ever started them.
 `tests/selection.toml` now names the features a target is built with, so they are built, they run,
-and the ones that need the weights say so. This page used to say seventeen tests failed; task-1869 had
-already removed the cause and nobody re-ran it, which is recorded in
-[Closed items](closed-items.md#what-task-1911-closed).
+and the ones that need the weights say so. This page used to say seventeen tests failed; an earlier
+fix had already removed the cause and nobody re-ran it, which is recorded in
+[Closed items](closed-items.md#eight-items-closed-together).
 
 ## What the tests cover
 
-3,499 tests across 222 test targets in the workspace, in these classes:
+3,499 tests across 231 test targets in the workspace, in these classes:
 
-The 222 is the `[[target]]` row count in `tests/selection.toml`, which is what
+The 231 is the `[[target]]` row count in `tests/selection.toml`, which is what
 `tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.
 The number of `#[test]` attributes in the tree is 3,240, and it differs from the run's count in
 both directions. `scenario!` writes six tests from one line, so a story file holds no attribute at
@@ -220,7 +223,8 @@ is on.
   them.
 - **29 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 21 forbid
   `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
-  system results. The twenty-ninth to arrive was `inillucent-bench`, in task-1973: it is a binary
+  system results. The twenty-ninth to arrive was `inillucent-bench`, when the bench crate was brought
+  under the same four lints: it is a binary
   crate, and the attributes go on `main.rs` because a `#![deny(..)]` is a crate root inner attribute
   and `main.rs` is a crate root. Turning them on there produced 191 errors - 154 slice indexes, 18
   slices, 8 `unwrap`s and 11 `expect`s - in the harness that scores the numbers on this page and in
