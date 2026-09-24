@@ -1880,9 +1880,11 @@ kind = "test"
 name = "conformance"
 tier = "e2e"
 # `cc` for the C program that links the `cdylib`, and `asan` for the sanitized
-# run - the case whose own doc comment says it "would have caught the defect it
-# guards", and which skipped on a toolchain without the sanitizer while the row
-# named only the compiler.
+# run, which skipped on a toolchain without the sanitizer while the row named
+# only the compiler. Since task-2103 the sanitized run instruments the Rust
+# library too, with `-Zsanitizer=address` under `RUSTC_BOOTSTRAP=1`. Before
+# that it instrumented only the C program and did not report the Rust side read
+# of freed memory that task-2098 fixed.
 requires = ["cc", "asan"]
 
 # --- perf: the cost guards, so a regression fails a test rather than a benchmark

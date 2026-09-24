@@ -23,13 +23,49 @@
 //!
 //! A lifetime defect in this crate is a read of freed memory, and a read of
 //! freed memory usually returns plausible bytes rather than crashing. So when
-//! the toolchain has an address sanitizer, the C program is built with it and
-//! the Rust side is asked for one too, and the run then fails on the access
-//! rather than on the value it happened to read. Set `INILLUCENT_CAPI_ASAN=1`
-//! to require it: without that the sanitized build is attempted and the plain
-//! one is the fallback, because a sanitizer is not installed everywhere and a
-//! suite that only runs where one is installed is a suite that mostly does not
-//! run.
+//! the toolchain has an address sanitizer, the C program is built with it
+//! **and so is the Rust library it links**, and the run then fails on the
+//! access rather than on the value it happened to read. Set
+//! `INILLUCENT_CAPI_ASAN=1` to require it: without that the sanitized build is
+//! attempted and the plain one is the fallback, because a sanitizer is not
+//! installed everywhere and a suite that only runs where one is installed is a
+//! suite that mostly does not run.
+//!
+//! **Until task-2103 only the C side was instrumented, and the sanitized case
+//! could not see the defects it said it guarded.** A sanitizer checks the loads
+//! of code that was compiled with it. The library was a plain `cargo build`, so
+//! a read of freed memory made by Rust was never checked. That was measured,
+//! not assumed. On main before task-2098 (`4c40750`), `lifecycle.c` linked the
+//! old way ran 10 times with exit 0, `done` and no report, while the plain
+//! program in task-2094's run had died with `0xC0000005` on the same read. The
+//! same program linked against a library built with `-Zsanitizer=address`
+//! reported `heap-use-after-free` in `Live::is`, called from
+//! `inillucent_bind_int` on a statement `inillucent_stmt_free` had released, on
+//! 3 of 3 runs.
+//!
+//! The allocator was never the gap. MSVC's sanitizer wraps `RtlAllocateHeap`
+//! and `RtlFreeHeap`, which is what Rust's `System` allocator calls, so a box
+//! Rust frees is poisoned without `windows_hook_rtl_allocators`, and a C read
+//! of it was reported by the old build. Only the Rust loads were unchecked.
+//!
+//! `-Zsanitizer` is an unstable flag, and the sanitized build turns it on for
+//! the pinned compiler with `RUSTC_BOOTSTRAP=1`, set on that one cargo child
+//! and nowhere else. The alternative is a nightly compiler beside the pinned
+//! one, and a nightly would bring its own lints and its own code generation to
+//! a build that is meant to test this one. The instrumented library goes into
+//! its own target directory, so the flag never touches the ordinary build's
+//! artefacts.
+//!
+//! **A sanitized pass is only believed after the canary is caught.**
+//! `tests/c/freed_read_canary.rs` frees a box and reads it from Rust, built the
+//! same way as the library. If the sanitizer does not report that read, the
+//! case fails before the real program runs, because a pass after that would
+//! say nothing about Rust. The canary does not show that the library itself
+//! was instrumented, so the case also looks for the sanitizer's
+//! `__asan_report_load` calls in the library before it runs the program.
+//!
+//! This has been run on Windows with MSVC. The Linux branch builds with the
+//! same flags and links with `cc -fsanitize=address`, and it has not been run.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -74,13 +110,12 @@ fn target_directory() -> PathBuf {
     path
 }
 
-/// Builds the static library and returns what a linker should be given.
+/// Builds the plain static library and returns what a linker should be given.
 ///
-/// The **static** library rather than the dynamic one, because linking
-/// statically is what makes a sanitizer see both sides of the boundary: with a
-/// separately built DLL the allocator the C side is instrumented against and
-/// the allocator the Rust side uses are different ones, and nothing is
-/// reported.
+/// The **static** library rather than the dynamic one, so the program and the
+/// library are one image with one sanitizer runtime. This build is not
+/// instrumented, so a sanitizer linked against it checks only the loads the C
+/// program makes. The sanitized case uses [`build_instrumented_library`].
 fn build_library() -> Option<PathBuf> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let status = Command::new(cargo)
@@ -91,14 +126,124 @@ fn build_library() -> Option<PathBuf> {
     if !status.success() {
         return None;
     }
-    let directory = target_directory();
-    for name in ["inillucent_driver_capi.lib", "libinillucent_driver_capi.a"] {
-        let candidate = directory.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+    static_library_in(&target_directory())
+}
+
+/// Returns the static library in a directory, under either platform's name.
+///
+/// @param directory - the profile directory cargo built into
+fn static_library_in(directory: &Path) -> Option<PathBuf> {
+    ["inillucent_driver_capi.lib", "libinillucent_driver_capi.a"]
+        .into_iter()
+        .map(|name| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Returns the target triple to instrument, where Rust has an address
+/// sanitizer for it.
+///
+/// `-Zsanitizer` needs an explicit `--target`, because without one the flag
+/// would also reach build scripts and procedural macros, which run inside the
+/// compiler and have no sanitizer runtime to call.
+fn sanitizer_target() -> Option<&'static str> {
+    if cfg!(all(windows, target_arch = "x86_64", target_env = "msvc")) {
+        Some("x86_64-pc-windows-msvc")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("x86_64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some("aarch64-unknown-linux-gnu")
+    } else {
+        None
     }
-    None
+}
+
+/// Builds the static library with the Rust side instrumented, and returns what
+/// a linker should be given.
+///
+/// This is what lets the sanitized case see a read of freed memory that Rust
+/// makes; see the module comment for the run that showed the plain library
+/// hides one. `CARGO_ENCODED_RUSTFLAGS` rather than `RUSTFLAGS` because cargo
+/// reads it first, so a value inherited from the shell cannot replace the flag.
+fn build_instrumented_library() -> Option<PathBuf> {
+    let target = sanitizer_target()?;
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let directory = instrumented_target_directory();
+    let status = Command::new(cargo)
+        .current_dir(workspace_root())
+        .env("RUSTC_BOOTSTRAP", "1")
+        .env("CARGO_ENCODED_RUSTFLAGS", "-Zsanitizer=address")
+        .env_remove("RUSTFLAGS")
+        .args(["build", "-p", "inillucent-driver-capi", "--target", target])
+        .arg("--target-dir")
+        .arg(&directory)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    static_library_in(&directory.join(target).join("debug"))
+}
+
+/// Says whether a static library was compiled with the address sanitizer.
+///
+/// The canary proves the toolchain can see a read Rust makes, and says nothing
+/// about whether the library build kept its flag. Instrumented code calls the
+/// sanitizer's `__asan_report_load*` functions, so their names appear in the
+/// library's symbol references. Measured on this crate: 0 references in the
+/// plain library and about 1,710 in the instrumented one.
+///
+/// @param library - the static library to read
+fn is_instrumented(library: &Path) -> bool {
+    let needle = b"__asan_report_load";
+    std::fs::read(library)
+        .map(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+        .unwrap_or(false)
+}
+
+/// Returns the target directory the instrumented library is built into.
+///
+/// Beside the ordinary one rather than inside it. A different `RUSTFLAGS`
+/// makes cargo rebuild everything it touches, and sharing a directory would
+/// have the plain and the instrumented builds rebuilding each other's
+/// dependencies on every run.
+fn instrumented_target_directory() -> PathBuf {
+    let mut path = target_directory();
+    path.pop();
+    path.join("capi-asan")
+}
+
+/// Builds `tests/c/freed_read_canary.rs` the way the instrumented library is
+/// built, and returns the static library.
+///
+/// `rustc` directly rather than cargo, so the canary is not a crate in the
+/// workspace and cannot end up in anything that ships. It runs in the workspace
+/// root so rustup picks the pinned compiler.
+fn build_canary() -> Option<PathBuf> {
+    let target = sanitizer_target()?;
+    let out = area("freed_read_canary");
+    let library = out.join(match cfg!(windows) {
+        true => "freed_read_canary.lib",
+        false => "libfreed_read_canary.a",
+    });
+    let _ = std::fs::remove_file(&library);
+    let produced = Command::new("rustc")
+        .current_dir(workspace_root())
+        .env("RUSTC_BOOTSTRAP", "1")
+        .args(["--crate-type", "staticlib", "--edition", "2021", "-g"])
+        .args(["-Zsanitizer=address", "--target", target])
+        .arg(crate_root().join("tests/c/freed_read_canary.rs"))
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .ok()?;
+    if !produced.status.success() {
+        eprintln!(
+            "the freed read canary did not build:\n{}",
+            String::from_utf8_lossy(&produced.stderr)
+        );
+        return None;
+    }
+    library.is_file().then_some(library)
 }
 
 /// Returns a path written the way `cmd` wants to read it.
@@ -153,17 +298,16 @@ fn vcvars() -> Option<PathBuf> {
     None
 }
 
-/// Compiles the C program against the header and links it to the library.
+/// Compiles a C program from `tests/c` against the header and links it to a
+/// static library.
 ///
+/// @param program - the C file's name without `.c`
+/// @param name - what to call the build, which names its directory
 /// @param library - the static library
 /// @param sanitized - whether to ask for an address sanitizer
-fn compile(library: &Path, sanitized: bool) -> Option<PathBuf> {
-    let name = match sanitized {
-        true => "lifecycle_asan",
-        false => "lifecycle",
-    };
+fn compile(program: &str, name: &str, library: &Path, sanitized: bool) -> Option<PathBuf> {
     let out = area(name);
-    let source = crate_root().join("tests/c/lifecycle.c");
+    let source = crate_root().join(format!("tests/c/{program}.c"));
     let headers = crate_root().join("include");
     let exe = out.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     let _ = std::fs::remove_file(&exe);
@@ -300,6 +444,11 @@ fn ending(code: Option<i32>) -> String {
 /// @param code - the exit status, when it had one
 /// @param how - which build produced it, for the message
 fn judge(printed: &str, code: Option<i32>, how: &str) {
+    assert!(
+        !printed.contains("ERROR: AddressSanitizer"),
+        "{how}: the address sanitizer reported an access, and {}. It printed:\n{printed}",
+        ending(code)
+    );
     let failed: Vec<&str> = printed
         .lines()
         .filter(|line| line.starts_with("FAIL"))
@@ -342,7 +491,7 @@ fn the_c_conformance_program_passes() {
         inillucent_base::testing::skipping("the C ABI static library did not build");
         return;
     };
-    let Some(exe) = compile(&library, false) else {
+    let Some(exe) = compile("lifecycle", "lifecycle", &library, false) else {
         inillucent_base::testing::skipping("no usable C compiler");
         return;
     };
@@ -351,26 +500,75 @@ fn the_c_conformance_program_passes() {
     judge(&printed, code, "plain");
 }
 
-/// The same program under an address sanitizer, where the toolchain has one.
+/// Skips the sanitized case, or fails it when `INILLUCENT_CAPI_ASAN` asks for
+/// the sanitizer to be required.
 ///
-/// This is the case that would have caught the defect it guards: a statement
-/// stepped after its connection was freed read a `*const inillucent_conn` that
-/// `Box::from_raw` had already released, and the bytes at that address were
-/// still plausible. Every check in the plain run passed while it did that.
+/// @param required - whether `INILLUCENT_CAPI_ASAN` is set
+/// @param why - what could not be built
+fn sanitizer_unavailable(required: bool, why: &str) {
+    assert!(!required, "INILLUCENT_CAPI_ASAN is set and {why}");
+    inillucent_base::testing::skipping(why);
+}
+
+/// Runs the canary and fails unless the sanitizer reported its Rust side read
+/// of freed memory.
+///
+/// @param printed - everything the canary program wrote
+/// @param code - its exit status
+fn judge_canary(printed: &str, code: Option<i32>) {
+    assert!(
+        printed.contains("ERROR: AddressSanitizer: heap-use-after-free")
+            && printed.contains("canary_read"),
+        "the sanitized build did not report the canary's read of freed memory in Rust, so \
+         a sanitized pass would say nothing about the Rust side. The canary {}. It printed:\n{printed}",
+        ending(code)
+    );
+    assert!(
+        !printed.lines().any(|line| line == "done"),
+        "the canary was reported and still ran to the end, so the sanitizer is not \
+         stopping on a report. It printed:\n{printed}"
+    );
+}
+
+/// The same program under an address sanitizer, with the C program and the
+/// Rust library both instrumented, where the toolchain has one.
+///
+/// This is the case meant to catch a read of freed memory that the plain run
+/// passes over because the bytes are still plausible. Before task-2098, a
+/// misuse check read the liveness word of a handle `Box::from_raw` had already
+/// released, and every check in the plain run passed while it did that. That
+/// read is made by Rust, so only an instrumented library sees it: this case
+/// reported it on 3 of 3 runs of the pre-task-2098 tree, and the C only build
+/// this case used before task-2103 reported nothing on 10 of 10. The canary
+/// runs first and must be caught, and the library must contain the sanitizer's
+/// calls, so a build that has lost the instrumentation fails here rather than
+/// passing.
 #[test]
 fn the_c_conformance_program_passes_under_a_sanitizer() {
     let required = std::env::var("INILLUCENT_CAPI_ASAN").is_ok_and(|value| value != "0");
-    let Some(library) = build_library() else {
-        inillucent_base::testing::skipping("the C ABI static library did not build");
-        return;
-    };
-    let Some(exe) = compile(&library, true) else {
-        assert!(
-            !required,
-            "INILLUCENT_CAPI_ASAN is set and the sanitized build did not compile"
+    let Some(canary) = build_canary() else {
+        return sanitizer_unavailable(
+            required,
+            "Rust cannot be built with an address sanitizer here",
         );
-        inillucent_base::testing::skipping("no address sanitizer in this toolchain");
-        return;
+    };
+    let Some(canary_exe) = compile("freed_read_canary", "freed_read_canary", &canary, true) else {
+        return sanitizer_unavailable(required, "no address sanitizer in this C toolchain");
+    };
+    let (printed, code) = run(&canary_exe, "freed_read_canary");
+    judge_canary(&printed, code);
+
+    let Some(library) = build_instrumented_library() else {
+        return sanitizer_unavailable(required, "the instrumented C ABI library did not build");
+    };
+    assert!(
+        is_instrumented(&library),
+        "{} has no address sanitizer calls in it, so a sanitized pass would not have \
+         checked a single load the Rust side makes",
+        library.display()
+    );
+    let Some(exe) = compile("lifecycle", "lifecycle_asan", &library, true) else {
+        return sanitizer_unavailable(required, "the sanitized program did not compile");
     };
     let (printed, code) = run(&exe, "lifecycle_asan");
     print!("{printed}");
