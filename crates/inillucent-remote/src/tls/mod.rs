@@ -149,7 +149,11 @@ pub(crate) fn unavailable(why: impl std::fmt::Display) -> inillucent_base::error
 /// Only the first certificate in a PEM file is taken: an authority file with
 /// several is a chain, and the root is what a chain is built *to*.
 ///
+/// Windows only: SChannel is handed the certificate's bytes, while OpenSSL
+/// on Unix is handed the path and reads the file itself.
+///
 /// @param path - the file the URL named
+#[cfg(windows)]
 pub(crate) fn load_root(path: &str) -> DbResult<Vec<u8>> {
     let bytes = std::fs::read(path).map_err(|error| {
         refusal(format!(

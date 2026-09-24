@@ -118,7 +118,7 @@ fn install() {
     // the signature `signal` expects. Nothing is read back, and the handler
     // itself only stores into memory that is already allocated.
     unsafe {
-        let _ = libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
+        let _ = libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
 }
 

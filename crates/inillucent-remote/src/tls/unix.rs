@@ -171,6 +171,12 @@ fn library() -> Option<&'static Library> {
                 // from a resolved symbol to the signature OpenSSL publishes for
                 // it. A wrong signature here is a defect this file owns; the
                 // names are stable across 1.1 and 3.
+                //
+                // Each transmute's target is the `Library` field it is
+                // assigned to, so the struct above is the annotation, and
+                // spelling it out a second time on twenty calls is twenty
+                // places for the two copies to disagree.
+                #[allow(clippy::missing_transmute_annotations)]
                 let resolved = unsafe {
                     Some(Library {
                         tls_client_method: std::mem::transmute(symbol(
