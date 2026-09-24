@@ -43,19 +43,15 @@ fn nikaya_root() -> PathBuf {
 
 /// The interpreter to run the extractor with, if one is on the path.
 fn python() -> Option<&'static str> {
-    for name in ["python", "python3"] {
-        if Command::new(name)
+    ["python", "python3"].into_iter().find(|name| {
+        Command::new(name)
             .arg("--version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
-        {
-            return Some(name);
-        }
-    }
-    None
+    })
 }
 
 /// The workload file holds what Nikaya's source holds.

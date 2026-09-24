@@ -1470,10 +1470,7 @@ impl Compiled {
     /// trigger - gets its own vectors rather than clearing the ones the outer
     /// statement is still holding names in.
     pub(crate) fn take_binder_scratch(&self) -> inillucent_sql::bind::BinderScratch {
-        self.scratch_binder
-            .borrow_mut()
-            .take()
-            .unwrap_or_else(inillucent_sql::bind::BinderScratch::new)
+        self.scratch_binder.borrow_mut().take().unwrap_or_default()
     }
 
     /// Puts a finished bind's vectors back for the next statement to fill.

@@ -110,7 +110,7 @@ fn corpus() -> Vec<Row> {
         .map(|a| Row {
             a,
             b: (a % 11 != 0).then(|| format!("k{}", a % 40)),
-            c: (a % 5 != 0).then(|| (a % 60) as f64 + 0.5),
+            c: (a % 5 != 0).then_some((a % 60) as f64 + 0.5),
             d: (a % 7 != 0).then_some(a % 53),
         })
         .collect()

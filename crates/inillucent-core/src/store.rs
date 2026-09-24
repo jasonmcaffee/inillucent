@@ -1648,8 +1648,10 @@ mod text_arena_tests {
         assert_eq!(filed.to_text(), text, "the whole arena did not read back");
 
         // A range the arena does not hold is empty on both, which is what a
-        // caller with a stale chunk identifier gets instead of a panic.
-        for range in [100u64..110, 20..5] {
+        // caller with a stale chunk identifier gets instead of a panic. The
+        // reversed one is written as a struct because clippy refuses the literal
+        // `20..5`, and a reversed range is exactly what this case is checking.
+        for range in [100u64..110, std::ops::Range { start: 20, end: 5 }] {
             assert_eq!(filed.slice(range.clone()), "");
             assert_eq!(resident.slice(range.clone()), "");
         }
@@ -1704,8 +1706,10 @@ mod text_arena_tests {
     /// section silently ends early.
     #[test]
     fn a_store_claiming_more_text_than_the_file_holds_is_refused() {
-        let mut store = Store::default();
-        store.text = TextArena::Resident("alpha beta gamma".to_string());
+        let store = Store {
+            text: TextArena::Resident("alpha beta gamma".to_string()),
+            ..Store::default()
+        };
         let mut bytes = Vec::new();
         store.write_to(&mut bytes).expect("the store writes");
 

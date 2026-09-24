@@ -950,7 +950,7 @@ impl Bm25Index {
             // of the union, of which the sum is the upper bound.
             let union_df: usize = variants
                 .iter()
-                .filter_map(|v| self.postings.get(*v))
+                .filter_map(|v| self.postings.get(v))
                 .map(|p| p.len())
                 .sum();
             let term_mass = self.idf(union_df.min(self.n_chunks));
@@ -960,7 +960,7 @@ impl Bm25Index {
             // An exact match on the query term should not be diluted by its own
             // expansions, so it keeps full weight and expansions share the rest.
             for variant in &variants {
-                let Some(postings) = self.postings.get(*variant) else {
+                let Some(postings) = self.postings.get(variant) else {
                     continue;
                 };
                 let weight = if *variant == qt.as_str() {
@@ -1180,7 +1180,7 @@ impl Bm25Index {
             let union_df: usize = if prefix {
                 self.expand_prefix(&qt)
                     .iter()
-                    .filter_map(|v| self.postings.get(*v))
+                    .filter_map(|v| self.postings.get(v))
                     .map(|p| p.len())
                     .sum()
             } else {

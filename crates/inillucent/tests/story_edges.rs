@@ -124,7 +124,6 @@ fn the_empty_and_the_absent_are_different(arm: &Arm, area: &Path) {
         "0,0"
     );
 
-    drop(connection);
     drop(database);
     let database = reopen_and_check(arm, &path);
     let connection = database.session();
@@ -845,7 +844,6 @@ fn a_path_that_is_awkward_still_opens_and_writes(arm: &Arm, area: &Path) {
         "a path with a space and an accent did not round trip at the {} arm",
         arm.name
     );
-    drop(connection);
     drop(database);
 
     // A long path. Windows refuses a path past 260 characters without the long

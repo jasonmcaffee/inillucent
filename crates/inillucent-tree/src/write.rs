@@ -464,13 +464,17 @@ pub enum Located {
 ///
 /// The two answers one search of the leaf gives, carried together from the
 /// search to the write: what the write displaces, and the delta directory
-/// position its row takes once that is gone.
+/// position its row takes once that is gone. The room check's answer travels
+/// with them, because it is the third fact about where the row lands and
+/// `apply_row` would otherwise take nine parameters.
 #[derive(Clone, Copy, Debug)]
 struct Landing {
     /// Where the key sits now.
     located: Located,
     /// The delta directory position the row takes.
     slot: usize,
+    /// Where the room check found the row would land in the delta area.
+    costed: DeltaOffsets,
 }
 
 /// What a write did, for the report and for the tests.
@@ -886,11 +890,11 @@ impl PagedTree {
     /// @param database - the file
     /// @param log - where the record goes
     /// @param page - the leaf
-    /// @param landing - where the key sits, which decides what is displaced, and
-    ///   the delta directory position the row takes once that is done
+    /// @param landing - where the key sits, which decides what is displaced, the
+    ///   delta directory position the row takes once that is done, and where the
+    ///   room check found the row would land
     /// @param encoded_row - the row's bytes, taken by the write
     /// @param spilled - whether any of its values went out of line
-    /// @param costed - where the room check found the row would land
     /// @param timing - where this write's nanoseconds are collected, all zero unless a harness asked
     fn apply_row(
         &self,
@@ -900,10 +904,13 @@ impl PagedTree {
         landing: Landing,
         encoded_row: &mut Vec<u8>,
         spilled: bool,
-        costed: DeltaOffsets,
         timing: &mut crate::stages::PutStages,
     ) -> DbResult<()> {
-        let Landing { located, slot } = landing;
+        let Landing {
+            located,
+            slot,
+            costed,
+        } = landing;
         let asking = crate::stages::clock();
         let orphaned = self.orphaned_extents(database, page, located)?;
         timing.orphans = crate::stages::elapsed(asking);
@@ -1226,10 +1233,13 @@ impl PagedTree {
                 database,
                 log,
                 page,
-                Landing { located, slot },
+                Landing {
+                    located,
+                    slot,
+                    costed,
+                },
                 &mut encoded_row,
                 spilled,
-                costed,
                 &mut timing,
             )?;
             timing.apply = crate::stages::elapsed(applying);

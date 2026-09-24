@@ -87,7 +87,7 @@ struct Document {
 fn document(id: i64) -> Document {
     let mut body = String::new();
     for (term, every) in TERMS {
-        if id as usize % every == 0 {
+        if (id as usize).is_multiple_of(every) {
             body.push_str(term);
             body.push(' ');
         }
@@ -499,7 +499,6 @@ fn ingest_and_search(arm: &Arm, area: &Path) {
     );
 
     // Phase six: a reopen, from a handle that wrote none of it.
-    drop(connection);
     drop(database);
     let database = reopen_and_check(arm, &path);
     let connection = database.session();
@@ -592,7 +591,6 @@ fn an_ordinary_fts5_ingest(arm: &Arm, area: &Path) {
         arm.name
     );
 
-    drop(connection);
     drop(database);
     let database = reopen_and_check(arm, &path);
     let connection = database.session();

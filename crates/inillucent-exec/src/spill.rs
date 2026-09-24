@@ -174,12 +174,9 @@ impl RunReader {
     /// @param file - the spill file the run lives in
     pub fn next(&mut self, file: &dyn SpillFile) -> DbResult<Option<Vec<OwnedDatum>>> {
         loop {
-            match decode_row(self.held.get(self.at..).unwrap_or(&[])) {
-                Ok(Some((row, taken))) => {
-                    self.at = self.at.saturating_add(taken);
-                    return Ok(Some(row));
-                }
-                Ok(None) | Err(_) => {}
+            if let Ok(Some((row, taken))) = decode_row(self.held.get(self.at..).unwrap_or(&[])) {
+                self.at = self.at.saturating_add(taken);
+                return Ok(Some(row));
             }
             let consumed = self
                 .start

@@ -147,7 +147,7 @@ fn build(path: &std::path::Path, indexes: bool) -> Result<Database, String> {
 /// @param path - where the database goes
 /// @param rows - how many rows to write
 fn build_plain(path: &std::path::Path, rows: u32, page_size: usize) -> Result<Database, String> {
-    let database = Database::open_at(path, page_size, inillucent_engine::DEFAULT_FRAMES as usize)
+    let database = Database::open_at(path, page_size, inillucent_engine::DEFAULT_FRAMES)
         .map_err(|error| error.message().to_string())?;
     let connection = database.session();
     connection
@@ -248,7 +248,7 @@ fn build_big(
     pool_bytes: usize,
     indexed: bool,
 ) -> Result<Database, String> {
-    let database = Database::open_at(path, page_size, inillucent_engine::DEFAULT_FRAMES as usize)
+    let database = Database::open_at(path, page_size, inillucent_engine::DEFAULT_FRAMES)
         .map_err(|error| error.message().to_string())?;
     let connection = database.session();
     let mut script = format!(

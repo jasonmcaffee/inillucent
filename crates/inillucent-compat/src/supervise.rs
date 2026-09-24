@@ -483,6 +483,9 @@ mod tests {
                 // Default stdio is inherited, which is the point.
                 let mut child = Command::new(&me);
                 child.env(ROLE, "sleep").args([HELPER, "--exact"]);
+                // Never waited on: a grandchild that outlives this process and
+                // holds its standard output is the case being tested.
+                #[allow(clippy::zombie_processes)]
                 let _ = child.spawn().unwrap();
                 println!("the child is exiting and the grandchild is not");
             }

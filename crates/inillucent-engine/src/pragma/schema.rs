@@ -400,7 +400,7 @@ impl crate::ImportedDatabase {
         };
         let wanted = argument_text(argument).to_ascii_lowercase().into_bytes();
         let found = self.schema.tables.iter().find_map(|table| {
-            if !at.is_none_or(|named| table.database == named) {
+            if at.is_some_and(|named| table.database != named) {
                 return None;
             }
             table
@@ -489,7 +489,7 @@ impl crate::ImportedDatabase {
             }
             // A qualified `PRAGMA aux.table_list` lists that database's tables
             // and no others, which is what the qualifier is for.
-            if !at.is_none_or(|named| table.database == named) {
+            if at.is_some_and(|named| table.database != named) {
                 continue;
             }
             let kind: &[u8] = match table.kind {

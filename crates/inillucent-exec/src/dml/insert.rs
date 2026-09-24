@@ -878,6 +878,50 @@ pub(crate) fn declarations_are_met(
     Ok(true)
 }
 
+/// One table's keys, for the allocation an insert with no rowid needs.
+struct TableKeys<'a> {
+    /// The file and its trees.
+    target: Borrowed<'a>,
+    /// The table being written.
+    table: &'a TableInfo,
+}
+
+impl<'a> TableKeys<'a> {
+    /// Returns the keys of one table, borrowing the write target.
+    ///
+    /// @param target - the file and its trees
+    /// @param table - the table being written
+    fn over(target: &'a mut dyn WriteTarget, table: &'a TableInfo) -> TableKeys<'a> {
+        TableKeys {
+            target: Borrowed(target),
+            table,
+        }
+    }
+}
+
+impl crate::insert_plan::RowidKeys for TableKeys<'_> {
+    fn highest(&mut self) -> DbResult<i64> {
+        highest_rowid(&mut self.target, self.table)
+    }
+
+    fn holds(&mut self, rowid: i64) -> DbResult<bool> {
+        row_exists(self.table, &mut self.target, &[OwnedDatum::Int(rowid)])
+    }
+}
+
+/// The keys of a table that is not there, for the `INSTEAD OF` path.
+struct NoKeys;
+
+impl crate::insert_plan::RowidKeys for NoKeys {
+    fn highest(&mut self) -> DbResult<i64> {
+        Ok(0)
+    }
+
+    fn holds(&mut self, _rowid: i64) -> DbResult<bool> {
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,49 +968,5 @@ mod tests {
             Unwind::Transaction,
             "the clause a deeper statement set survives a caller that has none"
         );
-    }
-}
-
-/// One table's keys, for the allocation an insert with no rowid needs.
-struct TableKeys<'a> {
-    /// The file and its trees.
-    target: Borrowed<'a>,
-    /// The table being written.
-    table: &'a TableInfo,
-}
-
-impl<'a> TableKeys<'a> {
-    /// Returns the keys of one table, borrowing the write target.
-    ///
-    /// @param target - the file and its trees
-    /// @param table - the table being written
-    fn over(target: &'a mut dyn WriteTarget, table: &'a TableInfo) -> TableKeys<'a> {
-        TableKeys {
-            target: Borrowed(target),
-            table,
-        }
-    }
-}
-
-impl crate::insert_plan::RowidKeys for TableKeys<'_> {
-    fn highest(&mut self) -> DbResult<i64> {
-        highest_rowid(&mut self.target, self.table)
-    }
-
-    fn holds(&mut self, rowid: i64) -> DbResult<bool> {
-        row_exists(self.table, &mut self.target, &[OwnedDatum::Int(rowid)])
-    }
-}
-
-/// The keys of a table that is not there, for the `INSTEAD OF` path.
-struct NoKeys;
-
-impl crate::insert_plan::RowidKeys for NoKeys {
-    fn highest(&mut self) -> DbResult<i64> {
-        Ok(0)
-    }
-
-    fn holds(&mut self, _rowid: i64) -> DbResult<bool> {
-        Ok(false)
     }
 }

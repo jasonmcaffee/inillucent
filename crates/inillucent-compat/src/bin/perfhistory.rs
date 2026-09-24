@@ -987,7 +987,7 @@ fn anything_but_the_history_changed(porcelain: &str) -> bool {
     porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .any(|line| !line.get(3..).is_some_and(|path| path.trim() == HISTORY))
+        .any(|line| line.get(3..).is_none_or(|path| path.trim() != HISTORY))
 }
 
 /// Where the history lives, relative to the workspace root.

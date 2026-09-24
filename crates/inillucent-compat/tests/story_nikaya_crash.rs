@@ -156,7 +156,6 @@ fn a_kill_inside_the_migration_leaves_it_finishable(arm: &Arm, _unused: &Path) {
         "UPDATE chunk SET embedded_at = 1700000500 WHERE ordinal = 0",
     );
 
-    drop(connection);
     drop(database);
     let database = reopen_and_check(arm, &path);
     let connection = database.session();

@@ -189,7 +189,6 @@ fn every_statement_the_consumer_prepares_runs(arm: &Arm, area: &Path) {
     // The corpus is still sound after every statement in it has run, and the
     // seed rows are still there: a statement corpus that quietly deleted its
     // own rows would make every later statement match nothing.
-    drop(connection);
     drop(database);
     let database = reopen_and_check(arm, &path);
     let connection = database.session();

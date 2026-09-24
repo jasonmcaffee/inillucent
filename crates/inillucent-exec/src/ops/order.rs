@@ -1046,32 +1046,32 @@ mod encoded_key_tests {
             collation: Collation::Binary,
             nulls_first: true,
         };
-        assert!(the_encoding_orders_these_terms(&[plain.clone()]));
+        assert!(the_encoding_orders_these_terms(&[plain]));
 
         for refused in [
             SortKey {
                 descending: true,
-                ..plain.clone()
+                ..plain
             },
             SortKey {
                 nulls_first: false,
-                ..plain.clone()
+                ..plain
             },
             SortKey {
                 collation: Collation::Decimal,
-                ..plain.clone()
+                ..plain
             },
         ] {
             assert!(
-                !the_encoding_orders_these_terms(&[refused.clone()]),
+                !the_encoding_orders_these_terms(&[refused]),
                 "a term the key encoder cannot order was sent down the encoded route: \
                  {refused:?}"
             );
             let table = a_table(11, 40, 2);
             let mut ours = table.clone();
-            sort_rows(&mut ours, &[refused.clone()]);
+            sort_rows(&mut ours, &[refused]);
             let mut theirs = table.clone();
-            theirs.sort_by(|left, right| compare_by(left, right, &[refused.clone()]));
+            theirs.sort_by(|left, right| compare_by(left, right, &[refused]));
             assert_eq!(
                 ours, theirs,
                 "the fall-through path did not sort: {refused:?}"

@@ -174,7 +174,7 @@ fn build(connection: &Connection<'_>, rows: i64, period: i64) {
 #[test]
 fn a_delete_in_index_order_reads_each_leaf_about_once() {
     let path = scratch("index-order");
-    let database = Database::open_at(&path, 4_096, inillucent_engine::DEFAULT_FRAMES as usize)
+    let database = Database::open_at(&path, 4_096, inillucent_engine::DEFAULT_FRAMES)
         .expect("the database opens");
     let connection = database.session();
     exec(&connection, &format!("PRAGMA cache_size = {POOL_PAGES}"));
@@ -253,7 +253,7 @@ fn a_delete_in_index_order_reads_each_leaf_about_once() {
 #[test]
 fn a_trigger_and_returning_see_the_query_order() {
     let path = scratch("observable");
-    let database = Database::open_at(&path, 4_096, inillucent_engine::DEFAULT_FRAMES as usize)
+    let database = Database::open_at(&path, 4_096, inillucent_engine::DEFAULT_FRAMES)
         .expect("the database opens");
     let connection = database.session();
     build(&connection, 60, 7);

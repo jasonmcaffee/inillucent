@@ -1486,10 +1486,7 @@ mod tests {
     #[test]
     fn a_path_that_holds_nothing_is_one_to_create_at() {
         let root = scratch("absent");
-        assert_eq!(
-            there_is_a_database_at(&root.join("absent.rdb")).expect("it answers"),
-            false
-        );
+        assert!(!there_is_a_database_at(&root.join("absent.rdb")).expect("it answers"));
     }
 
     /// A file is a database to open.
@@ -1498,7 +1495,7 @@ mod tests {
         let root = scratch("present");
         let path = root.join("there.rdb");
         std::fs::write(&path, b"anything").expect("the file writes");
-        assert_eq!(there_is_a_database_at(&path).expect("it answers"), true);
+        assert!(there_is_a_database_at(&path).expect("it answers"));
     }
 
     /// Anything else is refused by name, and is not deleted (task-2070).

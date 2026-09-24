@@ -93,13 +93,18 @@ jobs:
       # against the SHA3-256 sum SQLite publishes, using inillucent's own
       # implementation, so a substituted archive cannot become the thing every
       # parity claim is measured against.
+      #
+      # The script is run through `bash` rather than by its path. Every `.sh` in
+      # this repository was committed from Windows without the executable bit,
+      # so on Linux `tools/sqlite-reference.sh` answered "Permission denied"
+      # and exit 126, and no Linux run of this job ever got past this step.
       - name: the pinned SQLite 3.53.4 oracle
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
             pwsh tools/sqlite-reference.ps1
           else
-            tools/sqlite-reference.sh
+            bash tools/sqlite-reference.sh
           fi
 
       # 1.2 MB, 17 MB and 94 MB, written by the pinned SQLite shell so that both
@@ -108,7 +113,7 @@ jobs:
       # them - which is the right answer and not one to leave standing in CI.
       - name: the gate fixtures
         shell: bash
-        run: tools/build-gate-fixtures.sh
+        run: bash tools/build-gate-fixtures.sh
 
       - name: cargo fmt
         run: cargo fmt --all --check

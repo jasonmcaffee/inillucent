@@ -15,7 +15,6 @@
 
 use std::io::Write;
 
-use inillucent_base::PrimaryCode;
 use inillucent_compat::corpus;
 use inillucent_compat::fixtures::valid_fixtures;
 use inillucent_compat::workspace_root;

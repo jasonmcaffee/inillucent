@@ -305,7 +305,7 @@ fn a_campaign_of_kills_loses_nothing(arm: &Arm) {
         }
         // Every transaction is there whole or not at all: the rows present have
         // to be a multiple of the transaction size.
-        if present % PER_BATCH as u64 != 0 {
+        if !present.is_multiple_of(PER_BATCH as u64) {
             torn.push(format!(
                 "cut {cut}: {present} rows is not a whole number of {PER_BATCH} row \
                  transactions"

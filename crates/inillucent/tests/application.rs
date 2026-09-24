@@ -60,7 +60,7 @@
 //! was correct throughout and only the live connection was wrong, so every
 //! test that did not reopen agreed with the damage.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use inillucent_compat::matrix::Arm;
 use inillucent_compat::scenario;
@@ -125,7 +125,7 @@ fn open(arm: &Arm, path: &Path) -> Database {
 ///
 /// @param arm - the configuration this run is at
 /// @param path - the database file
-fn reopen_and_check(arm: &Arm, path: &PathBuf) -> Database {
+fn reopen_and_check(arm: &Arm, path: &Path) -> Database {
     let database = open(arm, path);
     database.check().expect("the file is sound after a reopen");
     let connection = database.session();

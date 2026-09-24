@@ -795,7 +795,11 @@ mod tests {
     ///
     /// These are the values task-2080 names: two where the last digit used to
     /// differ, and the `!` cases where the digit count used to differ.
+    ///
+    /// `3.14159265358979` is one of those values as the shell was given it, not
+    /// an attempt at pi, so `approx_constant` is allowed for this test only.
     #[test]
+    #[allow(clippy::approx_constant)]
     fn the_values_task_2080_names_render_as_the_pinned_shell_does() {
         assert_eq!(
             text(1.1304293785495057e251, bang(Conversion::General, Some(17))),
