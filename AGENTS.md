@@ -20,6 +20,13 @@
 > worktree belongs to, so a worktree on another drive needs no arguments. `-SitePath` and `-TapPath`
 > override them.
 >
+> **Start it with the release worktree as the working directory**, for example
+> `pwsh -WorkingDirectory J:/build/release -File J:/build/release/packaging/ship.ps1 -Part patch`.
+> Cargo reads `.cargo/config.toml` from the working directory, not from the manifest it is given. An
+> agent's terminal sits in its ticket's worktree, whose `.cargo/config.toml` points the target
+> directory at that ticket's build folder, so a release started from there tests and builds into the
+> wrong place. The 0.1.8 release's first attempt did exactly that.
+>
 > ### What it publishes
 >
 > Twelve routes: the five build targets, the Linux packages, the signature over `SHA256SUMS`, the
