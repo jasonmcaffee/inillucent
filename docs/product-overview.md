@@ -1,6 +1,6 @@
 # Product overview
 
-**What inillucent is, who it is for, and the case for it.** If you want to install it and run a
+**What Inillucent is, who it is for, and the case for it.** If you want to install it and run a
 query, go to [Getting started](getting-started.md) instead.
 
 ## What it is
@@ -12,21 +12,28 @@ same file as your tables. One `.rdb` can carry ordinary rows, an HNSW graph over
 and a BM25 index over your text, and all three commit and roll back together.
 
 There is no server to start, no port to configure, no connection string, and no network hop between
-your application and its index. Four programs come out of an install: a command line, a shell shaped
-like `sqlite3`, an MCP server for AI agents, and a migrator that reads a SQLite file or a running
-PostgreSQL or MySQL server.
+your application and its index. Four programs come out of an install: a command line, a shell that
+works like `sqlite3`, an MCP server for AI agents, and a migrator that reads a SQLite file or a
+running PostgreSQL or MySQL server.
+
+**Several processes can use one database file at the same time.** They take the file's lock with the
+same SHARED, RESERVED, PENDING and EXCLUSIVE protocol SQLite uses, under `PRAGMA locking_mode =
+normal`, which is the default. Each connection reads the latest committed state when it takes the
+lock, so a commit made by one process is visible to the next statement in another.
+`crates/inillucent-compat/tests/process_concurrency.rs` runs two real writer processes against one
+file and checks that the rows in it equal the commits that were acknowledged.
 
 ## Who it is for
 
-**Somebody running a local AI agent.** The agent queries a body of written material: a mailbox, a
-wiki, a repository, a set of tickets. It needs both meaning and exact term, and it needs them fast
-enough to run several searches inside one answer. Today that means PostgreSQL, the pgvector extension,
-and an embedding model served over a socket. inillucent replaces all three with a library.
+**Somebody running a local AI agent.** The agent queries a body of written material: a wiki, a
+repository, a set of tickets, a chat history. It needs both meaning and exact term, and it needs them
+fast enough to run several searches inside one answer. Today that means PostgreSQL, the pgvector
+extension, and an embedding model served over a socket. Inillucent replaces all three with a library.
 
 **Somebody who already uses SQLite and wants it faster.** The SQL is the same: 404 of 416 probed
 cases produce SQLite's exact bytes, nothing is refused, 6 answer differently, and 6 are vector search
-features SQLite has no equivalent for. What changes is the
-storage underneath, and the measurement is 397% faster at 100,000 rows.
+features SQLite has no equivalent for. What changes is the storage underneath, and the measurement is
+397% faster at 100,000 rows.
 
 ## Where it stands
 
@@ -91,11 +98,10 @@ index fits in memory everything PostgreSQL does to survive a power cut is overhe
 
 ## What you give up
 
-- **One writer at a time.** Several processes can share one file under `PRAGMA locking_mode =
-  normal`, which is the default, and a second writer is refused with `busy` after
-  `PRAGMA busy_timeout` rather than being let in. A reader waits for a writer too: there is no
-  shared-memory log index for a reader to find a snapshot through. Threads inside one process are
-  not supported.
+- **One writer at a time.** Processes share the file, but writes take turns. A second writer waits
+  up to `PRAGMA busy_timeout` and is then refused with `busy`. A reader waits for a writer as well,
+  because there is no shared memory log index a reader could use to read a snapshot past it. Threads
+  inside one process are not supported yet.
 - **This engine's own file format.** SQLite files are imported once with
   [`inillucent migrate`](migrating.md), not opened in place.
 - **No replication, no backups beyond a verified file copy, no wire protocol.** It is a library.
@@ -108,26 +114,6 @@ index fits in memory everything PostgreSQL does to survive a power cut is overhe
   to choose `N`.
 - **Six of the thirty workloads are slower than SQLite**, listed on
   [the performance page](performance.md#the-workloads-that-are-slower).
-
-## In production
-
-A Gmail assistant with 598,560 passages across 64,172 messages and 2,287 attachments ran on
-PostgreSQL with pgvector and PostgreSQL full text search, and now runs on inillucent with no other
-database in the process:
-
-| | before | after |
-|---|---|---|
-| median semantic search | 33.7 ms warm, 80.6 ms cold | **4.41 ms** |
-| recall of the correct top 100 | 0.899 | **1.000** |
-| real questions the keyword branch answered with nothing | 57% | **0%** |
-| index inside the database | 3,167 MB of a 5,849 MB database | deleted |
-
-The table above is the **retrieval** move. A second move took the **record** off PostgreSQL as well:
-16 tables and 1.63 million rows, by which time the same mailbox had grown to 602,022 passages.
-That one found six query shapes that go quadratic on this engine, and one recovery failure to read
-before a migration. Both are in
-[Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md),
-along with what each one cost and how it was fixed.
 
 ## Where to go next
 

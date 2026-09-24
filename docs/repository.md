@@ -134,7 +134,7 @@ table.
 | `shell` | 9 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
 | `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
-| `python` | 3 | a Python interpreter with `ssl`, for the TLS server, the `ctypes` conformance runner and the Nikaya workload extractor |
+| `python` | 3 | a Python interpreter with `ssl`, for the TLS server, the `ctypes` conformance runner and the workload extractor |
 | `fixtures` | 2 | the gate fixtures, which are 1.2 MB and 120 MB and are not tracked: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |
 | `node` | 1 | a Node.js runtime, for the npm wrapper's conformance runner: https://nodejs.org/ |
 | `go` | 1 | a Go toolchain, for the Go wrapper's conformance runner: https://go.dev/dl/ |
@@ -150,7 +150,7 @@ table.
 | `mysql` | 1 | a live MySQL server, named by `INILLUCENT_TEST_MYSQL_URL` |
 | `narrow-slots` | 1 | the narrow integer slots compiled in, which is a constant in `crates/inillucent-tree/src/leaf.rs` |
 | `network` | 1 | outbound network access, turned on by setting `INILLUCENT_NETWORK_TESTS` |
-| `nikaya` | 1 | a local checkout of the Nikaya application, which the workload file is extracted from - the extract is tracked, so this is only needed to check it for staleness |
+| `nikaya` | 1 | a local checkout of the application the replay workload is extracted from. The extract is tracked, so this is only needed to check it for staleness |
 | `openssl` | 1 | the `openssl` command, which generates the certificates the TLS suite serves |
 | `postgres` | 1 | a live PostgreSQL server, named by `INILLUCENT_TEST_POSTGRES_URL` |
 | `previous-release` | 1 | a published release's binary, downloaded and verified by `pwsh tools/build-interop-fixture.ps1 -Version <version>` into the gitignored `tools/cross/bin/releases/` |

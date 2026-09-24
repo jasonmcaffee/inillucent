@@ -137,4 +137,3 @@ its module named.
 - [`agent-skills/inillucent-migrate`](../agent-skills/inillucent-migrate/SKILL.md) — the full operator's page
 - [Getting started](getting-started.md) — running the result
 - [SQL support](sql.md) — what the destination can do with it
-- [Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md) — a real migration, including what went wrong

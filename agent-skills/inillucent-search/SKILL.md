@@ -192,8 +192,7 @@ older build refuses to open it by name.
 Measured against PostgreSQL 17 with pgvector on the same corpus and the same recall target
 (`README.md` and `inillucent-scorecard.md` carry the full table): semantic p50 **1.44 ms** against
 36.71 ms, filtered to a minority source **1.65 ms** against 45.06 ms, **no processes to run** against
-a server plus an embedding service. In production on a 598,560-chunk mailbox: recall@100 **1.000**
-against an exact scan, 27 ms p95.
+a server plus an embedding service.
 
 Before you design around a construct, ask:
 

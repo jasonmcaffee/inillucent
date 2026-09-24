@@ -8,7 +8,7 @@ They are not any more. **A loaded index leaves its vectors in the file by defaul
 back as it scores. `IndexConfig::resident_vectors = true` asks for the old behaviour.
 
 This page says what that costs, what it buys, and how to decide. Every number here was measured on
-Nikaya's mailbox — a 600,589 chunk index at 768 dimensions — rather than estimated.
+a production index of 600,589 chunks at 768 dimensions rather than estimated.
 
 ## What the two modes are
 
@@ -28,10 +28,9 @@ reordering; an equality does not.
 ## Why the default changed
 
 The vectors were being paid for by every process that opened the index, whether or not it ever ran a
-semantic search. On this box that was most of them. Nikaya's MCP transport is the clearest case: it is
-spawned once per agent session, and each copy opened its own index — most of 4 GB per session, for a
-process that usually answers two or three questions and exits. That is the reason it was configured to
-open no index at all, which meant an agent's searches ran on a different engine from the workspace's.
+semantic search. An MCP server is the clearest case: it is spawned once per agent session, and each
+copy opened its own index. That was most of 4 GB per session, for a process that usually answers two
+or three questions and exits.
 
 Serving that index peaks at 3,840 MB with the vectors resident and 2,080 MB with them filed, and the
 1,760 MB between the two is the vectors. Leaving them in the file does
@@ -43,10 +42,9 @@ fails.
 
 ## What it costs and what it buys
 
-Measured on Nikaya's corpus with the deployed configuration, which puts every search on the exhaustive
-path over all 600,589 chunks. The arms are interleaved, so drift on a shared machine falls across
-all of them rather than on one. See `docs/real-world-use-cases/nikaya-postgres-to-inillucent.md`
-for the whole measurement and the conditions it ran under.
+Measured on the same index with its deployed configuration, which puts every search on the
+exhaustive path over all 600,589 chunks. The arms are interleaved, so drift on a shared machine falls
+across all of them rather than on one.
 
 Two rounds, interleaved, the first pass of each discarded so the page cache is warm and neither arm
 is charged for the other's cold start. `k = 20` over the whole corpus. **The query is embedded before
@@ -106,10 +104,6 @@ The setting is saved with the index, like every other one in `IndexConfig`, so a
 reopens with it. An index written before this option existed opens with the vectors filed, which is
 the new default and is what the build that wrote it would do today.
 
-In Nikaya: `NIKAYA_RETRIEVAL_RESIDENT_VECTORS=1`. `GET /api/status` reports which mode is running,
-under `retrievalIndex.residentVectors`, for the same reason it reports the engine name — a latency
-number measured in one mode and read as though it were the other is a wrong number that looks right.
-
 ## What is going on underneath
 
 A filed set keeps the open file and the byte offset of its first vector. Scoring one vector is a
@@ -125,7 +119,7 @@ would need a platform primitive that positional reads do not.
 **A filed index can still be appended to.** Vectors added after the load are held on the heap until
 the index is saved, at which point they are written into the file and the next load has them filed
 like the rest. So the heap holds what has arrived since the last save, not the corpus — which is what
-lets Nikaya sync a mailbox into an index it is not holding.
+lets an application keep adding documents to an index without holding the whole corpus in memory.
 
 **A build is always resident.** A build has just produced the vectors and has nowhere else to put
 them, so `resident_vectors` describes what a *load* does. The peak memory of building an index is

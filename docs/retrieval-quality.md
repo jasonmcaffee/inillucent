@@ -128,10 +128,6 @@ them.
 number that can be placed beside a single process's. It is a shared memory segment charged to every
 backend that touches it, spread over 35 processes on this machine, with two instances running.
 
-The figure that *is* comparable is the one production produced, where the swap was actually made.
-[Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md)
-has the whole account.
-
 ## How a measurement becomes a verdict
 
 The scoring system was rebuilt, because the first one counted measurements won with anything above

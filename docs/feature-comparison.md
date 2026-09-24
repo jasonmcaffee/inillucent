@@ -18,7 +18,7 @@ them.
 | | | measured |
 |---|---|---|
 | **Faster than SQLite** | **397% faster** | 4.97x weighted over the contract's ten families, median of four consecutive 30-round runs on `main` on 2026-09-23, with both engines pinned to the performance cores. The 95% lower bound the gate actually grades on is **4.62x**, i.e. **362% faster**, against a 3.00x bound it clears on all four. Unpinned, the same gate reads 4.40x, because Windows then runs this engine on the efficiency cores and SQLite on the performance cores |
-| **Faster than pgvector** | **174% faster unfiltered, 6,169% faster filtered** | retrieval p50 0.8462 ms against 2.315, and 0.5820 ms against 36.486 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
+| **Faster than pgvector** | **174% faster unfiltered, 6,169% faster filtered** | retrieval p50 0.8462 ms against 2.315, and 0.5820 ms against 36.486 with a `source =` predicate, against the *better* of the two pgvector configurations |
 | **Less CPU** | **50% less CPU** | 555 ms of processor against SQLite's 1,082, same plan, one child process each. Ratio 0.500x against a 0.400x bar, missed on all four runs. It was 0.400x on 2026-09-20; the plan has since gained four correlated subquery workloads that took this engine 182 ms a round and SQLite under half a millisecond. At `52c4b5f` they take under 2 ms and the round is 367 ms against 1,102, **67% less**, on passes the gate did not grade because the machine was busy; [Performance](performance.md#measured-again-at-52c4b5f-on-2026-09-24-and-not-graded) has them |
 | **Less RAM** | **it is not less. It is 9.5% MORE** | 40.76 MiB peak resident against SQLite's 37.22, on the same 128 MiB budget. It was **102% more** before review 6, **43% more** before review 7 and **14% more** before the index build stopped going through the page pool, and the bar asks for **5% less** - so this is the one headline that is still a loss |
 | **Same features as SQLite** | **97.1% byte for byte, 98.5% of what SQLite answers, none refused** | 404 of 416 probed cases produce SQLite's exact bytes. 6 of the other 12 are vector features SQLite does not have, and 6 answer differently. [Why it is not 100%](#why-it-is-not-100) says what each is and which can ever be closed |
@@ -1385,12 +1385,6 @@ difference in index quality; it is named here so the percentages are read for wh
 **Why the resident-set row is a note rather than a percentage.** PostgreSQL's memory is not one
 number that can be put beside a single process's: it is a shared-memory segment charged to every
 backend that touches it, spread over 35 processes on this box, two instances of which are running.
-The figure that *is* comparable is the one production produced, where the swap was actually made: on
-Nikaya's 598,560-chunk mailbox inillucent holds **3.83 GB resident** and 3.1 GB
-on disk against **3,167 MB** of pgvector and GIN index deleted from a **5,849 MB** database, and the
-MCP process that used to open its own copy of the index (3,831.6 MB) now asks the server and holds
-13.2 MB. Semantic p50 there went from 80.6 ms cold / 33.7 ms warm to **4.41 ms** - **664% faster** -
-and recall@100 against an exact scan from 0.899 to **1.000**.
 
 The retrieval index's resident set is the one cost on this side of the project that nothing has tried
 to reduce; it is item 22 of [What is still missing](#what-is-still-missing).

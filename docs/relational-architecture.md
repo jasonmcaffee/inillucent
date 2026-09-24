@@ -158,9 +158,7 @@ last, so a page **freed and then allocated again inside the replayed range** cam
 while it was live — and the next allocation was handed a page something else already owned. It is
 silent at write time: the statement that takes the page reports success, and nothing is wrong until
 something reads a row whose value lived there. A free-map bit carries no LSN, so nothing below
-recovery can catch a wrong answer about it. This is fixed; the case study in
-[Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md)
-is where it was diagnosed.
+recovery can catch a wrong answer about it. This is fixed.
 
 **A journal is not gone until the directory says so.** This one corrupted a database that had
 already committed cleanly, and it was found by pointing the old engine's crash campaigns at this one

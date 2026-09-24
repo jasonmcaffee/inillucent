@@ -307,8 +307,7 @@ question and a necessary one — see [embed-check](#embed-check).
 
 ### A model that has no ONNX export
 
-Not every model can be run this way, and the application this engine was built for is the example.
-Nikaya embeds with `nomic-embed-text-v2-moe`, whose Hugging Face repository publishes safetensors and
+Not every model can be run this way. `nomic-embed-text-v2-moe` is an example: its Hugging Face repository publishes safetensors and
 a sentencepiece tokenizer and **no `onnx/` directory at all** — it is a mixture of experts, which is
 the class hardest to export. So its `model.json` says `"backend": "llama_cpp"`, and that is what
 decides how it is run rather than a flag somebody has to keep in step with the model. A model with no

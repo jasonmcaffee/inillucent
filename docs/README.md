@@ -68,9 +68,3 @@ measurements so the card can be rendered or judged again without repaying the ru
 
 `invariants/layering.toml` is the dependency contract a test enforces. It is a data file rather than
 prose; [Dependency policy](dependency-policy.md) explains what it says.
-
-## Case studies
-
-| page | what it covers |
-|---|---|
-| [Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md) | 598,560 passages moved off PostgreSQL and pgvector, what got faster, the six query shapes that go quadratic here, and two recovery failures — both since fixed, and kept because how they were diagnosed is the part worth having |
