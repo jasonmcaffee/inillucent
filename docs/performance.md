@@ -176,7 +176,9 @@ and [`read.join`'s bar under the per round statistic](#readjoins-bar-under-the-p
 has the decision to keep the bar at 3.00x, with what the family reads on five builds back to
 task-1819. `join.range` is still slower than SQLite, and task-2086 found it lost 26% of this
 engine's time since task-1833; [Why `read.join` misses its 3.00x bar, and when it last met
-it](#why-readjoin-misses-its-300x-bar-and-when-it-last-met-it) has that history.
+it](#why-readjoin-misses-its-300x-bar-and-when-it-last-met-it) has that history, and [Where the
+rest of `join.range`'s time went](#where-the-rest-of-joinranges-time-went-57e87b0-to-head-task-2099)
+names the commits.
 
 A join-only run reads the family much higher - 6.46x, 6.26x, 6.14x and 5.60x, with lower bounds of
 4.11x, 4.00x, 4.02x and 3.67x, when the gate was given `--families read.join` on 2026-09-15 - and
@@ -619,13 +621,103 @@ every workload's digest agreeing with SQLite's on all eight passes:
 | `read.join` family (the same passes) | 4.19x [4.13x, 4.25x] | 4.67x [4.61x, 4.73x] |
 
 `join.range` is 2.04 to 2.55 ms faster in every adjacent pair, against a 0.5 ms threshold set before
-the passes ran. That is more than the 1.2 ms `a8f45b1`'s read code cost. The likely reason, which was not
-measured separately, is that the code since then calls `column` more often per probe: the index
-nested loop now lends the leaf's mini-columns downstream, one `column` call per inner column, rather
-than copying values out of them. `join.range` is at 0.92x after it, still slower than
-SQLite, and 3.9 ms slower than it was at `57e87b0`; the remaining steps in the table above are not
-explained. `range.lookaside` is faster than SQLite for the first time on this plan.
+the passes ran. That is more than the 1.2 ms `a8f45b1`'s read code cost. This paragraph used to
+give a reason that had not been measured, that later code calls `column` more often per probe.
+task-2099 counted the calls and it is not true: one `join.selective` and one `join.range` make 512
+`column` calls at every build from `566c688` to HEAD. What changed is what each call cost, which is
+in the next section. `join.range` is at 0.92x after it, still slower than SQLite, and 3.9 ms slower
+than it was at `57e87b0`; the next section accounts for the rest. `range.lookaside` is faster than
+SQLite for the first time on this plan.
 Every output is in `_agent_output/task-2091-join-range/` in the main checkout.
+
+#### Where the rest of `join.range`'s time went, `57e87b0` to HEAD (task-2099)
+
+task-2099 walked the whole history again with task-2091's change applied, because a build without
+it pays the old four lookups in `LeafRef::column` and a build with it does not. Measured with the
+change on one side only, a step appears wherever the change landed rather than where the time went.
+
+**How.** `inillucent-readgate`, medium fixture, 30 rounds, one pass per build per sweep, pinned from
+outside to `0xC03C03` with the SQLite child's mask read back as `0xC03C03` on every pass. 83 builds
+in two quiet windows on 2026-09-24: 108 passes from 03:12 to 03:54Z and 101 from 06:06 to 06:44Z,
+each build once forward and once reversed. The change was applied as `column-once.patch` from
+`f9e2374` on and as the same single read of the entry, by text replacement, to the older readers
+(`apply-fix.js` in the evidence folder). A build called "fixed" below has it. A pass counts only if
+SQLite's arm read 26.5 ms or less in it. That rule was set after window 1's passes 19 to 30 read
+26.6 to 32.1 ms on SQLite's arm while everything else read 24.7 to 26.5, and it refused 28 of 108
+passes in window 1 and 18 of 101 in window 2. Window 2 was the noisier of the two, so its figures
+are also given as this engine's time over SQLite's in the same pass, which the gate's interleaving
+keeps comparable under load. Both windows ran with D: nearly full; every pass read and wrote only on
+C:.
+
+**The whole span, fixed at every build, in milliseconds** (window 1 means unless marked):
+
+| from | to | step | where |
+|---|---|---|---|
+| `57e87b0` 22.73 | `b0ba286` 22.71 | 0 | |
+| `b0ba286` 22.71 | `ea03335` 23.76 | **+1.05** | spread over `34e026e` and `9d3d84d`, not resolved |
+| `59ccf91` 23.88 | `71d014a` 24.44 | **+0.56** | between `c401bb2` and `71d014a` |
+| `566c688` 24.06 | `a8f45b1` 26.21 | **+2.15** | `a8f45b1` itself (window 2, reverse sweep) |
+| `a8f45b1` | `a07036b` 26.58 | about 0 | |
+| `a07036b` 26.58 | `dcc65f2` 26.26 | -0.32 | |
+| `5353eb4` 26.43 | `d389021` 27.30 | **+0.87** | `6f84ce6` |
+| `d389021` 27.30 | HEAD 27.17 | -0.13 | |
+
+HEAD (`01f37bb`) read 27.17 ms tonight against 22.73 for `57e87b0` fixed. The box read about 3%
+slower than on task-2091's night, so these figures are comparable with each other and not with the
+tables above.
+
+**`dcc65f2` cost `column` calls that cost more, not more `column` calls, and HEAD does not pay
+them.** Without the change, `a07036b` read 26.95 ms and `dcc65f2` 28.37, +1.42. With it, 26.58 and
+26.26. What the change saves grew from 0.37 ms to 2.11 ms a round. A round runs `join.range` 500
+times with at most 512 `column` calls each, so that is at least 1.4 ns a call at `a07036b` and at
+least 8 ns at `dcc65f2`. The number of calls did not move: a build with a counter in `column`, run with
+`--families read.join --rounds 1 --repeat N`, makes 512 calls per `join.selective` and `join.range`
+pair at `566c688`, `59ccf91`, `71d014a`, `a07036b`, `dcc65f2`, `5353eb4`, `d389021` and HEAD alike.
+The same code became more expensive to call between those two commits, which is what a change in how
+`column` is compiled and inlined looks like. task-2091's change removes it, so nothing is left in HEAD.
+
+**`d389021`'s step is `6f84ce6`, and it is still in HEAD.** The change saves the same amount before
+and after the step: 2.09 ms at `5353eb4` and 2.13 at `d389021`. With the change at every build of
+the 21 that touch the engine between `5353eb4` and `d389021`, the one step over 0.5 ms in both
+sweeps is from `6833582` to `6f84ce6`: 26.38 to 27.07 ms reversed, and 27.37 to 28.81 forward. As a
+ratio to SQLite's arm it is 1.013 to 1.072, and every build after it stays there. `6f84ce6` is
+task-2083, "an index seek converts its key the way SQLite does". It fixed four wrong answers, and it
+put more work on the path every probe of an index nested loop takes: the probe key goes through the
+comparison's affinity rather than a `CAST`, each key position asks whether it is unconverted, and the
+seek checks the key and its bounds for NULL before it searches. That is about 0.7 to 1.4 ms a round,
+7 to 14 ns a probe over the 100,500 probes a round makes. Nothing measured says which of those it
+is.
+
+**`a8f45b1`'s step is still about 2.2 ms with the change applied at both ends.** task-2091 found the
+step made of about 1.1 ms of `panic = "abort"` code generation and about 1.2 ms of read code, and
+measured the abort part at nothing at HEAD. With the lookup removed from both builds, what is left of
+the read code is the `base == 0` test in every integer read, the width match in every heap slot read
+and the wider `Vector`. In window 2 the step is 24.06 to 26.21 ms
+reversed; the forward pass of `566c688` was refused, and as a ratio to SQLite's arm the step is
+0.940 to 1.043 over both sweeps. The `566c688..a07036b` walk, fixed at a build every 19 commits,
+found no other step: no adjacent pair after `a8f45b1` moved 0.5 ms in both sweeps. Its builds read
+from about 0.8 ms below `a8f45b1` (`03fdb42`, `4e8a78f`) to 0.9 ms above it (`a07036b` reversed), so
+this walk cannot say whether the abort part went away later and something else came in, or neither.
+
+**The two early steps.** `b0ba286` to `ea03335` is +1.05 ms fixed and +1.29 unfixed, so it is not
+`column`. Over four passes each, `356ef19` reads 22.99 to 23.14, `34e026e` 23.00 to 23.61,
+`9d3d84d` 23.64 to 24.16 and `d5ea139` 23.61 to 24.34, so about 0.7 ms of it is spread over
+`34e026e` ("a shadow read copies the row once rather than twice") and `9d3d84d` ("a wide value is
+spilled, not repacked around") and neither holds it alone. `59ccf91` to `71d014a` is +0.56 ms fixed;
+window 2 put `c401bb2` to `71d014a` at +0.35 and +0.54 fixed, and the change saves about the same
+at both, so this step is not `column` either, which corrects what window 1 suggested. `71d014a` made
+the leaf search's three comparisons check a descending direction. Built without that check it reads
+24.96 and 24.95 ms against 24.93 and 24.60 with it, so the check costs nothing. The three commits
+between `c401bb2` and `71d014a` (`6e19c0b`, `81855a7`, `0f24df5`) do not compile at their own
+commit: `inillucent-vm` has a type error in each, so the step cannot be placed more finely than
+those four commits. `81855a7` and `0f24df5` change `inillucent-pool`'s `pool.rs` for the rollback
+journal and file locking, which is on every page fetch.
+
+**So of HEAD's 4.4 ms over `57e87b0` tonight**, about 2.2 ms is `a8f45b1`, about 0.9 ms is
+`6f84ce6`, about 1.05 ms is the two task-1833 commits and about 0.5 ms is `c401bb2..71d014a`. The
+smaller steps between them add or remove a few tenths each. Every output, the scripts that rebuild each binary and
+the decision rules written before each window are in `_agent_output/task-2099-join-range/` in the
+main checkout.
 
 ### How a family's interval is computed (task-2093)
 

@@ -793,3 +793,19 @@ they are touching do not collide; two that have not, do.
   admitting two writers. Send a `SELECT '<marker>'` after the statements and read the shell's output
   until it appears: `held_after` in `process_concurrency.rs` and `Fed::until` in `busy_timeout.rs`
   both do this. A `BEGIN` alone holds nothing, so the marker goes after the first write. (task-2090)
+- **Timing an old build of a gate means applying `column-once.patch` to it, or the step you find is
+  where that change landed.** Every build before `3acd7ac` pays four directory lookups per
+  `LeafRef::column` call, and the cost of those lookups moved by a factor of about six between
+  `a07036b` and `dcc65f2` without the number of calls moving. So a walk across that span with the
+  change on one end only reports a step that is the compiler's, not the commit's.
+  `_agent_output/task-2099-join-range/apply-fix.js` makes the same change on the three older shapes
+  of the leaf reader, and its `count` variant counts `column` calls. (task-2099)
+- **A gate binary looks for `sqlite-bench` under the worktree it was compiled in, not beside
+  itself.** Remove or move that worktree and every binary built there prints "sqlite-bench is not
+  built" and exits in a second, while a gate built elsewhere keeps working. Keep the build tree's
+  `.sqlite-ref` junction in place for as long as you run its binaries. (task-2099)
+- **Seven first-parent commits from 2026-09-07 do not compile**: `e1a245b`, `52d68f0`, `21efbf8`,
+  `6e19c0b`, `81855a7`, `0f24df5` and `889c1ff`. The two whose errors were read fail in
+  `inillucent-vm`: `e1a245b` on a missing `like_case_sensitive` in `builtin::Context`, `6e19c0b` on
+  `StaticCatalog` against `CatalogSnapshot` in `machine.rs`. A bisect has to step over them.
+  (task-2099)
