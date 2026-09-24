@@ -699,7 +699,7 @@ function Get-Routes {
                 $null
             }
             Run    = { & (Join-Path $script:Packaging 'cargo-publish.ps1') -Execute -Confirmed }
-            Verify = { Test-Registry -Url "https://crates.io/api/v1/crates/inillucent" -Version $Version }
+            Verify = { Test-Registry -Url "https://crates.io/api/v1/crates/inillucent-cli" -Version $Version }
         },
         @{
             Name   = 'npm'

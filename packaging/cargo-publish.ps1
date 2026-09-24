@@ -85,14 +85,42 @@ if (-not $Confirmed) {
 # **crates.io rate limits NEW crates, and this workspace is 25 of them (task-1995).** A new account
 # gets a small burst and then one new crate every ten minutes, so `cargo publish --workspace` stops
 # with `429 Too Many Requests ... Please try again after <date>` having published a handful. Crates
-# that went up stay up and cargo skips them on the next run, so the whole job is "run it again when
-# the clock says you may" - which is a person sitting with a timer for several hours, and the kind
+# that went up stay up, so the whole job is "run it again when the clock says you may" - which is a person sitting with a timer for several hours, and the kind
 # of thing that gets abandoned half done. The refusal carries the exact time to come back, so this
 # reads it and waits.
+function Get-PublishedAlready {
+    <#
+    .SYNOPSIS
+        The workspace crates whose current version crates.io already has.
+
+    .DESCRIPTION
+        **`cargo publish --workspace` does not skip a version that already exists.** It stops at
+        the first one with "crate ... already exists on crates.io index", so after a rate limit
+        pause the second pass failed on the crates the first pass had published, and nothing after
+        them went up. 0.1.8 stopped that way. Each pass now leaves those crates out by name.
+    #>
+    $metadata = & cargo metadata --manifest-path (Join-Path $root 'Cargo.toml') --format-version 1 --no-deps | ConvertFrom-Json
+    foreach ($package in $metadata.packages) {
+        if ($null -ne $package.publish -and @($package.publish).Count -eq 0) { continue }
+        $url = "https://crates.io/api/v1/crates/$($package.name)/$($package.version)"
+        try {
+            $null = Invoke-RestMethod -Uri $url -Headers @{ 'User-Agent' = 'inillucent-release' }
+            $package.name
+        } catch {
+            # 404 is "not published yet", which is the case this is looking for.
+        }
+    }
+}
+
 $attempt = 0
 while ($true) {
     $attempt++
-    $output = & cargo @arguments 2>&1 | Tee-Object -Variable captured
+    $excluded = @(Get-PublishedAlready)
+    if ($excluded.Count -gt 0) {
+        Write-Host "already on crates.io at this version, so left out: $($excluded -join ', ')"
+    }
+    $pass = $arguments + @($excluded | ForEach-Object { '--exclude', $_ })
+    $output = & cargo @pass 2>&1 | Tee-Object -Variable captured
     $output | ForEach-Object { Write-Host $_ }
     if ($LASTEXITCODE -eq 0) { break }
 
