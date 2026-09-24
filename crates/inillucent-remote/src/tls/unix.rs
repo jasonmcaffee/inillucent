@@ -54,6 +54,16 @@ const SSL_VERIFY_PEER: c_int = 0x01;
 /// `X509_V_OK`, the one result that is not a rejection.
 const X509_V_OK: c_long = 0;
 
+/// `X509_V_ERR_HOSTNAME_MISMATCH`: the certificate is not for the DNS name.
+const X509_V_ERR_HOSTNAME_MISMATCH: c_long = 62;
+
+/// `X509_V_ERR_EMAIL_MISMATCH`: the certificate is not for the email address.
+const X509_V_ERR_EMAIL_MISMATCH: c_long = 63;
+
+/// `X509_V_ERR_IP_ADDRESS_MISMATCH`: the certificate is not for the address.
+/// The same number in OpenSSL 1.1 and 3.
+const X509_V_ERR_IP_ADDRESS_MISMATCH: c_long = 64;
+
 /// The entry points this client uses, resolved once.
 struct Library {
     /// Builds a client method for the highest protocol both ends have.
@@ -444,6 +454,19 @@ unsafe fn describe(library: &Library, result: c_long) -> String {
             .to_string_lossy()
             .into_owned(),
     };
+    // A name that does not match is the one failure with a single fix, so it is
+    // named the way the Windows build names SEC_E_WRONG_PRINCIPAL. OpenSSL's own
+    // wording for it is "IP address mismatch" when the URL gave an address,
+    // which does not say that the certificate is for some other name.
+    if matches!(
+        result,
+        X509_V_ERR_HOSTNAME_MISMATCH | X509_V_ERR_EMAIL_MISMATCH | X509_V_ERR_IP_ADDRESS_MISMATCH
+    ) {
+        return format!(
+            "it was issued for a different name than the one this migration connected to \
+             ({said}). Connect by the name on the certificate."
+        );
+    }
     format!(
         "{said}. If the server uses a private authority, name it with sslrootcert=<file>; if the \
          name is wrong, connect by the name on the certificate."

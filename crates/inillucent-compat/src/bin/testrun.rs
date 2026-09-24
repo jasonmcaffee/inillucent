@@ -128,6 +128,12 @@ struct Options {
     list_tiers: bool,
     /// Treat a missing prerequisite as a failure.
     strict: bool,
+    /// Prerequisites this machine declares it cannot have, from `--absent`.
+    ///
+    /// A suite that skipped for want of one of these is reported under its
+    /// own heading and does not make a strict run red. Every other missing
+    /// prerequisite still does.
+    absent: Vec<String>,
     /// Write the measured times back to the ledger.
     record: bool,
     /// Skip the build step, because the caller has just built.
@@ -158,6 +164,7 @@ impl Options {
             list: other.list,
             list_tiers: other.list_tiers,
             strict: other.strict,
+            absent: other.absent.clone(),
             record: other.record,
             no_build: other.no_build,
             filter: other.filter.clone(),
@@ -185,6 +192,7 @@ impl Default for Options {
             list: false,
             list_tiers: false,
             strict: false,
+            absent: Vec::new(),
             record: false,
             no_build: false,
             filter: None,
@@ -250,6 +258,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             "--list" => options.list = true,
             "--list-tiers" => options.list_tiers = true,
             "--strict" => options.strict = true,
+            "--absent" => options.absent.push(take("--absent")?),
             "--record" => options.record = true,
             "--no-build" => options.no_build = true,
             "--help" | "-h" => return Err(usage()),
@@ -282,6 +291,8 @@ fn usage() -> String {
        --list              print the selection and stop\n  \
        --list-tiers        print the tiers and stop\n  \
        --strict            fail when a selected suite's prerequisite is missing\n  \
+       --absent <name>     a prerequisite this machine cannot have: a suite that\n                      \
+       skips for it does not fail --strict; repeatable\n  \
        --record            write the measured times to tests/timings.toml\n\
      \n\
      Exit codes:\n  \
@@ -395,6 +406,7 @@ fn main() -> ExitCode {
 fn run(options: &Options) -> Result<bool, String> {
     let root = workspace_root();
     let map = Map::load(&root.join("tests/selection.toml"))?;
+    refuse_unknown_absent(&map, &options.absent)?;
 
     if options.list_tiers {
         for tier in &map.tiers {
@@ -503,7 +515,7 @@ fn run(options: &Options) -> Result<bool, String> {
     let outcomes = settle_undetermined(outcomes, &executables, options, &budgets);
     let wall = started.elapsed();
 
-    report(&outcomes, wall, &map, options.strict);
+    report(&outcomes, wall, &map, options.strict, &options.absent);
     if options.record {
         // **A ledger that could not be written is not "the run did not happen"
         // (task-2047).** The targets ran and the report above is what they
@@ -523,12 +535,42 @@ fn run(options: &Options) -> Result<bool, String> {
     // "the runner could not tell" is not evidence that anything passed. What
     // stops that being the old wrong red is the retry above: a target only stays
     // undetermined here when a second, solitary attempt could not read it either.
-    let red = outcomes.iter().any(|outcome| !outcome.verdict.is_green());
-    let hollow = options.strict && !missing_prerequisites(&outcomes, &map).is_empty();
+    //
+    // A target whose every failure is a strict skip is not red here. It is
+    // counted by `hollow` below, which is where `--absent` can excuse it; left
+    // in `red`, a skip for a prerequisite the workflow declared absent would
+    // still fail the run, and `--absent` would change the report and not the
+    // exit code.
+    let red = outcomes.iter().any(is_red);
+    let hollow = options.strict
+        && !unexcused(
+            missing_prerequisites(&outcomes, &map),
+            &map,
+            &options.absent,
+        )
+        .is_empty();
     if !red && nothing_was_graded(&outcomes) {
         return Err(graded_nothing(options, outcomes.len()));
     }
     Ok(!red && !hollow)
+}
+
+/// Reports whether a target found a defect or could not be read.
+///
+/// A target that failed only because `--strict` turned its skips into failed
+/// tests is not red: it evidenced nothing, and `missing_prerequisites` is what
+/// counts it. Everything else that is not green is red, undetermined included.
+///
+/// @param outcome - the target that ran
+fn is_red(outcome: &Outcome) -> bool {
+    if outcome.verdict.is_green() {
+        return false;
+    }
+    !(matches!(outcome.verdict, Verdict::Failed)
+        && inillucent_compat::differential::every_failure_is_a_strict_skip(
+            &outcome.output,
+            failed_count(&outcome.output),
+        ))
 }
 
 /// Returns whether every target that ran counted no test.
@@ -1670,6 +1712,89 @@ fn missing_prerequisites<'run>(
     hollow
 }
 
+/// Refuses an `--absent` name that no row in the map declares.
+///
+/// A misspelt name would otherwise excuse nothing and read, in the workflow
+/// that passes it, as if it excused something. Refusing it is an `Err`, which
+/// is exit code 2: the run did not happen.
+///
+/// @param map - the selection map, whose rows name every prerequisite
+/// @param absent - what `--absent` named
+fn refuse_unknown_absent(map: &Map, absent: &[String]) -> Result<(), String> {
+    let known = map.prerequisites();
+    let unknown: Vec<&String> = absent
+        .iter()
+        .filter(|name| !known.contains(*name))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "`--absent` names {} that no row of tests/selection.toml requires. The names it \
+         accepts are: {}",
+        unknown
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        known.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+/// Keeps the suites that went without a prerequisite this machine did not
+/// declare absent.
+///
+/// **This is what `--absent` changes, and all it changes.** A GitHub runner has
+/// no checkout of the private Nikaya repository and no PostgreSQL on Windows,
+/// so under `--strict` alone the job could never be green, and a job that is
+/// always red is read as noise. Naming those prerequisites in the workflow keeps
+/// them visible - they are printed under their own heading on every run - while
+/// a prerequisite the workflow forgot to provide still fails it.
+///
+/// @param hollow - every suite that evidenced nothing, from `missing_prerequisites`
+/// @param map - the selection map, for what each target requires
+/// @param absent - what `--absent` named
+fn unexcused<'run>(
+    hollow: Vec<(&'run Outcome, Vec<String>)>,
+    map: &Map,
+    absent: &[String],
+) -> Vec<(&'run Outcome, Vec<String>)> {
+    hollow
+        .into_iter()
+        .filter(|(outcome, _)| !declared_absent(outcome, map, absent))
+        .collect()
+}
+
+/// Reports whether a suite's row requires something `--absent` named.
+///
+/// @param outcome - the suite that ran
+/// @param map - the selection map, for what the suite requires
+/// @param absent - what `--absent` named
+fn declared_absent(outcome: &Outcome, map: &Map, absent: &[String]) -> bool {
+    map.row(&outcome.target)
+        .is_some_and(|row| row.needs_any_of(absent))
+}
+
+/// Prints one line per suite that evidenced nothing, with what it lacked.
+///
+/// @param hollow - the suites, each with what it said or its `requires` row
+fn print_hollow(hollow: &[(&Outcome, Vec<String>)]) {
+    for (outcome, requires) in hollow {
+        // **"needs" only in front of a `requires` row.** Those are names of
+        // things - `postgres`, `oracle`, `shell` - and read as a need. A reason
+        // the suite printed is a whole sentence about this machine, and putting
+        // "needs" in front of one produces "needs this platform would not make a
+        // directory link" (task-1932, H10).
+        let said = requires.join(", ");
+        let lead = if said.split_whitespace().count() > 3 {
+            ""
+        } else {
+            "needs "
+        };
+        println!("  {:<44} {lead}{}", outcome.target.label(), said);
+    }
+}
+
 /// Prints what the selected suites needed, and returns how many went without.
 ///
 /// **What a fully provisioned machine gets to say (task-1969, 9).** Until the
@@ -1687,7 +1812,8 @@ fn missing_prerequisites<'run>(
 /// @param outcomes - what ran
 /// @param map - the selection map, for what each target requires
 /// @param strict - whether a missing prerequisite is a failure
-fn report_prerequisites(outcomes: &[Outcome], map: &Map, strict: bool) -> usize {
+/// @param absent - the prerequisites `--absent` declared this machine cannot have
+fn report_prerequisites(outcomes: &[Outcome], map: &Map, strict: bool, absent: &[String]) -> usize {
     let hollow = missing_prerequisites(outcomes, map);
     let declared = outcomes
         .iter()
@@ -1703,33 +1829,32 @@ fn report_prerequisites(outcomes: &[Outcome], map: &Map, strict: bool) -> usize 
             declared.saturating_sub(hollow.len())
         );
     }
-    if hollow.is_empty() {
+    let (excused, failing): (Vec<_>, Vec<_>) = hollow
+        .into_iter()
+        .partition(|(outcome, _)| declared_absent(outcome, map, absent));
+    if !excused.is_empty() {
+        println!(
+            "{} suite(s) went without a prerequisite this machine declares it cannot have \
+             (--absent {}), and do not fail the run:",
+            excused.len(),
+            absent.join(", ")
+        );
+        print_hollow(&excused);
+    }
+    if failing.is_empty() {
         return 0;
     }
     println!(
         "{} suite(s) ran without a prerequisite and evidenced nothing{}:",
-        hollow.len(),
+        failing.len(),
         if strict {
             ""
         } else {
             " (--strict makes this a failure)"
         }
     );
-    for (outcome, requires) in &hollow {
-        // **"needs" only in front of a `requires` row.** Those are names of
-        // things - `postgres`, `oracle`, `shell` - and read as a need. A reason
-        // the suite printed is a whole sentence about this machine, and putting
-        // "needs" in front of one produces "needs this platform would not make a
-        // directory link" (task-1932, H10).
-        let said = requires.join(", ");
-        let lead = if said.split_whitespace().count() > 3 {
-            ""
-        } else {
-            "needs "
-        };
-        println!("  {:<44} {lead}{}", outcome.target.label(), said);
-    }
-    hollow.len()
+    print_hollow(&failing);
+    failing.len()
 }
 
 /// Prints the summary, and every failure in full.
@@ -1738,7 +1863,8 @@ fn report_prerequisites(outcomes: &[Outcome], map: &Map, strict: bool) -> usize 
 /// @param wall - how long the whole run took
 /// @param map - the selection map
 /// @param strict - whether a missing prerequisite is a failure
-fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
+/// @param absent - the prerequisites `--absent` declared this machine cannot have
+fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool, absent: &[String]) {
     // **A suite whose every failure is a strict skip is not a failure
     // (task-1932, H10).** It is listed under "evidenced nothing" below, with
     // what it was missing, because that is what it did: `--strict` turns a skip
@@ -1819,7 +1945,7 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
         );
     }
 
-    let hollow = report_prerequisites(outcomes, map, strict);
+    let hollow = report_prerequisites(outcomes, map, strict, absent);
 
     let settled: Vec<&Outcome> = outcomes
         .iter()

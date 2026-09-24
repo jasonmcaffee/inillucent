@@ -2198,7 +2198,11 @@ INSERT INTO t VALUES(1,'x');
         // matches - which `compat/limits.toml` names as authoritative. No value
         // closes this row: whichever artifact is agreed with, the other one
         // disagrees.
-        expect: Differs,
+        //
+        // The Linux shell in `sqlite-tools-linux-x64` is built with the default
+        // of 1000, so there the reference and this engine print the same
+        // thirteen lines. The first Linux run of the suite found it.
+        expect: if cfg!(windows) { Differs } else { Agrees },
     },
     Case {
         name: "explain.bytecode",
@@ -2598,9 +2602,14 @@ fn the_table_still_declares_the_seven_measured_differences() {
         .iter()
         .filter(|case| matches!(case.expect, Differs))
         .count();
+    // `shell.limit.trigger.depth` differs only from the Windows reference
+    // shell, which was built with a lower trigger depth than the Linux one, so
+    // off Windows the same table declares one difference fewer.
+    let measured = if cfg!(windows) { 7 } else { 6 };
     assert!(
-        declared >= 7,
-        "this file declares {declared} differences and docs/feature-comparison.md records \
-         seven, so the table has lost rows rather than the engine having closed them"
+        declared >= measured,
+        "this file declares {declared} differences and {measured} were measured on this \
+         platform (docs/feature-comparison.md records the seven measured on Windows), so the \
+         table has lost rows rather than the engine having closed them"
     );
 }

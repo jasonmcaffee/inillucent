@@ -348,6 +348,35 @@ impl Map {
     pub fn tiers_used(&self) -> BTreeSet<String> {
         self.rows.iter().map(|row| row.tier.clone()).collect()
     }
+
+    /// Returns every prerequisite name the rows declare in `requires`.
+    ///
+    /// This is the full list `inillucent-testrun --absent` accepts. A name
+    /// outside it is refused, so a misspelt `--absent postgress` cannot excuse
+    /// nothing while looking as if it excused something.
+    pub fn prerequisites(&self) -> BTreeSet<String> {
+        self.rows
+            .iter()
+            .flat_map(|row| row.requires.iter().cloned())
+            .collect()
+    }
+}
+
+impl Row {
+    /// Reports whether this row requires one of the prerequisites a machine
+    /// has said it does not have.
+    ///
+    /// The match is on the row, not on the suite's own skip sentence, because
+    /// the sentence is prose and the row is a name. The cost is that a suite
+    /// requiring two things, one of them declared absent, is excused whichever
+    /// of the two it was missing. That is why `--absent` is for things a
+    /// machine cannot have, such as a private checkout, and not for things a
+    /// setup step forgot to build.
+    ///
+    /// @param absent - the prerequisites declared absent with `--absent`
+    pub fn needs_any_of(&self, absent: &[String]) -> bool {
+        self.requires.iter().any(|name| absent.contains(name))
+    }
 }
 
 /// Finds every test target `cargo test` would build, by walking the repository.

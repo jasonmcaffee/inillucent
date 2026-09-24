@@ -52,6 +52,9 @@ env:
   CARGO_TERM_COLOR: always
   # A backtrace on the one test that failed, rather than a name and nothing.
   RUST_BACKTRACE: 1
+  # A runner has a network, so the HTTP client's test fetches the real files
+  # the installer fetches instead of skipping.
+  INILLUCENT_NETWORK_TESTS: 1
 
 jobs:
   suite:
@@ -65,8 +68,25 @@ jobs:
       # moment Windows went red, and "does it work on Linux" is the question
       # this job was added to answer.
       fail-fast: false
+      # `absent` is the prerequisites a runner cannot have, passed to the suite
+      # as `--absent`. A suite that skips for one of them is printed under its
+      # own heading and does not fail the job; a suite that skips for anything
+      # else still does. Each name is here for a reason:
+      #
+      #   onnx              the embedding models are hundreds of megabytes and
+      #                     are fetched by `inillucent setup-embeddings`, which
+      #                     no step here runs
+      #   nikaya            the Nikaya checkout is a private repository
+      #   previous-release  the released binaries `build-interop-fixture.ps1`
+      #                     downloads are not fetched here
+      #   postgres, mysql   Windows only: a Windows runner cannot start the
+      #                     Linux containers the Linux job uses for them
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            absent: --absent onnx --absent nikaya --absent previous-release --absent postgres --absent mysql
+          - os: ubuntu-latest
+            absent: --absent onnx --absent nikaya --absent previous-release
 
     steps:
       - uses: actions/checkout@v4
@@ -115,6 +135,37 @@ jobs:
         shell: bash
         run: bash tools/build-gate-fixtures.sh
 
+      # The two live migration suites need a running server loaded from their
+      # fixture file. `docker run` rather than a `services:` block, because a
+      # `services:` block fails the Windows job outright. The clients are the
+      # ones inside each image, so the fixture rows are written by `psql` and
+      # `mysql` themselves, which is what makes them the oracle.
+      - name: PostgreSQL and MySQL for the live migration suites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          docker run -d --name pg -p 5432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
+            -v "$PWD/crates/inillucent-remote/tests/fixtures:/fixtures:ro" postgres:17
+          docker run -d --name my -p 3306:3306 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes \
+            -v "$PWD/crates/inillucent-remote/tests/fixtures:/fixtures:ro" mysql:8.4
+          for i in $(seq 1 60); do
+            docker exec pg pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break
+            sleep 2
+          done
+          for i in $(seq 1 90); do
+            docker exec my mysql -h 127.0.0.1 -u root -e "SELECT 1" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec pg psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres \
+            -c "CREATE DATABASE inillucent_migrate_test"
+          docker exec pg psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres \
+            -d inillucent_migrate_test -f /fixtures/postgres.sql
+          docker exec my mysql -h 127.0.0.1 -u root \
+            -e "CREATE DATABASE inillucent_migrate_test"
+          docker exec my sh -c "mysql -h 127.0.0.1 -u root inillucent_migrate_test < /fixtures/mysql.sql"
+          echo "INILLUCENT_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/inillucent_migrate_test" >> "$GITHUB_ENV"
+          echo "INILLUCENT_TEST_MYSQL_URL=mysql://root@127.0.0.1:3306/inillucent_migrate_test" >> "$GITHUB_ENV"
+
       - name: cargo fmt
         run: cargo fmt --all --check
 
@@ -154,7 +205,7 @@ jobs:
           else
             RUNNER=target/debug/inillucent-testrun
           fi
-          "$RUNNER" --strict
+          "$RUNNER" --strict ${{ matrix.absent }}
           code=$?
           echo "inillucent-testrun exited $code"
           case "$code" in

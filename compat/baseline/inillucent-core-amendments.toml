@@ -158,9 +158,9 @@ sha256 = "0c6c4ace63ffcb8104de467d93ae011623a00d0418c5bb2dcdd2a3cd97a49944"
 
 [[amendment]]
 path = "crates/inillucent-core/src/bm25.rs"
-ticket = "task-2068"
-reason = "the postings are flat arrays with an overflow map: one byte array for the terms, one for the postings, a start per term, and a binary search instead of a hash. 306.2 MiB resident to 209.4 for 211.1 on disk on a 185,078 chunk index."
-sha256 = "5385963e4c128250c4694a9ca371df1318afa2f5eeeb400c9bc6d53e5112b660"
+ticket = "task-2117"
+reason = "clippy cleanup for the CI lint step: three explicit derefs that auto-deref already does are removed. No behaviour change."
+sha256 = "cb468c6f04b6f019644e4817162f075d49f9b6731fab15de049efa22bcf49a7d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/distance.rs"
@@ -248,9 +248,9 @@ sha256 = "17e49794567b07924cf7ac27d97d8cea6b3e5725de7cec2ab2cf4489ced3f47f"
 
 [[amendment]]
 path = "crates/inillucent-core/src/store.rs"
-ticket = "task-2068"
-reason = "the chunk text is a TextArena that a load can leave in store.bin and read a range at a time. 156.0 MiB of a 580.2 MiB open. The file format is unchanged."
-sha256 = "10053a29c722596ec38eb5ce45ae0f7027ca007e5a07f203723fbbcc5de9a9de"
+ticket = "task-2117"
+reason = "clippy cleanup for the CI lint step, in two tests only: a reversed range is written as a Range struct, and a Store is built with struct update syntax instead of assigned after Default. No behaviour change."
+sha256 = "051dbfce493d210cd6a784bc5a75377610ab4df2beba0e63c5d7023ad0519ec9"
 
 [[amendment]]
 path = "crates/inillucent-core/src/tokenize.rs"
