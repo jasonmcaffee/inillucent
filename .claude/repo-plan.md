@@ -809,3 +809,10 @@ they are touching do not collide; two that have not, do.
   `inillucent-vm`: `e1a245b` on a missing `like_case_sensitive` in `builtin::Context`, `6e19c0b` on
   `StaticCatalog` against `CatalogSnapshot` in `machine.rs`. A bisect has to step over them.
   (task-2099)
+- **`git checkout -- <file>` on a foundation crate costs a full rebuild even when the content did
+  not change.** Cargo reads the mtime, and checkout rewrites the file. Measured: an edit to
+  `crates/inillucent-base/src/lib.rs` recompiled 28 crates and relinked 280 test binaries in 91 s,
+  and the checkout that reverted it cost the same 92 s again. A rebuild with nothing edited is 0.4 s,
+  and an edit to `inillucent-cli/src/main.rs` is 1.9 s. There is no cheap revert, because any
+  write moves the mtime, so do not probe a foundation crate to see what rebuilds. Where the time
+  of a ticket goes, with the numbers: `tasks/task-2114-inillucent-build-times-tdd.md`. (task-2114)
