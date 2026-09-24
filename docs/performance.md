@@ -822,6 +822,63 @@ component that stays the same through a pass and changes between passes.
 5. **The first pass of this window was not slow** (SQLite +1.25% against a range of 0.36% to
    1.39%), so the first pass slowdown in task-2093's window did not repeat here.
 
+**Five more passes, 2026-09-24 05:19:03 to 05:33:10Z, on a machine that was not quiet.** This second
+experiment was meant to test whether the box stays slow for minutes after heavy work stops. It ran
+one pass meant as the settled baseline, a write load (20 copies of the large fixture, 1.74 GB), two
+passes, a build load (a cold release build of the full gate, 80 seconds), and two passes. The
+baseline it recorded shows the box was busy before any load: CPU load was 37% at the start and
+after the write load, and 16% after the build load. The gate uses about one core in 24, so other
+processes were using up to a third of the machine. Memory Compression held 12.7 GB. **So the
+question it was built for is unanswered.** No pass met the settled test written down before it ran
+(three consecutive rolling values of the SQLite index at or below 2.36%), and the loads barely show
+on top of a machine that was recovering on its own. What it showed instead is below.
+
+| pass | SQLite arm | this engine's arm | `read.join` | `read.analytical` | `read.range` | `read.point` |
+|---|---|---|---|---|---|---|
+| settled window, six default passes | reference | reference | 4.19 to 4.27 | 10.62 to 10.77 | 4.96 to 5.07 | 28.97 to 30.15 |
+| 1, meant as the baseline | +20.0% | +10.6% | **4.57** | **11.30** | **5.44** | **32.16** |
+| 2, after the write load | +9.9% | +5.8% | **4.42** | **11.20** | **5.32** | 29.42 |
+| 3 | +7.7% | +5.9% | **4.38** | **11.10** | 5.06 | 28.99 |
+| 4, after the build load | +8.5% | +5.5% | **4.34** | **11.12** | **5.14** | 29.16 |
+| 5 | +8.1% | +4.8% | **4.48** | **11.14** | **5.12** | 29.37 |
+
+Each arm's figure is the geometric mean over the 12 read workloads of that pass's median time, over
+the median time of the six default passes of the settled window. Bold is outside the settled
+window's range. **Every bold value is above the range.**
+
+**A busy machine slows SQLite's arm about twice as much as this engine's, so it makes this engine
+look faster.** That is the same signature as the first pass of task-2093's window, which put
+`read.join` at 4.37x with SQLite's arm 5% to 7% slow. **Why SQLite's arm suffers more is not
+established.** It is not the number of page faults: SQLite's child takes 11,634 to 11,640 a round on
+every pass, and this engine's arm takes about 147,400. One difference the passes point at is that
+SQLite's arm is a new process each round and fills its cache from its file while a workload is timed,
+where this engine's pool is warmed before the clock starts. Nothing here tested that.
+
+### How a verdict should be taken (task-2095)
+
+1. **Not from several consecutive passes.** What moved the ratios between passes was the state of the
+   machine, and consecutive passes share it. The five busy passes above were all biased the same way,
+   and so were the first four passes of task-2093's window. The mean of several such passes carries
+   the same bias, with a narrower interval that makes it look more certain.
+2. **From one pass, taken on a machine the pass itself shows was quiet.** SQLite's arm is the same
+   program in every pass, so its speed against a recorded quiet reference is a measurement of the
+   machine. Over the twelve quiet passes that index was at most 1.39% for a whole pass. On every busy
+   pass seen, in either window, it was at least 4%. A pass above 3% should not be graded. The gates
+   do not do this yet. It is a change to how they decide, so it is recorded as a known bug of the
+   gates, not made here.
+3. **On a quiet machine, one pass is enough for every verdict today.** What still differs between
+   quiet passes is this engine's own process, and it is small. The between pass standard deviation
+   of the family log ratio is 0.3% to 1.1% for the read families, 1.35% for `extension` and 3.2% for
+   `large.values`. The family closest to its bar is `extension`, at 1.68x to 1.79x against 1.50x,
+   which is more than eight of those standard deviations away.
+4. **No bound is widened and no bar moves.** Widening the interval to cover a busy machine would
+   hide the bias, because the bias is upward and a wider interval around an inflated centre can still
+   pass. `--engine-child` stays a diagnostic.
+
+`extension` reading 1.54x at its lowest in task-2093's window, which made this ticket, came from the
+same kind of pass. On the quiet window its lowest per round bound in six default passes was 1.58x
+and its centre was 1.68x to 1.79x.
+
 ### `read.join`'s bar under the per round statistic
 
 **The bar stays at 3.00x.** Under the per round statistic, pinned, the family's lower bound on five

@@ -22,7 +22,11 @@ measures how far apart a family's workloads are. Graded one round at a time, fou
 `main` read `read.join`'s lower bound at 4.27x, 4.08x, 4.18x and 4.19x, so **`read.join` meets its
 3.00x bar**, and the bar stays at 3.00x; every build since task-1819 meets it that way.
 `extension` reads 1.54x, 1.67x, 1.60x and 1.54x, so it meets its bar on all four passes, by 2.7% at
-the narrowest, which one pass does not settle (task-2095).
+the narrowest. task-2095 found that the passes that moved it were taken on a busy machine, which
+inflates every ratio, and on a quiet machine `extension`'s lowest bound in six passes was 1.58x.
+A verdict should come from one pass on a machine the pass shows was quiet, not from several passes;
+the gates do not check that yet
+([Performance](performance.md#how-a-verdict-should-be-taken-task-2095)).
 [Performance](performance.md#how-a-familys-interval-is-computed-task-2093) has both statistics for
 every family. `read.join` stays on this list for `join.range`, which is still slower than SQLite.
 

@@ -683,6 +683,26 @@ they are touching do not collide; two that have not, do.
   width; `read.join` moved 5.2% against a half width of 1.5%. A family within about 5% of its bar
   needs several passes before its verdict means anything. `extension` is that family now. (task-2093,
   follow up task-2095)
+- **Before reading a family's move between passes as the engine, read the SQLite arm's.** It is the
+  same `sqlite-bench.exe` in every pass whatever build is under test, so its time over the read
+  workloads says how fast the box was. In task-2093's window it ran 5% to 15% slow on some passes,
+  and those are the passes that moved the ratios. In task-2095's settled window it stayed within
+  1.4% for 29 minutes. With other processes using 16% to 37% of the CPU it was 8% to 20% slow while
+  this engine's arm was 5% to 11% slow, so **a busy machine inflates every ratio**, `read.join` to
+  4.57x against 4.19x to 4.27x quiet. Several passes in a row on a busy machine are all inflated
+  together, so averaging them does not help; check the SQLite arm instead. `inillucent-fullgate --samples <file>` writes every round's raw times for both
+  arms with timestamps, and `_agent_output/task-2095-between-pass/rolling.js` (main checkout) turns a
+  pass's samples into the SQLite arm's speed index per round. (task-2095)
+- **`inillucent-fullgate --engine-child` is a diagnostic, not a better gate.** It runs this engine's
+  arm in a new process each round, as the SQLite arm always runs. It removed most of what our arm
+  carries from pass to pass in one process (the short read workloads, `point.miss` 6.4% to 1.3%),
+  but it also times the first touch of every page, which put `schema` under the floor and made
+  `extension` miss its bar on five of six passes. Use it to ask whether a move comes from the gate's
+  process, and never to take a published figure. (task-2095)
+- **D: filled up on 2026-09-24 from worktrees that were never retired.** Fifteen finished tickets'
+  target directories held 1.64 TB under `D:/agent-worktrees/cargo-target`, task-2068's alone 295 GB.
+  A build failing with os error 112 means that again; check `Get-PSDrive D` before blaming the
+  build, and a build can go to C: through `CARGO_TARGET_DIR`. (task-2095)
 - **To print two statistics from the same samples, build twice, not run twice.** task-2093 built
   `main` with an extra line after each family line, copied the binaries to
   `_agent_output/task-2093-family-statistic/bin/both/` (main checkout), then restored the sources by
