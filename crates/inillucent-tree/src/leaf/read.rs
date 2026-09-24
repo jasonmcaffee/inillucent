@@ -230,14 +230,59 @@ impl<'p> LeafRef<'p> {
             descending: false,
         })
     }
+    /// Returns one column's directory entry, eight or sixteen bytes.
+    ///
+    /// @param index - the column's position in the directory
+    fn directory_entry(&self, index: usize) -> DbResult<&'p [u8]> {
+        if index >= self.column_count {
+            return Err(misuse(format!("column {index} does not exist")));
+        }
+        let entry = leaf_header::DIRECTORY
+            .checked_add(index.saturating_mul(self.entry_size))
+            .ok_or_else(|| corrupt("directory index overflows"))?;
+        self.page
+            .get(entry..entry.saturating_add(self.entry_size))
+            .ok_or_else(|| corrupt("directory entry runs past the page"))
+    }
     /// Returns a view over one mini-column.
+    ///
+    /// **The directory entry is read once, as one slice.** `column` runs on
+    /// every probe - once for each key column the search compares and once for
+    /// each inner column an index nested loop projects - and it used to ask
+    /// `spec`, `column_width`, `column_base` and `column_offset` in turn, each
+    /// of which located the same entry again, bounds checked it again, and
+    /// between them parsed the type byte twice. `column_base`, the fourth
+    /// lookup, is what task-1870's follow-ups added here. task-2091 measured
+    /// reading the entry once, pinned, on the read gate: `join.range` 28.36 ms
+    /// to 26.11, `range.lookaside` 28.3 to 24.5, and PointProbe 345 ns to 307,
+    /// with every workload's digest still agreeing with SQLite's. Every answer
+    /// is the same as the four calls give, including which error a bad entry
+    /// produces; `a_column_reads_its_entry_the_way_the_accessors_do` checks it.
     ///
     /// @param index - the column's position in the directory
     pub fn column(&self, index: usize) -> DbResult<MiniColumn<'p>> {
-        let spec = self.spec(index)?;
-        let width = self.column_width(index)?;
-        let base = self.column_base(index)?;
-        let start = self.column_offset(index)?;
+        let entry = self.directory_entry(index)?;
+        let head: [u8; 8] = entry
+            .get(..8)
+            .and_then(|head| head.try_into().ok())
+            .ok_or_else(|| corrupt("directory entry runs past the page"))?;
+        let [type_byte, flags, width_low, width_high, offset_0, offset_1, offset_2, offset_3] =
+            head;
+        let physical = PhysicalType::from_code(type_byte)?;
+        let width = u16::from_le_bytes([width_low, width_high]) as usize;
+        if !physical.admits_width(width) {
+            return Err(corrupt(format!(
+                "column {index} claims a slot width of {width}"
+            )));
+        }
+        let base = match entry.get(8..16) {
+            Some(tail) => {
+                let raw: [u8; 8] = tail.try_into().unwrap_or([0; 8]);
+                u64::from_le_bytes(raw) as i64
+            }
+            None => 0,
+        };
+        let start = u32::from_le_bytes([offset_0, offset_1, offset_2, offset_3]) as usize;
         let class_len = class_bytes(self.row_count);
         let value_len = self.row_count.saturating_mul(width);
         let class = self
@@ -250,8 +295,8 @@ impl<'p> LeafRef<'p> {
             .get(values_at..values_at.saturating_add(value_len))
             .ok_or_else(|| corrupt(format!("values of column {index} run past the page")))?;
         Ok(MiniColumn {
-            physical: spec.physical,
-            flags: spec.flags,
+            physical,
+            flags,
             width,
             base,
             class,

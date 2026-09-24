@@ -697,6 +697,17 @@ they are touching do not collide; two that have not, do.
   worktree checkout needs `git checkout -- Cargo.lock` first, because some builds rewrite it and the
   next checkout then fails and leaves the old binary in place. `.sqlite-ref/3.53.4` has to be copied
   in whole, the shell included. (task-2086)
+- **To find which change inside one commit costs the time, switch each change off at that commit,
+  and remember that a format switch reverts only what is written.** task-2091 built
+  `inillucent-readgate` at `a8f45b1` with `FRAME_OF_REFERENCE = false`, with `heap_slot_width`
+  forced to 8, and with `CARGO_PROFILE_RELEASE_PANIC=unwind`, one binary each, by editing the
+  detached worktree and restoring the files by name between builds
+  (`_agent_output/task-2091-join-range/build-variants.ps1`, main checkout). The format switches read
+  zero, and the real cost was the code that reads the new format, which those switches leave in
+  place. What found it was one more binary with every switch off, whose file had the same page count
+  as the commit before, so the only difference left was code. A release profile can be ablated
+  without a source change through `CARGO_PROFILE_RELEASE_*`. Five binaries build in about eight
+  minutes into one shared target directory. (task-2091)
 - **Three in four of the `transaction` family's updates match no row.** `Bind::Scatter` picks rowids
   up to `main_table`'s row count and `side_table` holds a quarter of that, so those statements measure
   a lookup past the end of `side_table`'s last leaf - the leaf `write.insert.autocommit` appended 100

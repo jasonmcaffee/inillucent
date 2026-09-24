@@ -1322,6 +1322,73 @@ mod tests {
     }
 
     /// The small accessors answer, including the ones nothing else reaches.
+    /// `column` reads its directory entry once rather than through the four
+    /// accessors, so it has to give exactly what they give: on a page whose
+    /// entries carry a base and on one whose entries do not, for every column,
+    /// and it has to refuse an entry whose width the type does not admit.
+    #[test]
+    fn a_column_reads_its_entry_the_way_the_accessors_do() {
+        let framed_builder = LeafBuilder::new(
+            8192,
+            1,
+            vec![
+                ColumnSpec::key(PhysicalType::Int64),
+                ColumnSpec::new(PhysicalType::Int64),
+                ColumnSpec::new(PhysicalType::Text),
+            ],
+            1,
+        )
+        .unwrap();
+        let labels: Vec<String> = (0..200).map(|n| format!("label {n}")).collect();
+        let framed_rows: Vec<Vec<Datum<'_>>> = (0..200i64)
+            .map(|n| {
+                vec![
+                    Datum::Int(900_000 + n),
+                    Datum::Int(-500_000 - n),
+                    Datum::Text(labels[n as usize].as_bytes()),
+                ]
+            })
+            .collect();
+        let framed = framed_builder.encode(&framed_rows).unwrap();
+        let plain = LeafBuilder::new(8192, 7, fixture_columns(), 1)
+            .unwrap()
+            .encode(&fixture_rows(5))
+            .unwrap();
+        for page in [&framed, &plain] {
+            let leaf = LeafRef::parse(page).unwrap();
+            for index in 0..leaf.column_count() {
+                let column = leaf.column(index).unwrap();
+                let spec = leaf.spec(index).unwrap();
+                assert_eq!(column.physical, spec.physical, "column {index}");
+                assert_eq!(column.flags, spec.flags, "column {index}");
+                assert_eq!(column.width, leaf.column_width(index).unwrap());
+                assert_eq!(column.base, leaf.column_base(index).unwrap());
+                let values_at = leaf
+                    .column_offset(index)
+                    .unwrap()
+                    .saturating_add(class_bytes(leaf.row_count()));
+                assert_eq!(
+                    column.inline_bytes().as_ptr(),
+                    page[values_at..].as_ptr(),
+                    "column {index}'s values start where its entry says"
+                );
+            }
+        }
+        if NARROW_INT_SLOTS && FRAME_OF_REFERENCE {
+            assert_eq!(LeafRef::parse(&framed).unwrap().directory_entry_size(), 16);
+            assert_eq!(
+                LeafRef::parse(&framed).unwrap().column_base(0).unwrap(),
+                900_000
+            );
+        }
+        // An Int64 slot is 1, 2, 4 or 8 bytes wide and never 3.
+        let mut lying_width = plain.clone();
+        page::write_u16(&mut lying_width, leaf_header::DIRECTORY + 2, 3).unwrap();
+        let leaf = LeafRef::parse(&lying_width).unwrap();
+        assert!(leaf.column(0).is_err(), "a width the type does not admit");
+        assert!(leaf.column_width(0).is_err());
+    }
+
     #[test]
     fn the_small_accessors_answer() {
         let builder = LeafBuilder::new(8192, 7, fixture_columns(), 1).unwrap();

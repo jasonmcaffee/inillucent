@@ -550,6 +550,83 @@ ms. The bar was not set from any measurement at all, and the statistic it is gra
 missed it on the full plan even with that 5.7 ms back. Each of these is now its own ticket. Every
 output is in `_agent_output/task-2086-read-join/` in the main checkout.
 
+#### What the +2.8 ms at `a8f45b1` is made of (task-2091)
+
+`a8f45b1` did five things, and three of them have a switch: the frame of reference is the constant
+`FRAME_OF_REFERENCE`, the `(u16, u16)` heap pair is `heap_slot_width`, and `panic = "abort"` with
+`strip = true` is the release profile, which `CARGO_PROFILE_RELEASE_PANIC` and
+`CARGO_PROFILE_RELEASE_STRIP` override. task-2091 built `inillucent-readgate` at `a8f45b1` with each
+switched off, with all three off together, and with the profile alone changed, plus `566c688` with
+and without the new profile and HEAD (`40ca955`) with and without `panic = "unwind"`. 39 passes in
+two quiet windows on 2026-09-23 and 24, medium fixture, 30 rounds, every pass pinned to `0xC03C03`
+from outside with the SQLite child's mask read back as `0xC03C03` every time. SQLite's arm read 23.7
+to 24.6 ms on every pass after the box had settled. This engine's `join.range`, in milliseconds,
+sweeps in the order run (the second of each window reversed):
+
+| build | window 1 | window 2 |
+|---|---|---|
+| `a8f45b1` | 27.35, 26.52, 26.67 | 27.04, 26.66, 26.63 |
+| `a8f45b1`, frame of reference off | 27.27, 26.59, 26.63 | |
+| `a8f45b1`, `(u16, u16)` heap pair off | 26.93, 26.69, 26.71 | |
+| `a8f45b1`, `panic = "unwind"`, `strip = false` | 25.64, 25.58, 25.45 | 25.58, 25.80, 26.51 |
+| `a8f45b1`, `panic = "unwind"`, `strip` kept | | 26.36, 25.58, 25.56 |
+| `a8f45b1`, all three off | | 25.32, 25.53, 25.34 |
+| `566c688` | 24.28, 23.97, 24.07 | 24.34, 24.24, 24.15 |
+| `566c688`, `panic = "abort"`, `strip = true` | | 25.34, 25.41, 25.25 |
+| HEAD | | 28.07, 28.18, 28.27 |
+| HEAD, `panic = "unwind"` | | 27.91, 28.73, 28.70 |
+
+What each difference was required to be, before the passes ran, and what it was:
+
+- **The two on-disk formats cost nothing.** Frame of reference off moved `join.range` by -0.07 to
+  +0.08 ms and the narrow heap pair off by -0.17 to +0.42 ms, against a 0.5 ms threshold for "not the
+  cause". They are what took the imported file from 573 pages to 532, and the smaller file is kept.
+- **`panic = "abort"` cost about 1.1 ms at `a8f45b1`, and costs nothing at HEAD.** Adding it to
+  `566c688` alone costs 1.00, 1.17 and 1.10 ms, so it does not depend on the new code. `strip` has no
+  measurable part in it. At HEAD, `panic = "unwind"` reads +0.16, -0.55 and -0.43 ms against
+  `panic = "abort"`, under the 0.4 ms threshold in every sweep, so what abort did at `a8f45b1` was a
+  code generation effect that later commits no longer show, and nothing is recovered by removing
+  it. `panic = "abort"` stays for the reason `a8f45b1` gave, the smaller binary and floor. The 1.0 ms
+  that came back by `f9e2374` in the table above is probably this effect going away, which was not
+  measured.
+- **The read code follow-ups 4 and 5 added cost about 1.2 ms.** `a8f45b1` with all three switched
+  off imports the same 573 pages as `566c688` and is still 0.98, 1.29 and 1.19 ms slower, over the
+  0.8 ms threshold in every sweep. The format switches revert what is written and not the code that
+  reads it: a `base == 0` test in every integer read, a width match in every heap slot read, a
+  `Vector` eight bytes wider, and a fourth lookup of the column directory entry on every
+  `LeafRef::column` call. Follow-up 1 is not in it, because `make_room` never runs in the read gate,
+  whose plan keeps only the read families and none of them writes. Follow-up 3 only changes the
+  memory `CREATE INDEX` holds.
+
+So the step is about 1.1 ms of code generation that has since gone and about 1.2 ms of read path
+code that was still in HEAD's shape.
+
+**What was recovered.** `LeafRef::column` runs on every probe, once per key column the leaf search
+compares and once per inner column an index nested loop projects, and it located and bounds checked
+the same directory entry four times: `spec`, `column_width`, `column_base` and `column_offset`, the
+type byte parsed twice between them. It now reads the entry once as one slice. A third quiet window
+timed HEAD (`40ca955`) against HEAD with only that change, alternated head, fix, fix, head, head,
+fix, fix, head, both pinned from outside to `0xC03C03` with the SQLite child's mask read back, and
+every workload's digest agreeing with SQLite's on all eight passes:
+
+| | HEAD | HEAD, entry read once |
+|---|---|---|
+| `join.range`, ms | 28.43, 28.35, 28.53, 28.14 | 26.18, 26.16, 25.98, 26.11 |
+| `range.lookaside`, ms (passes 204 and 206) | 28.33, 0.94x | 24.52, 1.11x |
+| `point.index` (the same passes) | 16.14x | 18.53x |
+| `join.selective` (the same passes) | 20.52x | 23.11x |
+| PointProbe, warm (the same passes) | 344.5 ns | 306.9 ns |
+| `read.join` family (the same passes) | 4.19x [4.13x, 4.25x] | 4.67x [4.61x, 4.73x] |
+
+`join.range` is 2.04 to 2.55 ms faster in every adjacent pair, against a 0.5 ms threshold set before
+the passes ran. That is more than the 1.2 ms `a8f45b1`'s read code cost. The likely reason, which was not
+measured separately, is that the code since then calls `column` more often per probe: the index
+nested loop now lends the leaf's mini-columns downstream, one `column` call per inner column, rather
+than copying values out of them. `join.range` is at 0.92x after it, still slower than
+SQLite, and 3.9 ms slower than it was at `57e87b0`; the remaining steps in the table above are not
+explained. `range.lookaside` is faster than SQLite for the first time on this plan.
+Every output is in `_agent_output/task-2091-join-range/` in the main checkout.
+
 ### How a family's interval is computed (task-2093)
 
 **Every gate grades a family on one value a round now.** That value is the mean of that round's log
