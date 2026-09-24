@@ -229,9 +229,7 @@ fn fresh(
     synchronous: Synchronous,
 ) -> Result<(&'static Database, Connection<'static>), String> {
     let path = scratch.join(format!("{name}.db"));
-    for suffix in ["", "-wal", "-wal.0000000001"] {
-        let _ = std::fs::remove_file(scratch.join(format!("{name}.db{suffix}")));
-    }
+    inillucent_base::testing::remove_database(&path);
     let database = Database::open(&path).map_err(text)?;
     // Leaked for the same reason `differential::start_inillucent` leaks: the
     // new engine's `Connection<'d>` borrows the `Database`, and this measurement

@@ -253,11 +253,7 @@ fn run(
     let statements = corpus(documents);
 
     let path = area.join("docs.rdb");
-    for suffix in ["", "-wal.0000000001"] {
-        let mut name = path.clone().into_os_string();
-        name.push(suffix);
-        let _ = std::fs::remove_file(std::path::PathBuf::from(name));
-    }
+    inillucent_base::testing::remove_database(&path);
     let _ = std::fs::remove_file(&path);
     let database = Database::open(&path).map_err(|error| format!("open: {error}"))?;
     let connection = database.session();

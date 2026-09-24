@@ -40,7 +40,7 @@ fn scratch(name: &str) -> PathBuf {
     let area = workspace_root().join("target/scratch/identity");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
-    let _ = std::fs::remove_file(&path);
+    inillucent_base::testing::remove_database(&path);
     path
 }
 
@@ -134,7 +134,7 @@ fn an_imported_database_keeps_its_identifiers() {
         return;
     }
     let path = scratch("imported");
-    let _ = std::fs::remove_file(&path);
+    inillucent_base::testing::remove_database(&path);
     let written = {
         let mut database = ImportedDatabase::import_into(fixture, path.clone(), PAGE_SIZE, FRAMES)
             .expect("the fixture imports");

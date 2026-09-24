@@ -750,6 +750,25 @@ pub fn format_real(number: f64) -> String {
     String::from_utf8_lossy(&inillucent_value::numeric::real_to_text(number)).into_owned()
 }
 
+/// Whether `apply_affinity` returns this value exactly as it was given.
+///
+/// Read off `inillucent_value::affinity::apply_affinity`: BLOB affinity changes
+/// nothing, a NULL and a blob are never changed, an integer changes only under
+/// TEXT, a real only under the numeric affinities other than FLEXNUM, and text
+/// only under a numeric one. `an_affinity_that_changes_nothing_is_skipped`
+/// checks this against `apply_affinity` over every pair.
+///
+/// @param value - the value
+/// @param affinity - the affinity about to be applied
+fn leaves_unchanged(value: &Datum<'_>, affinity: Affinity) -> bool {
+    match value {
+        Datum::Null | Datum::Blob(_) => true,
+        Datum::Int(_) => affinity != Affinity::Text,
+        Datum::Real(_) => matches!(affinity, Affinity::Blob | Affinity::FlexNum),
+        Datum::Text(_) => matches!(affinity, Affinity::Blob | Affinity::Text),
+    }
+}
+
 /// Applies a comparison's affinity to one value.
 ///
 /// See [`Expr::Affinity`] for why this is not a cast.
@@ -763,6 +782,16 @@ struct ApplyAffinity {
 impl Eval for ApplyAffinity {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let value = self.operand.value(batch, nth)?;
+        // **A value the affinity leaves alone is handed back as it came
+        // (task-2110, bug 8).** Since task-2083 a nested loop's probe key
+        // passes through here once per probe, and the conversion below copies
+        // the key into an owned `Value` and back even when nothing changes -
+        // an integer key probing an INTEGER index, which is every probe
+        // `join.range` makes. `leaves_unchanged` is `apply_affinity`'s own
+        // rules for the cases it returns its input, so the answer is the same.
+        if leaves_unchanged(&value.get(), self.affinity) {
+            return Ok(value);
+        }
         let converted = inillucent_value::affinity::apply_affinity(
             Value::from(&value.get()).into_owned()?,
             self.affinity,
@@ -777,6 +806,51 @@ impl Eval for ApplyAffinity {
 mod tests {
     use super::*;
     use crate::batch::Vector;
+
+    /// The fast path in `ApplyAffinity` skips a conversion only where
+    /// `apply_affinity` would have returned the value unchanged, for every value
+    /// class against every affinity (task-2110, bug 8).
+    #[test]
+    fn an_affinity_that_changes_nothing_is_skipped() {
+        let samples = [
+            Datum::Null,
+            Datum::Int(3),
+            Datum::Real(3.0),
+            Datum::Real(3.5),
+            Datum::Text(b"3"),
+            Datum::Text(b"abc"),
+            Datum::Blob(b"3"),
+        ];
+        let affinities = [
+            Affinity::Blob,
+            Affinity::Text,
+            Affinity::Numeric,
+            Affinity::Integer,
+            Affinity::Real,
+            Affinity::FlexNum,
+        ];
+        for value in samples {
+            for affinity in affinities {
+                if !leaves_unchanged(&value, affinity) {
+                    continue;
+                }
+                let applied = affinity::apply_affinity(
+                    Value::from(&value).into_owned().expect("owned"),
+                    affinity,
+                    TextEncoding::Utf8,
+                )
+                .expect("applies");
+                assert_eq!(
+                    OwnedDatum::from(applied),
+                    OwnedDatum::from_datum(&value),
+                    "{value:?} under {affinity:?} was skipped and apply_affinity changes it"
+                );
+            }
+        }
+        // And the case every `join.range` probe is: an integer key into an INTEGER index.
+        assert!(leaves_unchanged(&Datum::Int(7), Affinity::Integer));
+        assert!(!leaves_unchanged(&Datum::Int(7), Affinity::Text));
+    }
 
     fn batch_of<'a>(values: &'a [Datum<'a>]) -> Batch<'a> {
         Batch::new(values.len(), vec![Vector::Values(values)])

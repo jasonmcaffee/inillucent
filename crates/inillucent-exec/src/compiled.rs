@@ -293,8 +293,7 @@ impl Compiled {
         let bound = params.bindings();
         if !std::sync::Arc::ptr_eq(&self.bindings, &bound) {
             if let (Ok(from), Ok(mut held)) = (bound.lock(), self.bindings.lock()) {
-                held.clear();
-                held.extend_from_slice(&from);
+                held.copy_from(&from);
             }
         }
         let source = {

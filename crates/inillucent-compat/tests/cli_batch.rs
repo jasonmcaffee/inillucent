@@ -31,9 +31,7 @@ fn area() -> PathBuf {
 /// @param name - the file's name, so no two cases share one
 fn scratch(name: &str) -> PathBuf {
     let path = area().join(name);
-    for suffix in ["", "-wal", "-journal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-    }
+    inillucent_base::testing::remove_database(&path);
     path
 }
 

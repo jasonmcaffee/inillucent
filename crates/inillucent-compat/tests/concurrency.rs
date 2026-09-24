@@ -44,10 +44,9 @@ use inillucent_tree::datum::OwnedDatum;
 fn scratch(name: &str) -> PathBuf {
     let directory = workspace_root().join("_agent_output/concurrency");
     let _ = std::fs::create_dir_all(&directory);
-    for suffix in ["", "-journal", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(directory.join(format!("{name}.db{suffix}")));
-    }
-    directory.join(format!("{name}.db"))
+    let path = directory.join(format!("{name}.db"));
+    inillucent_base::testing::remove_database(&path);
+    path
 }
 
 /// Returns the workspace root, the way every scratch path here is rooted.

@@ -472,9 +472,7 @@ fn run_one(
         other => return Err(format!("no such arm: {other}")),
     };
     let path = area().join(format!("{name}.db"));
-    for suffix in ["", "-journal", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(area().join(format!("{name}.db{suffix}")));
-    }
+    inillucent_base::testing::remove_database(&path);
     let mut arm = Arm::default();
     let expected = {
         let database = open(&path)?;

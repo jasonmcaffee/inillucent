@@ -23,10 +23,9 @@ use inillucent_compat::workspace_root;
 fn scratch(name: &str) -> PathBuf {
     let directory = workspace_root().join("_agent_output/foreign-keys");
     let _ = std::fs::create_dir_all(&directory);
-    for suffix in ["", "-journal", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(directory.join(format!("{name}.db{suffix}")));
-    }
-    directory.join(format!("{name}.db"))
+    let path = directory.join(format!("{name}.db"));
+    inillucent_base::testing::remove_database(&path);
+    path
 }
 
 /// Runs statements in the pinned shell, reporting stdout and stderr together.

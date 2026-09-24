@@ -25,6 +25,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <dirent.h>
+#endif
+
 #include "inillucent_driver.h"
 
 /* How many checks failed. The process exit code, so a harness that only looks
@@ -64,7 +70,62 @@ static void check_status(const char *name, int32_t found, int32_t wanted)
 }
 
 /*
+ * Removes every numbered log segment of a database, `<path>-wal.<n>`.
+ *
+ * The engine writes its log as numbered segments rather than one `-wal`
+ * file, and their numbers are not predictable once a checkpoint has removed
+ * the early ones, so they are found by listing the directory. Every path this
+ * program uses is a bare name in its working directory, which is what the
+ * listing below reads.
+ *
+ * @param path - the database file, a name in the working directory
+ */
+static void scrub_segments(const char *path)
+{
+    char prefix[512];
+    size_t length;
+    snprintf(prefix, sizeof prefix, "%s-wal.", path);
+    length = strlen(prefix);
+#ifdef _WIN32
+    {
+        char pattern[520];
+        struct _finddata_t found;
+        intptr_t search;
+        snprintf(pattern, sizeof pattern, "%s*", prefix);
+        search = _findfirst(pattern, &found);
+        if (search == -1) {
+            return;
+        }
+        do {
+            if (strncmp(found.name, prefix, length) == 0) {
+                remove(found.name);
+            }
+        } while (_findnext(search, &found) == 0);
+        _findclose(search);
+    }
+#else
+    {
+        DIR *directory = opendir(".");
+        struct dirent *entry;
+        if (directory == NULL) {
+            return;
+        }
+        while ((entry = readdir(directory)) != NULL) {
+            if (strncmp(entry->d_name, prefix, length) == 0) {
+                remove(entry->d_name);
+            }
+        }
+        closedir(directory);
+    }
+#endif
+}
+
+/*
  * Removes a database and its companion files, so a rerun starts clean.
+ *
+ * The numbered log segments are the ones that matter (task-2110, bug 1): a
+ * database opened beside the last run's segments replays them, and before
+ * this removed them every run left one more set behind.
  *
  * @param path - the database file
  */
@@ -78,6 +139,7 @@ static void scrub(const char *path)
     remove(companion);
     snprintf(companion, sizeof companion, "%s-shm", path);
     remove(companion);
+    scrub_segments(path);
 }
 
 /* ---------------------------------------------------------------- */

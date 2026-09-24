@@ -139,9 +139,7 @@ fn run(out: &std::path::Path, spread: bool, repeat: usize) -> Result<Sample, Str
         "checkpoint-{}-{repeat}.db",
         if spread { "spread" } else { "at-once" }
     ));
-    for suffix in ["", "-wal", "-shm", "-journal"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-    }
+    inillucent_base::testing::remove_database(&path);
     let database = Database::open(&path).map_err(|error| error.message().to_string())?;
     let connection = database.session();
     for pragma in [

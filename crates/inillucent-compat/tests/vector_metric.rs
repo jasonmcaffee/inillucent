@@ -28,7 +28,7 @@ fn database(name: &str) -> Database {
     let area = workspace_root().join("target/scratch/vector_metric");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
-    let _ = std::fs::remove_file(&path);
+    inillucent_base::testing::remove_database(&path);
     Database::open(&path).expect("a fresh database opens")
 }
 

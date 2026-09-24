@@ -166,6 +166,23 @@ pub struct ModelManifest {
     /// What executes the weights.
     #[serde(default = "default_backend")]
     pub backend: Backend,
+    /// Whether this harness can execute the weights at all.
+    ///
+    /// **False for a model whose vectors come from somewhere else (task-2110,
+    /// bug 5).** The Qwen3 teachers are published as safetensors only; they are
+    /// graded from vectors a Python script produced, through
+    /// `cache-from-vectors`. Their manifests had to name a backend, named
+    /// `onnx`, and the arm tests then tried to open a safetensors index as an
+    /// ONNX protobuf and reported the failure as a missing prerequisite. A third
+    /// `Backend` would have been the obvious place for this, and it is not used
+    /// because `backend` is part of [`ModelManifest::canonical_bytes`]: changing
+    /// it would move each teacher's digest and make every cache written for them
+    /// unreadable to `grade-embedding`, with no `synth-embed` able to re-stamp
+    /// them. This field is left out of the digest for the same reason `source`
+    /// is - it changes nothing about the vectors, only whether this process can
+    /// make them.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub runnable: bool,
     /// Which output carries the model's answer. Almost always the per-token one.
     #[serde(default = "default_output")]
     pub output: Output,
@@ -197,6 +214,13 @@ fn default_true() -> bool {
     true
 }
 
+/// Whether a flag holds its default of true, so a manifest that does not set it is written without it.
+///
+/// @param value - the flag
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn default_output() -> Output {
     Output::TokenEmbeddings
 }
@@ -221,6 +245,7 @@ impl ModelManifest {
             model_file: default_model_file(),
             token_type_ids: true,
             backend: Backend::Onnx,
+            runnable: true,
             output: Output::TokenEmbeddings,
             output_name: String::new(),
             tokenizer_sha256: String::new(),
@@ -375,6 +400,25 @@ mod tests {
         right.id = "a".into();
         right.model_file = "bc".into();
         assert_ne!(left.canonical_bytes(), right.canonical_bytes());
+    }
+
+    /// `runnable` defaults to true when a manifest does not name it, is read
+    /// when it does, and does not move the digest a cache header stores - the
+    /// teachers' caches were written before the field existed.
+    #[test]
+    fn runnable_defaults_to_true_and_stays_out_of_the_digest() {
+        let base = ModelManifest::nomic_v1_5();
+        let text = serde_json::to_string(&base).unwrap();
+        assert!(
+            !text.contains("runnable"),
+            "a runnable manifest is written as before"
+        );
+        let read: ModelManifest = serde_json::from_str(&text).unwrap();
+        assert!(read.runnable);
+        let refused: ModelManifest =
+            serde_json::from_str(&text.replacen('{', "{\"runnable\":false,", 1)).unwrap();
+        assert!(!refused.runnable);
+        assert_eq!(base.canonical_bytes(), refused.canonical_bytes());
     }
 
     #[test]

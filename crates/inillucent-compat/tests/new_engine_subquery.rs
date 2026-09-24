@@ -31,7 +31,7 @@ fn fixture(name: &str) -> Database {
     let area = workspace_root().join("target/scratch/subquery");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
-    let _ = std::fs::remove_file(&path);
+    inillucent_base::testing::remove_database(&path);
     let database = Database::open(&path).expect("a fresh database opens");
     {
         let connection = database.session();
@@ -517,7 +517,7 @@ fn sqlite_sequence_can_be_written_and_the_counter_follows() {
     let area = workspace_root().join("target/scratch/sequence");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join("sequence.rdb");
-    let _ = std::fs::remove_file(&path);
+    inillucent_base::testing::remove_database(&path);
     let database = Database::open(&path).expect("a fresh database opens");
     let connection = database.session();
     connection

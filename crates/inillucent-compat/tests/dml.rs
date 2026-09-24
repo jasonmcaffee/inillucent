@@ -14,10 +14,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
     let directory = workspace_root().join("_agent_output/dml");
     let _ = std::fs::create_dir_all(&directory);
     let path = directory.join(name);
-    for suffix in ["", "-journal"] {
-        let candidate = directory.join(format!("{name}{suffix}"));
-        let _ = std::fs::remove_file(candidate);
-    }
+    inillucent_base::testing::remove_database(&path);
     path
 }
 

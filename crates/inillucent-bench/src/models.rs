@@ -235,6 +235,7 @@ mod tests {
             model_file: "model_fp32.onnx".into(),
             token_type_ids: false,
             backend: inillucent_core::model::Backend::Onnx,
+            runnable: true,
             output: inillucent_core::model::Output::TokenEmbeddings,
             output_name: String::new(),
             tokenizer_sha256: String::new(),
@@ -381,7 +382,8 @@ mod arms {
 
     /// Every installed arm that this process can load: a manifest, its weights,
     /// its tokenizer, and an ONNX backend. A served arm needs a running server
-    /// and is not something a unit test may assume.
+    /// and is not something a unit test may assume, and a manifest that says
+    /// `runnable: false` names a model whose vectors this harness never makes.
     fn installed() -> Vec<ResolvedModel> {
         let root = default_models_root();
         let Ok(entries) = std::fs::read_dir(&root) else {
@@ -397,7 +399,7 @@ mod arms {
             let Ok(model) = resolve_dir(&dir, "model.onnx") else {
                 continue;
             };
-            if model.manifest.backend != Backend::Onnx {
+            if model.manifest.backend != Backend::Onnx || !model.manifest.runnable {
                 continue;
             }
             if !dir.join(&model.manifest.model_file).exists()
@@ -414,14 +416,25 @@ mod arms {
     /// Open one arm on the processor. The processor, not a card: this is a
     /// correctness check, the texts are five, and a test that needs a free GPU is
     /// a test that gets skipped.
-    fn open(model: &ResolvedModel) -> Option<OnnxEmbedder> {
-        match OnnxEmbedder::open_manifest(&model.dir, &model.manifest, 8, Device::Cpu) {
-            Ok(e) => Some(e),
-            Err(err) => {
-                inillucent_base::testing::skipping(&format!("{}: {err:#}", model.manifest.id));
-                None
-            }
-        }
+    ///
+    /// **An arm that fails to open fails the test (task-2110, bug 5).** It used
+    /// to be a skip, and a skip says something is absent: `installed()` has
+    /// already found this arm's manifest, weights and tokenizer, so a failure
+    /// here is a broken install or a broken loader. Reported as a skip it told a
+    /// strict run to install a model that was installed, and under `--strict`
+    /// the skip's panic stopped the loop at that arm, so every arm after it in
+    /// name order went ungraded.
+    ///
+    /// @param model - an arm `installed()` returned
+    fn open(model: &ResolvedModel) -> OnnxEmbedder {
+        OnnxEmbedder::open_manifest(&model.dir, &model.manifest, 8, Device::Cpu).unwrap_or_else(
+            |err| {
+                panic!(
+                    "{} is installed and did not open, so the install or the loader is broken:                      {err:#}",
+                    model.manifest.id
+                )
+            },
+        )
     }
 
     #[test]
@@ -432,7 +445,7 @@ mod arms {
             return;
         }
         for model in &models {
-            let Some(e) = open(model) else { continue };
+            let e = open(model);
             let a = e.embed_query("how does offer eligibility work").unwrap();
             let b = e.embed_query("how does offer eligibility work").unwrap();
             assert_eq!(a, b, "{} is not deterministic", model.manifest.id);
@@ -456,7 +469,7 @@ mod arms {
             return;
         }
         for model in &models {
-            let Some(e) = open(model) else { continue };
+            let e = open(model);
             let texts = texts();
             let batched = e.embed_documents(&texts).unwrap();
             for (i, t) in texts.iter().enumerate() {
@@ -482,7 +495,7 @@ mod arms {
             return;
         }
         for model in &models {
-            let Some(e) = open(model) else { continue };
+            let e = open(model);
             let short = "offer".to_string();
             let long = "offer eligibility rules and redemption windows ".repeat(40);
             let together = e.embed_documents(&[short.clone(), long]).unwrap();
@@ -509,7 +522,7 @@ mod arms {
         }
         let text = "offer eligibility rules";
         for model in &models {
-            let Some(e) = open(model) else { continue };
+            let e = open(model);
             let as_query = e.embed_query(text).unwrap();
             let as_document = e.embed_documents(&[text.to_string()]).unwrap();
             let agreement = dot(&as_query, &as_document[0]);
@@ -542,7 +555,7 @@ mod arms {
             return;
         }
         for model in &models {
-            let Some(e) = open(model) else { continue };
+            let e = open(model);
             e.embed_documents(&["one two three four five six".to_string()])
                 .unwrap();
             let facts = e.truncation();

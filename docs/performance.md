@@ -719,6 +719,37 @@ smaller steps between them add or remove a few tenths each. Every output, the sc
 the decision rules written before each window are in `_agent_output/task-2099-join-range/` in the
 main checkout.
 
+#### Two of those steps, ablated at HEAD (task-2110)
+
+`6f84ce6`'s per probe cost is the probe key's affinity. Since that commit a nested loop's key passes
+through `ApplyAffinity` once per probe, and it copied the key into an owned `Value` and back even
+when nothing changed, which for `join.range` is every probe: an integer key into an INTEGER index.
+The key had been wrapped in a `Cast` the same way before, so the conversion itself was not new.
+`ApplyAffinity` now returns a value that `apply_affinity` would leave alone unchanged. The other
+things `6f84ce6` added run once per execution or once per chain build, not once per probe: the NULL
+checks in `span_bounds` and the `unconverted` lookups in `nested_key`.
+
+Four builds of the read gate, medium fixture, 30 rounds, pinned to `0xC03C03`, in the order v0 v1
+v2 v3 v3 v2 v1 v0 v0 v1 v2 v3. **Not a settled machine**: Firefox and WebView held about 2.2 cores
+throughout, and every pass read a SQLite speed index of 9.3% to 11.2%, so the gate graded none of
+them. What follows compares this engine's builds against each other in one window, with the order
+reversed, and not against SQLite.
+
+| build | `join.range`, ms a round | mean |
+|---|---|---|
+| v0: HEAD's probe | 26.94, 26.88, 27.16 | 26.99 |
+| v1: `ApplyAffinity` returns an unchanged value | 26.69, 26.89, 26.71 | 26.76 |
+| v2: v1 with the frame of reference and the four byte heap pair both off | 26.16, 25.92, 26.15 | 26.08 |
+| v3: v2 without the `base == 0` test and the width match | 26.52, 26.43, 26.87 | 26.60 |
+
+- The affinity change is worth about 0.23 ms a round, 2.3 ns a probe, and the two builds' passes do
+  not overlap. That is part of the 0.7 to 1.4 ms task-2099 put on `6f84ce6`. Nothing else it added
+  is on the per probe path, so the rest is not placed.
+- The two read branches cost nothing measurable: v3 is no faster than v2.
+- Turning the two formats off saved about 0.7 ms here, where task-2099 found it recovered nothing.
+  That is a change to what is written on disk, traded against file size, and it is not made here.
+  This one comparison needs repeating on a settled machine before it decides anything.
+
 ### How a family's interval is computed (task-2093)
 
 **Every gate grades a family on one value a round now.** That value is the mean of that round's log
@@ -942,9 +973,19 @@ window's range. **Every bold value is above the range.**
 look faster.** That is the same signature as the first pass of task-2093's window, which put
 `read.join` at 4.37x with SQLite's arm 5% to 7% slow. **Why SQLite's arm suffers more is not
 established.** It is not the number of page faults: SQLite's child takes 11,634 to 11,640 a round on
-every pass, and this engine's arm takes about 147,400. One difference the passes point at is that
+every pass, and this engine's arm took about 147,400. One difference the passes point at is that
 SQLite's arm is a new process each round and fills its cache from its file while a workload is timed,
 where this engine's pool is warmed before the clock starts. Nothing here tested that.
+
+**Those 147,400 faults were one allocation, and task-2110 removed it.** 93% of them were in two
+workloads, `correlated.in` (91,390 an execution) and `correlated.exists` (45,414). A correlated block
+reads the outer row through parameters numbered from 100,000, and the parameter set was one vector
+indexed by number, so the first such write grew it to 100,001 entries, 3.2 MB. The set is copied once
+per batch, so each execution made and freed 58 of them, and a block that size is paged in again every
+time. The engine's own slots are now a separate list (`physical::Slots`). On the medium fixture the
+full plan takes 4,196 to 4,285 faults a round after the first, against SQLite's 11,638, and 3,131 of
+those are `schema.index`. In a debug build `correlated.exists` went from 75 ms an execution to 7.2 ms
+and `correlated.in` from 138 ms to 17.7 ms. Every published `read.correlated` ratio predates this.
 
 ### How a verdict should be taken (task-2095)
 
@@ -955,9 +996,14 @@ where this engine's pool is warmed before the clock starts. Nothing here tested 
 2. **From one pass, taken on a machine the pass itself shows was quiet.** SQLite's arm is the same
    program in every pass, so its speed against a recorded quiet reference is a measurement of the
    machine. Over the twelve quiet passes that index was at most 1.39% for a whole pass. On every busy
-   pass seen, in either window, it was at least 4%. A pass above 3% should not be graded. The gates
-   do not do this yet. It is a change to how they decide, so it is recorded as a known bug of the
-   gates, not made here.
+   pass seen, in either window, it was at least 4%. A pass above 3% should not be graded. **Since
+   task-2110 the three gates do this.** Each prints a "was the machine quiet" section with the pass's
+   index over the point, range, join and analytical workloads, the reference file and when it was
+   recorded. Above 3% every verdict reads NOT GRADED and the gate exits 4, where 1 is a miss and 2 is
+   a run that measured nothing. The reference is kept per machine, outside the checkout
+   (`%LOCALAPPDATA%inillucentquiet-reference<host><scale>.tsv`), and is written by running a
+   gate with `--record-quiet-reference` while the machine is idle. With no reference the pass is
+   graded and the section says it was not checked. `--quiet-threshold <percent>` changes the bound.
 3. **On a quiet machine, one pass is enough for every verdict today.** What still differs between
    quiet passes is this engine's own process, and it is small. The between pass standard deviation
    of the family log ratio is 0.3% to 1.1% for the read families, 1.35% for `extension` and 3.2% for

@@ -14,9 +14,9 @@ sha256 = "bb4b0a0bd2523ba2f97d85ffea879878ad69ffbe500c63be074df3c724ba6307"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/arm.rs"
-ticket = "task-1967"
-reason = "Moved by b3c7477 (task-1967): the check's own re-embedding was the side that moved. Never declared here; task-1973 declares it because the guard was red at HEAD and this file is not its work."
-sha256 = "a91388417bcb354492126bd97c72b244accae4f60943d66380a35d741469efc0"
+ticket = "task-2110"
+reason = "Bug 5: a manifest can say runnable false, for a model whose vectors come from outside (the Qwen3 teachers), and an installed arm that fails to open fails the arm tests rather than skipping"
+sha256 = "b5af34b3436dc579039fa0d92f87d6ffef0e3c6ccfe0722ee07e64fff674a2a1"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/corpus.rs"
@@ -26,9 +26,9 @@ sha256 = "51481630369add08d37508f8ddbac2ae5dd552feda58bc44f3914ee0e7ed1510"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/embedcheck.rs"
-ticket = "task-1973"
-reason = "task-1973 turned on the four lints and missing_docs for this crate (#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)] on main.rs). 191 sites answered; every one in this file now propagates a caught error or reads through .get(). No measurement changed: the crate's 178 tests pass unchanged. The sampled chunk and its stored vector are looked up through chunk_at and stored_vector, which report a sampler that disagrees with the cache rather than comparing a vector against the wrong text. The three assertions clippy folded to a constant are two let bindings and one const block, which also clears the assertions_on_constants warnings that were failing cargo clippy -D warnings on main."
-sha256 = "847816e0fe492f9916183ba3cdcd813ce885ec7342441af32b65794b88e3844a"
+ticket = "task-2110"
+reason = "Bug 5: a manifest can say runnable false, for a model whose vectors come from outside (the Qwen3 teachers), and an installed arm that fails to open fails the arm tests rather than skipping"
+sha256 = "f738cddf653d90e174034d99401d1c6f92f6c6fd8b45662958041aea0bcc4da7"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/engine.rs"
@@ -38,9 +38,9 @@ sha256 = "fb0792c4483c9ef452769c933eb5f3dcfc9bab32c8b3753840fb35d9e7b294a3"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/gradeembed.rs"
-ticket = "task-1977"
-reason = "task-1977: the card moved out of this file. 'type LaneScores' through 'print_summary' is crates/inillucent-bench/src/gradeembed/card.rs now, 733 lines, and this file is 3,094 rather than 3,815. The one dead #[allow(clippy::too_many_arguments)] above score_family also came off: clippy.toml sets too-many-arguments-threshold = 8 and score_family takes six. Nothing else changed and the 178 bench tests pass unchanged. This entry replaces task-1973's, which declared the lint work on the same file."
-sha256 = "26c5e8f0dfe993325b29d1ce6f4f5eb02085ff81d891316c4bf933d6a7af9c64"
+ticket = "task-2110"
+reason = "Bug 5: a manifest can say runnable false, for a model whose vectors come from outside (the Qwen3 teachers), and an installed arm that fails to open fails the arm tests rather than skipping"
+sha256 = "be730b4033a68e3ca632e3af9d4636b856d7c0e6ca0299eaed2a67d1593cdb9a"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/gradeembed/card.rs"
@@ -74,9 +74,9 @@ sha256 = "641c0bafaaaa7821837056b1f26a50d8211e10693074d87df99ab9868754bf9e"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"
-ticket = "task-1973"
-reason = "task-1973 turned on the four lints and missing_docs for this crate (#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)] on main.rs). 191 sites answered; every one in this file now propagates a caught error or reads through .get(). No measurement changed: the crate's 178 tests pass unchanged. The streamed digest errors if a reader ever answers with more bytes than the buffer holds."
-sha256 = "e4e554db36ef5104f96ec0c9a4a9bc59ae72adfd640d83fcca1633612393ba9b"
+ticket = "task-2110"
+reason = "Bug 5: a manifest can say runnable false, for a model whose vectors come from outside (the Qwen3 teachers), and an installed arm that fails to open fails the arm tests rather than skipping"
+sha256 = "1108adb3d0aef55f0671952663087e2551c58c7724095d9f28292945c86d3c12"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/queryset.rs"
@@ -134,9 +134,9 @@ sha256 = "fa7a8835c1902cb0416076044c595c8bd41be314ae9a51061b19727e03f31dc2"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/truncation.rs"
-ticket = "task-1970"
-reason = "Moved by aa63027 (task-1970): the rustfmt pass over this crate. Never declared here; task-1973 declares it because the guard was red at HEAD and this file is not its work."
-sha256 = "056d843526453f3a1d8d0d2e64c93bd0ba9b19a97321e1839fbbc3d442bf7661"
+ticket = "task-2110"
+reason = "Bug 5: a manifest can say runnable false, for a model whose vectors come from outside (the Qwen3 teachers), and an installed arm that fails to open fails the arm tests rather than skipping"
+sha256 = "15f02de728473198d3e9c9115379d1039f1ce126ddc966039ed28dadec6027bb"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/tune.rs"
@@ -218,9 +218,9 @@ sha256 = "684d92dc2622ba9bd7c5032c224a3848c81d5d1531846ab355560c9de4e4896d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/model.rs"
-ticket = "task-1932"
-reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
-sha256 = "194dc2057506af2b35c24b0a846baad8ae6848c42f4761268e1eeb51e3c9bd02"
+ticket = "task-2110"
+reason = "Bug 5: a manifest can say runnable false, for a model whose vectors come from outside (the Qwen3 teachers), and an installed arm that fails to open fails the arm tests rather than skipping"
+sha256 = "44b7781a6d3147e79b283e9f518b65a33d41c43ff5f3983bb31630df5e53e689"
 
 [[amendment]]
 path = "crates/inillucent-core/src/persist.rs"

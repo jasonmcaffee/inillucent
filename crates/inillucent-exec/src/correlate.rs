@@ -56,7 +56,7 @@ use crate::physical::{prepare_any, run_any_prepared_limited, Params, Prepared, T
 /// Colliding would be a wrong answer rather than an error - the block would
 /// read the application's value instead of the outer row's - which is why the
 /// separation is a stated constant rather than "one past the highest we saw".
-const FIRST_CORRELATION_PARAMETER: u32 = 100_000;
+const FIRST_CORRELATION_PARAMETER: u32 = crate::physical::ENGINE_PARAMETER_BASE;
 
 /// One correlated block, planned once.
 pub struct Correlation {

@@ -2167,12 +2167,8 @@ mod tests {
             model_file: "model.onnx".into(),
             token_type_ids: false,
             backend: inillucent_core::model::Backend::Onnx,
-            output: inillucent_core::model::Output::TokenEmbeddings,
-            output_name: String::new(),
-            tokenizer_sha256: String::new(),
-            weights_sha256: String::new(),
-            recipe_git_sha: None,
             source: None,
+            ..ModelManifest::nomic_v1_5()
         };
         std::fs::write(
             dir.join(models::MANIFEST_FILE),

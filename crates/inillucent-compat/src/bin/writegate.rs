@@ -87,6 +87,8 @@ struct Settings {
     scale: String,
     families: Vec<String>,
     repeat_override: Option<u32>,
+    /// Whether a busy machine stops the pass being graded, and whether to record a reference (task-2110).
+    quiet: inillucent_compat::quiet::Options,
 }
 
 fn main() -> ExitCode {
@@ -102,7 +104,7 @@ fn main() -> ExitCode {
         eprintln!(
             "usage: inillucent-writegate <sqlite fixture> [--rounds N] [--page-size N] \
              [--scale S] [--frames N] [--families a,b] [--repeat N] \
-             [--cores performance|efficiency|any]"
+             [--cores performance|efficiency|any] [--quiet-threshold PERCENT]              [--record-quiet-reference]"
         );
         return ExitCode::from(2);
     };
@@ -133,10 +135,13 @@ fn main() -> ExitCode {
             .map(|value| value.split(',').map(str::to_string).collect())
             .unwrap_or_else(|| FAMILIES.iter().map(|(name, _)| name.to_string()).collect()),
         repeat_override: flag(&arguments, "--repeat").and_then(|value| value.parse().ok()),
+        quiet: inillucent_compat::quiet::Options::from_arguments(&arguments),
     };
     match run(Path::new(fixture), &settings, &placement) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::from(1),
+        Ok(Some(true)) => ExitCode::SUCCESS,
+        Ok(Some(false)) => ExitCode::from(1),
+        // Measured and not graded, because the machine was not quiet (task-2110).
+        Ok(None) => ExitCode::from(inillucent_compat::quiet::NOT_GRADED),
         Err(reason) => {
             eprintln!("write gate: {reason}");
             ExitCode::from(2)
@@ -236,7 +241,8 @@ fn print_configuration(
 ///
 /// @param settings - the command line, for which families were asked for
 /// @param measured - every workload's paired rounds
-fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
+/// @param graded - false when the machine was not quiet, so no family is MET or MISSED
+fn report_families(settings: &Settings, measured: &[Paired], graded: bool) -> bool {
     let mut met_every_family = true;
     println!();
     println!("## families");
@@ -318,7 +324,7 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
             low,
             high,
             worst,
-            if met { "MET" } else { "MISSED" }
+            inillucent_compat::quiet::verdict(graded, met)
         );
         let _ = &rolled;
     }
@@ -327,7 +333,7 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
 }
 
 /// @param placement - the processors this process was pinned to
-fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<bool, String> {
+fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<Option<bool>, String> {
     let bench = sqlite_bench().ok_or_else(|| {
         "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
     })?;
@@ -446,6 +452,12 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
         }
     }
 
+    // **Before any verdict is printed (task-2110).** The bound was measured on
+    // the read workloads, and a write's time also moves with the disk, so the
+    // check here says so rather than claiming the same precision.
+    let graded = inillucent_compat::quiet::check(&measured, &plan, &settings.quiet).graded();
+    println!("  (the 3% bound was measured on the full gate's read workloads; a write also waits on the disk)");
+
     println!();
     println!("## result");
     println!(
@@ -475,10 +487,13 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
         );
     }
 
-    passed = passed && report_families(settings, &measured);
+    passed = passed && report_families(settings, &measured, graded);
     println!();
-    println!("## gate: {}", if passed { "MET" } else { "NOT MET" });
-    Ok(passed)
+    println!(
+        "## gate: {}",
+        inillucent_compat::quiet::gate_line(graded, passed)
+    );
+    Ok(graded.then_some(passed))
 }
 
 /// Prints where one statement's time goes, before any of it is compared to

@@ -135,9 +135,7 @@ fn build(exe: &Path, name: &str) -> Result<std::path::PathBuf, String> {
     let root = workspace_root().join("_agent_output/shellrss");
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     let target = root.join(name);
-    for suffix in ["", "-journal", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(root.join(format!("{name}{suffix}")));
-    }
+    inillucent_base::testing::remove_database(&target);
     run_script(exe, &target, BUILD)?;
     Ok(target)
 }

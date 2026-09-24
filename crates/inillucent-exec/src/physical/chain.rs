@@ -1521,8 +1521,7 @@ impl<'t> Statement<'t> {
         let source = params.bindings();
         if !std::sync::Arc::ptr_eq(&self.bindings, &source) {
             if let (Ok(from), Ok(mut held)) = (source.lock(), self.bindings.lock()) {
-                held.clear();
-                held.extend_from_slice(&from);
+                held.copy_from(&from);
             }
         }
         let source = {

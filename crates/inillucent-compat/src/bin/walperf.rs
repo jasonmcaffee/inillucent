@@ -614,9 +614,7 @@ fn attach_family(scratch: &Path) -> Result<Vec<Measurement>, String> {
     for databases in [1usize, 2] {
         let name = format!("attach-{databases}");
         let aux = scratch.join(format!("{name}-aux.db"));
-        for suffix in ["", "-wal.0000000001"] {
-            let _ = std::fs::remove_file(PathBuf::from(format!("{}{suffix}", aux.display())));
-        }
+        inillucent_base::testing::remove_database(&aux);
         let (database, connection) = fresh(scratch, &name, Synchronous::Full)?;
         run(&connection, "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)")?;
         if databases == 2 {

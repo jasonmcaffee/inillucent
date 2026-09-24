@@ -580,6 +580,7 @@ mod tests {
             model_file: "model.onnx".into(),
             token_type_ids: false,
             backend: inillucent_core::model::Backend::Onnx,
+            runnable: true,
             output: inillucent_core::model::Output::TokenEmbeddings,
             output_name: String::new(),
             tokenizer_sha256: String::new(),

@@ -117,6 +117,11 @@ impl Arm {
     /// @param model - the resolved model and its manifest
     /// @param options - the machine settings
     pub fn open(model: &ResolvedModel, options: &ArmOptions) -> Result<Arm> {
+        anyhow::ensure!(
+            model.manifest.runnable,
+            "{}'s manifest says this harness does not run it (`runnable: false`): its vectors              come from outside, through cache-from-vectors",
+            model.manifest.id
+        );
         match model.manifest.backend {
             Backend::Onnx => {
                 let onnx = inillucent_core::embed_onnx::OnnxOptions {

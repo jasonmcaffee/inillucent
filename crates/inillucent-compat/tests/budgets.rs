@@ -34,9 +34,7 @@ fn area() -> PathBuf {
 fn database(name: &str, rows: usize) -> PathBuf {
     let program = cliproc::program("inillucent");
     let path = area().join(name);
-    for suffix in ["", "-wal", "-journal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-    }
+    inillucent_base::testing::remove_database(&path);
     let named = path.to_string_lossy().into_owned();
     let made = Command::new(&program)
         .args(["--db", &named, "exec", "CREATE TABLE t (n INTEGER, s TEXT)"])

@@ -369,9 +369,7 @@ fn a_tokenizer_this_build_has_not_got_is_refused_rather_than_substituted() {
 
     // What this engine does: refuse, by name, at `CREATE VIRTUAL TABLE`.
     let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fts5-trigram.rdb");
-    for suffix in ["", "-wal", "-journal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-    }
+    inillucent_base::testing::remove_database(&path);
     let database = Database::open(&path).expect("the database opens");
     let connection = database.session().expect("the connection opens");
     for name in ["trigram", "icu", "porter2"] {
@@ -476,9 +474,7 @@ fn a_contentless_table_stores_no_text() {
 #[test]
 fn the_fts5_options_this_build_cannot_honour_are_refused() {
     let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fts5-options.rdb");
-    for suffix in ["", "-wal", "-journal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-    }
+    inillucent_base::testing::remove_database(&path);
     let database = Database::open(&path).expect("the database opens");
     let connection = database.session().expect("the connection opens");
     for (name, option) in [

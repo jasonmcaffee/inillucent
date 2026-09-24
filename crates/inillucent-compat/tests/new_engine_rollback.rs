@@ -39,7 +39,7 @@ fn fixture(name: &str) -> Database {
     let area = workspace_root().join("target/scratch/rollback");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
-    let _ = std::fs::remove_file(&path);
+    inillucent_base::testing::remove_database(&path);
     let database = Database::open(&path).expect("a fresh database opens");
     {
         let connection = database.session();
@@ -252,7 +252,7 @@ fn a_rollback_survives_the_next_open() {
     let area = workspace_root().join("target/scratch/rollback");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join("reopened.rdb");
-    let _ = std::fs::remove_file(&path);
+    inillucent_base::testing::remove_database(&path);
     {
         let database = Database::open(&path).expect("created");
         let connection = database.session();

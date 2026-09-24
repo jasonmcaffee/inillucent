@@ -90,19 +90,16 @@ fn main() -> ExitCode {
         eprintln!(
             "usage: inillucent-readgate <sqlite fixture> [--rounds N] [--page-size N] \
              [--scale S] [--frames N] [--families a,b] [--repeat N] \
-             [--unfair-sqlite-cache-kib N] [--cores performance|efficiency|any]"
+             [--unfair-sqlite-cache-kib N] [--cores performance|efficiency|any]              [--quiet-threshold PERCENT] [--record-quiet-reference]"
         );
         return ExitCode::from(2);
     };
     let settings = Settings::from(&arguments);
     match run(&PathBuf::from(fixture), &settings) {
-        Ok(passed) => {
-            if passed {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
-        }
+        Ok(Some(true)) => ExitCode::SUCCESS,
+        Ok(Some(false)) => ExitCode::FAILURE,
+        // Measured and not graded, because the machine was not quiet (task-2110).
+        Ok(None) => ExitCode::from(inillucent_compat::quiet::NOT_GRADED),
         Err(reason) => {
             eprintln!("{reason}");
             ExitCode::FAILURE
@@ -126,6 +123,8 @@ struct Settings {
     /// here because "the fairness fix mattered" is a claim, and a claim about a
     /// measurement is worth what the measurement of it is worth.
     unfair_cache_kib: Option<i32>,
+    /// Whether a busy machine stops the pass being graded, and whether to record a reference.
+    quiet: inillucent_compat::quiet::Options,
 }
 
 impl Settings {
@@ -164,6 +163,7 @@ impl Settings {
             repeat_override: flag(arguments, "--repeat").and_then(|value| value.parse().ok()),
             unfair_cache_kib: flag(arguments, "--unfair-sqlite-cache-kib")
                 .and_then(|value| value.parse::<i32>().ok()),
+            quiet: inillucent_compat::quiet::Options::from_arguments(arguments),
         }
     }
 }
@@ -213,7 +213,8 @@ fn flag(arguments: &[String], name: &str) -> Option<String> {
 ///
 /// @param settings - the command line, for which families were asked for
 /// @param measured - every workload's paired rounds
-fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
+/// @param graded - false when the machine was not quiet, so no family is MET or MISSED
+fn report_families(settings: &Settings, measured: &[Paired], graded: bool) -> bool {
     let mut met_every_family = true;
     println!();
     println!("## families");
@@ -250,7 +251,7 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
         let met = low >= bar;
         println!(
             "  {family:<18} {point:>8.2}x {low:>8.2}x {high:>8.2}x {bar:>7.2}x  {}",
-            if met { "MET" } else { "MISSED" }
+            inillucent_compat::quiet::verdict(graded, met)
         );
         met_every_family = met_every_family && met;
     }
@@ -329,7 +330,7 @@ fn report_stage_breakdown(
     Ok(())
 }
 
-fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
+fn run(fixture: &Path, settings: &Settings) -> Result<Option<bool>, String> {
     let bench = sqlite_bench().ok_or_else(|| {
         "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
     })?;
@@ -555,6 +556,40 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         }
     }
 
+    // Before any verdict is printed: see `inillucent_compat::quiet` (task-2110).
+    let graded = inillucent_compat::quiet::check(&measured, &plan, &settings.quiet).graded();
+
+    let mut passed = report_results(&measured, &refused);
+    passed = passed && report_families(settings, &measured, graded);
+
+    if let Some(nanos) = probe_nanos {
+        let met = nanos < 500.0;
+        println!(
+            "  {:<18} {nanos:>8.1}ns {:>9} {:>9} {:>7}ns  {}",
+            "PointProbe",
+            "-",
+            "-",
+            500,
+            inillucent_compat::quiet::verdict(graded, met)
+        );
+        passed = passed && met;
+    }
+
+    println!();
+    println!(
+        "  VERDICT: {}",
+        inillucent_compat::quiet::verdict(graded, passed)
+    );
+    Ok(graded.then_some(passed))
+}
+
+/// Prints the per workload result table, and returns whether every workload was planned and agreed.
+///
+/// **Lifted out of [`run`] (task-2110)**, which the quiet check had taken past its recorded length.
+///
+/// @param measured - every workload's paired rounds
+/// @param refused - the workloads the physical pass refused, which the gate cannot pass without
+fn report_results(measured: &[Paired], refused: &[(String, String)]) -> bool {
     println!();
     println!("## result");
     println!(
@@ -568,7 +603,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             refused.len()
         );
     }
-    for entry in &measured {
+    for entry in measured {
         if !entry.agreed {
             println!(
                 "  {:<18} {:>14} {:>14} {:>9} {:>9} {:>9}  NO: {}",
@@ -589,25 +624,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             high
         );
     }
-
-    passed = passed && report_families(settings, &measured);
-
-    if let Some(nanos) = probe_nanos {
-        let met = nanos < 500.0;
-        println!(
-            "  {:<18} {nanos:>8.1}ns {:>9} {:>9} {:>7}ns  {}",
-            "PointProbe",
-            "-",
-            "-",
-            500,
-            if met { "MET" } else { "MISSED" }
-        );
-        passed = passed && met;
-    }
-
-    println!();
-    println!("  VERDICT: {}", if passed { "MET" } else { "MISSED" });
-    Ok(passed)
+    passed
 }
 
 /// One workload, planned and prepared.

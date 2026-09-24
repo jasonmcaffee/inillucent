@@ -31,7 +31,7 @@ fn scratch(name: &str) -> PathBuf {
     let area = workspace_root().join("target/scratch/create");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
-    let _ = std::fs::remove_file(&path);
+    inillucent_base::testing::remove_database(&path);
     path
 }
 

@@ -94,6 +94,7 @@ mod tests {
             model_file: "model.gguf".into(),
             token_type_ids: false,
             backend,
+            runnable: true,
             output: inillucent_core::model::Output::TokenEmbeddings,
             output_name: String::new(),
             tokenizer_sha256: String::new(),

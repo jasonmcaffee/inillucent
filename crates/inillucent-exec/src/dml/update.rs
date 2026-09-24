@@ -415,8 +415,7 @@ fn adopt_bindings(bindings: &crate::physical::Bindings, params: &Params) {
     let (Ok(from), Ok(mut held)) = (source.lock(), bindings.lock()) else {
         return;
     };
-    held.clear();
-    held.extend_from_slice(&from);
+    held.copy_from(&from);
 }
 /// Builds everything an `UPDATE` needs before it looks at a row.
 ///

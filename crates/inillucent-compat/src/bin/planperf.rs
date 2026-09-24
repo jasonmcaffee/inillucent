@@ -143,11 +143,7 @@ fn build_database(root: &Path) -> Result<PathBuf, String> {
     let directory = root.join("_agent_output/planperf");
     std::fs::create_dir_all(&directory).map_err(|reason| reason.to_string())?;
     let path = directory.join("plan.db");
-    for suffix in ["", "-journal"] {
-        let mut name = path.clone().into_os_string();
-        name.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(name));
-    }
+    inillucent_base::testing::remove_database(&path);
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
     let connection = database.session();
     let mut script = vec![

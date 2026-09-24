@@ -300,14 +300,11 @@ fn measure(
     Ok(paired)
 }
 
-/// Removes a database and whatever it left beside it.
+/// Removes a database and whatever it left beside it, numbered log segments included.
+///
+/// @param path - the database file
 fn remove(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    for suffix in ["-journal", "-wal", "-shm"] {
-        let mut side = path.as_os_str().to_os_string();
-        side.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(side));
-    }
+    inillucent_base::testing::remove_database(path);
 }
 
 /// Copies a pristine database into place for one round.

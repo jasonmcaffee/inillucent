@@ -23,6 +23,121 @@ use inillucent_tree::datum::OwnedDatum;
 /// changing the shape of a signature nothing else uses.
 use super::*;
 
+/// The first parameter number the engine gives a slot of its own.
+///
+/// A correlated block's outer references are fed through parameters numbered
+/// from here (`correlate.rs`). SQLite's `SQLITE_MAX_VARIABLE_NUMBER` is 32,766
+/// and this engine's limits agree, so a number past it cannot collide with one
+/// a statement wrote.
+pub const ENGINE_PARAMETER_BASE: u32 = 100_000;
+
+/// The zero based position of [`ENGINE_PARAMETER_BASE`].
+const ENGINE_AT: usize = (ENGINE_PARAMETER_BASE - 1) as usize;
+
+/// The values in one parameter set: the statement's own, and the engine's.
+///
+/// **Two lists, because one dense list cost a correlated query 45,000 page
+/// faults an execution (task-2110, bug 3).** The engine's slots start at
+/// [`ENGINE_PARAMETER_BASE`], and a single vector indexed by parameter number
+/// grew to 100,001 entries, 3.2 MB, the first time one was written.
+/// `Correlated::push` copies the set once per batch and writes an outer row's
+/// columns into the copy, so `correlated.exists` on the medium fixture made and
+/// freed 58 of those an execution. A block that size is not kept by the pooled
+/// allocator or by the Windows heap, so every one was paged in again: 45,414
+/// faults for `correlated.exists` and 91,390 for `correlated.in`, 93% of every
+/// fault the full gate's plan takes, against SQLite's 11,600 for the whole
+/// plan. Stored from zero in a list of their own, the engine's slots are a few
+/// entries long.
+///
+/// Every reader goes through [`Slots::get`] with the same zero based position
+/// it used on the vector, so an `Expr::Parameter` over `?100000` reads the same
+/// value it always did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Slots {
+    /// `?1` onwards, as a statement binds them.
+    statement: Vec<OwnedDatum>,
+    /// `?100000` onwards, stored from position zero.
+    engine: Vec<OwnedDatum>,
+}
+
+impl Slots {
+    /// A set holding a statement's values, `?1` first.
+    ///
+    /// @param values - the values
+    pub fn from_values(values: Vec<OwnedDatum>) -> Slots {
+        Slots {
+            statement: values,
+            engine: Vec::new(),
+        }
+    }
+
+    /// The value at a zero based position, when one has been bound there.
+    ///
+    /// @param at - the parameter number minus one
+    pub fn get(&self, at: usize) -> Option<&OwnedDatum> {
+        match at.checked_sub(ENGINE_AT) {
+            Some(offset) => self.engine.get(offset),
+            None => self.statement.get(at),
+        }
+    }
+
+    /// Binds a zero based position, growing the list it belongs to with NULLs.
+    ///
+    /// @param at - the parameter number minus one
+    /// @param value - the value
+    pub fn set(&mut self, at: usize, value: OwnedDatum) {
+        let (list, offset) = match at.checked_sub(ENGINE_AT) {
+            Some(offset) => (&mut self.engine, offset),
+            None => (&mut self.statement, at),
+        };
+        if list.len() <= offset {
+            list.resize(offset.saturating_add(1), OwnedDatum::Null);
+        }
+        if let Some(slot) = list.get_mut(offset) {
+            *slot = value;
+        }
+    }
+
+    /// How many of the statement's own parameters are bound. The engine's are not counted.
+    pub fn len(&self) -> usize {
+        self.statement.len()
+    }
+
+    /// Whether nothing at all is bound.
+    pub fn is_empty(&self) -> bool {
+        self.statement.is_empty() && self.engine.is_empty()
+    }
+
+    /// Unbinds everything.
+    pub fn clear(&mut self) {
+        self.statement.clear();
+        self.engine.clear();
+    }
+
+    /// Replaces the statement's values, leaving the engine's unbound.
+    ///
+    /// @param values - the new values, `?1` first
+    pub fn refill(&mut self, values: impl IntoIterator<Item = OwnedDatum>) {
+        self.clear();
+        self.statement.extend(values);
+    }
+
+    /// Makes this set hold what another holds, keeping this one's capacity.
+    ///
+    /// @param other - the set to copy
+    pub fn copy_from(&mut self, other: &Slots) {
+        self.statement.clear();
+        self.statement.extend_from_slice(&other.statement);
+        self.engine.clear();
+        self.engine.extend_from_slice(&other.engine);
+    }
+
+    /// The statement's values, `?1` first.
+    pub fn statement(&self) -> &[OwnedDatum] {
+        &self.statement
+    }
+}
+
 /// The values bound to `?1`, `?2`, ... for one execution.
 ///
 /// **`Clone` is written out rather than derived, and the reason is the cell.**
@@ -106,7 +221,7 @@ fn split_mix(seed: u64) -> u64 {
 impl Clone for Params {
     fn clone(&self) -> Params {
         Params {
-            values: Bindings::new(std::sync::Mutex::new(self.held().clone())),
+            values: Bindings::new(std::sync::Mutex::new(self.held())),
             declared: self.declared,
             reads: std::cell::Cell::new(self.reads.get()),
             context: self.context.clone(),
@@ -133,7 +248,7 @@ impl Params {
     /// @param values - the values, in parameter order
     pub fn from_values(values: Vec<OwnedDatum>) -> Params {
         Params {
-            values: Bindings::new(std::sync::Mutex::new(values)),
+            values: Bindings::new(std::sync::Mutex::new(Slots::from_values(values))),
             declared: None,
             reads: std::cell::Cell::new(0),
             context: std::cell::Cell::new(crate::scalar::Context::default()),
@@ -150,7 +265,7 @@ impl Params {
     /// @param subqueries - one slot per subquery, by the binder's numbering
     pub fn with_subqueries(&self, subqueries: Vec<Option<crate::subquery::Subvalue>>) -> Params {
         Params {
-            values: Bindings::new(std::sync::Mutex::new(self.held().clone())),
+            values: Bindings::new(std::sync::Mutex::new(self.held())),
             declared: self.declared,
             reads: std::cell::Cell::new(self.reads.get()),
             context: self.context.clone(),
@@ -173,7 +288,7 @@ impl Params {
     /// to see the same binding the outer statement did.
     pub fn without_subqueries(&self) -> Params {
         Params {
-            values: Bindings::new(std::sync::Mutex::new(self.held().clone())),
+            values: Bindings::new(std::sync::Mutex::new(self.held())),
             declared: self.declared,
             reads: std::cell::Cell::new(self.reads.get()),
             context: self.context.clone(),
@@ -211,7 +326,7 @@ impl Params {
 
     /// Returns a copy of the bound values, `?1` first.
     pub fn values(&self) -> Vec<OwnedDatum> {
-        self.held()
+        self.held().statement().to_vec()
     }
 
     /// Returns how many parameter reads this set has answered.
@@ -293,8 +408,7 @@ impl Params {
         let Ok(mut held) = self.values.lock() else {
             return;
         };
-        held.clear();
-        held.extend(values);
+        held.refill(values);
     }
 
     /// Returns the value bound to a parameter.
@@ -319,9 +433,10 @@ impl Params {
         // took one value out of the copy. For an ordinary statement that is a
         // handful of slots and nobody noticed; a correlated block's parameters
         // start at `FIRST_CORRELATION_PARAMETER`, which is 100,000, and
-        // `Params::set` stores into a dense vector - so every read of one
+        // `Params::set` stored into a dense vector - so every read of one
         // copied a hundred thousand `OwnedDatum`s to return a single one, on
-        // every outer row.
+        // every outer row. The engine's slots are a list of their own since
+        // task-2110 (see `Slots`), and this still reads without copying.
         let Ok(held) = self.values.lock() else {
             return OwnedDatum::Null;
         };
@@ -345,7 +460,7 @@ impl Params {
     /// A lock that cannot be taken reads as no values bound, which is what an
     /// unbound set is - a poisoned mutex here would otherwise turn a parameter
     /// read into a panic on a path that is not allowed to have one.
-    fn held(&self) -> Vec<OwnedDatum> {
+    fn held(&self) -> Slots {
         self.values
             .lock()
             .map(|held| held.clone())
@@ -395,12 +510,7 @@ impl Params {
         let Ok(mut held) = self.values.lock() else {
             return;
         };
-        if held.len() <= at {
-            held.resize(at.saturating_add(1), OwnedDatum::Null);
-        }
-        if let Some(slot) = held.get_mut(at) {
-            *slot = value;
-        }
+        held.set(at, value);
     }
 
     /// Binds one parameter, reporting an index the statement does not have.
@@ -441,12 +551,7 @@ impl Params {
         let Ok(mut held) = self.values.lock() else {
             return Err(());
         };
-        if held.len() <= at {
-            held.resize(at.saturating_add(1), OwnedDatum::Null);
-        }
-        if let Some(slot) = held.get_mut(at) {
-            *slot = value;
-        }
+        held.set(at, value);
         Ok(())
     }
 
@@ -490,6 +595,51 @@ impl Params {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An engine slot is read back at its own number, by `get` and through the
+    /// cell an `Expr::Parameter` holds, and costs one entry rather than a hundred
+    /// thousand (task-2110, bug 3).
+    ///
+    /// The size is what the bug was: one write at `ENGINE_PARAMETER_BASE` grew
+    /// a dense vector to 100,001 entries, and `correlated.exists` made and freed
+    /// 58 of those an execution. The value checks are the part a wrong fix
+    /// would break - a slot filed in the wrong list, or read at the wrong
+    /// offset, answers the correlated block with the wrong outer row.
+    #[test]
+    fn an_engine_slot_is_one_entry_and_reads_back_at_its_own_number() {
+        let mut params = Params::from_values(vec![OwnedDatum::Int(1), OwnedDatum::Int(2)]);
+        params.set(ENGINE_PARAMETER_BASE, OwnedDatum::Int(7));
+        params.set(ENGINE_PARAMETER_BASE + 2, OwnedDatum::Int(9));
+        assert_eq!(params.get(ENGINE_PARAMETER_BASE), OwnedDatum::Int(7));
+        assert_eq!(params.get(ENGINE_PARAMETER_BASE + 1), OwnedDatum::Null);
+        assert_eq!(params.get(ENGINE_PARAMETER_BASE + 2), OwnedDatum::Int(9));
+        assert_eq!(params.get(2), OwnedDatum::Int(2));
+        assert_eq!(
+            params.len(),
+            2,
+            "the engine's slots are not the statement's"
+        );
+        let cell = params.bindings();
+        let held = cell.lock().expect("the cell locks");
+        assert_eq!(held.statement().len(), 2);
+        assert_eq!(
+            held.engine.len(),
+            3,
+            "three entries, not a hundred thousand"
+        );
+        assert_eq!(
+            held.get((ENGINE_PARAMETER_BASE - 1) as usize),
+            Some(&OwnedDatum::Int(7)),
+            "the position an Expr::Parameter reads"
+        );
+        drop(held);
+        // A copy carries the engine's slots, and writing into it leaves the original alone.
+        let mut copy = params.clone();
+        copy.set(ENGINE_PARAMETER_BASE, OwnedDatum::Int(8));
+        assert_eq!(params.get(ENGINE_PARAMETER_BASE), OwnedDatum::Int(7));
+        assert_eq!(copy.get(ENGINE_PARAMETER_BASE), OwnedDatum::Int(8));
+        assert_eq!(copy.get(ENGINE_PARAMETER_BASE + 2), OwnedDatum::Int(9));
+    }
 
     /// An unbound parameter reads as NULL rather than as an error.
     ///

@@ -31,9 +31,7 @@ fn scratch(name: &str) -> PathBuf {
     let directory = directory.join("_agent_output/driver-statement");
     let _ = std::fs::create_dir_all(&directory);
     let path = directory.join(format!("{name}.rdb"));
-    for suffix in ["", "-wal", "-journal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-    }
+    inillucent_base::testing::remove_database(&path);
     path
 }
 

@@ -127,9 +127,7 @@ pub fn scratch(area: &str, name: &str, engine: &str) -> PathBuf {
     let directory = workspace_root().join("_agent_output").join(area);
     let _ = std::fs::create_dir_all(&directory);
     let path = directory.join(format!("{name}-{engine}.db"));
-    for suffix in ["", "-journal", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(directory.join(format!("{name}-{engine}.db{suffix}")));
-    }
+    inillucent_base::testing::remove_database(&path);
     path
 }
 

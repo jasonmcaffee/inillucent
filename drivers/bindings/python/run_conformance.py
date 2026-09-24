@@ -21,6 +21,7 @@ something larger.
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import sys
@@ -153,6 +154,21 @@ def scratch(name):
     )
 
 
+def remove_database(path):
+    """Remove a database and every file the engine wrote beside it.
+
+    The engine's log is numbered segments, `<path>-wal.0000000001` and on, and
+    removing only `path` left one set of them in the temporary directory for
+    every case of every run (task-2110, bug 1).
+    """
+    for candidate in [path, path + "-wal", path + "-journal", path + "-shm"] + glob.glob(
+            glob.escape(path) + "-wal.*"):
+        try:
+            os.remove(candidate)
+        except OSError:
+            pass
+
+
 def record(ran, failures):
     """Writes what this runner ran, for the tooling guard to read.
 
@@ -218,10 +234,7 @@ def main():
                         wrong.append(f"`{sql}`: {problem}")
         finally:
             database.close()
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+            remove_database(path)
 
         print(f"  {'FAIL' if wrong else 'ok  '}  {name}")
         for problem in wrong:

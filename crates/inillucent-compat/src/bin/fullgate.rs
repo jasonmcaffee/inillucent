@@ -149,6 +149,8 @@ struct Settings {
     /// Whether this engine's arm runs each round in a fresh child process, the
     /// way the reference arm always has (task-2095).
     engine_child: bool,
+    /// Whether a busy machine stops the pass being graded, and whether to record a reference (task-2110).
+    quiet: inillucent_compat::quiet::Options,
 }
 
 fn main() -> ExitCode {
@@ -193,7 +195,7 @@ fn main() -> ExitCode {
             "usage: inillucent-fullgate <sqlite fixture> [--rounds N] [--page-size N] \
              [--scale S] [--frames N] [--families a,b] [--repeat N] [--locking normal|exclusive] \
              [--module-split] [--put-split] [--cores performance|efficiency|any] \
-             [--samples <file>] [--engine-child]"
+             [--samples <file>] [--engine-child] [--quiet-threshold PERCENT]              [--record-quiet-reference]"
         );
         return ExitCode::from(2);
     };
@@ -214,8 +216,10 @@ fn main() -> ExitCode {
         }
     };
     match run(Path::new(fixture), &settings, &placement) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::from(1),
+        Ok(Some(true)) => ExitCode::SUCCESS,
+        Ok(Some(false)) => ExitCode::from(1),
+        // Measured and not graded, because the machine was not quiet (task-2110).
+        Ok(None) => ExitCode::from(inillucent_compat::quiet::NOT_GRADED),
         Err(reason) => {
             eprintln!("full gate: {reason}");
             ExitCode::from(2)
@@ -300,6 +304,7 @@ fn settings_from(arguments: &[String]) -> Settings {
         // taken that way is a different number from every published one.
         samples: flag(arguments, "--samples").map(PathBuf::from),
         engine_child: arguments.iter().any(|value| value == "--engine-child"),
+        quiet: inillucent_compat::quiet::Options::from_arguments(arguments),
     }
 }
 
@@ -709,7 +714,8 @@ fn print_configuration(
 ///
 /// @param settings - the command line, for which families were asked for
 /// @param measured - every workload's paired rounds
-fn report_families(settings: &Settings, measured: &[Paired]) -> (bool, bool) {
+/// @param graded - false when the machine was not quiet, so no family is MET or MISSED
+fn report_families(settings: &Settings, measured: &[Paired], graded: bool) -> (bool, bool) {
     let mut met_every_family = true;
     // Whether every family the contract weights actually reported. A headline
     // weighted over a plan that skipped one is a headline about a different
@@ -761,7 +767,7 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> (bool, bool) {
             low,
             high,
             worst,
-            if met { "MET" } else { "MISSED" }
+            inillucent_compat::quiet::verdict(graded, met)
         );
     }
     (met_every_family, every_family_reported)
@@ -824,7 +830,7 @@ fn report_results(measured: &[Paired]) -> bool {
 }
 
 /// @param placement - the processors this process was pinned to
-fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<bool, String> {
+fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<Option<bool>, String> {
     let bench = sqlite_bench().ok_or_else(|| {
         "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
     })?;
@@ -934,13 +940,16 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
         settings.page_size,
     );
 
+    // Before any verdict is printed: see `inillucent_compat::quiet` (task-2110).
+    let graded = inillucent_compat::quiet::check(&measured, &plan, &settings.quiet).graded();
+
     let mut passed = report_results(&measured);
 
     // Reported, and it does not decide the gate: the two arms being apart is a
     // cost to explain on the performance page, not a regression against SQLite.
     report_the_two_ways_in(&api_pairs);
 
-    let (met_every_family, every_family_reported) = report_families(settings, &measured);
+    let (met_every_family, every_family_reported) = report_families(settings, &measured, graded);
     passed = passed && met_every_family;
 
     // **The headline, weighted and unweighted, in that order and both of them.**
@@ -994,10 +1003,8 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
                 "A FAMILY REPORTED NOTHING - not a headline"
             } else if !full_plan {
                 "PARTIAL RUN - not a headline"
-            } else if met {
-                "MET"
             } else {
-                "MISSED"
+                inillucent_compat::quiet::verdict(graded, met)
             }
         );
         println!(
@@ -1034,7 +1041,14 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
         }
         let (low, _) = family_bounds(&members, SEED);
         if low < contract.floor {
-            println!("  {family:<16} {low:>8.2}x  UNDER THE FLOOR");
+            println!(
+                "  {family:<16} {low:>8.2}x  {}",
+                if graded {
+                    "UNDER THE FLOOR"
+                } else {
+                    "under the floor, NOT GRADED"
+                }
+            );
             floored = false;
         }
     }
@@ -1048,7 +1062,8 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
     // the processor time of a families-filtered round are a different quantity
     // wearing the same name, because the workloads that hold the memory may not
     // have run.
-    passed = report_residency(&contract, child.as_ref(), &their_rounds, full_plan) && passed;
+    passed =
+        report_residency(&contract, child.as_ref(), &their_rounds, full_plan, graded) && passed;
 
     // **The scratch goes with the run that made it.** Every round copies the
     // fixture twice and imports one of the copies, so a medium run leaves
@@ -1072,8 +1087,11 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
     }
 
     println!();
-    println!("## gate: {}", if passed { "MET" } else { "NOT MET" });
-    Ok(passed)
+    println!(
+        "## gate: {}",
+        inillucent_compat::quiet::gate_line(graded, passed)
+    );
+    Ok(graded.then_some(passed))
 }
 
 /// Judges the peak resident set and the processor time against the contract.
@@ -1093,11 +1111,13 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
 /// @param child - what this engine's child cost, when one ran
 /// @param theirs - the reference child's cost, one per round
 /// @param full_plan - whether every family ran
+/// @param graded - false when the machine was not quiet, so neither bar is MET or MISSED
 fn report_residency(
     contract: &Contract,
     child: Option<&ChildRound>,
     theirs: &[ProcessCost],
     full_plan: bool,
+    graded: bool,
 ) -> bool {
     use inillucent_compat::procstat::{mebibytes, millis};
     println!();
@@ -1143,12 +1163,8 @@ fn report_residency(
             (None, _) => "no bar".to_string(),
             (Some(_), false) => "PARTIAL RUN - not judged".to_string(),
             (Some(bar), true) => {
-                if ratio <= bar {
-                    "MET".to_string()
-                } else {
-                    met = false;
-                    "MISSED".to_string()
-                }
+                met = met && ratio <= bar;
+                inillucent_compat::quiet::verdict(graded, ratio <= bar).to_string()
             }
         };
         println!(

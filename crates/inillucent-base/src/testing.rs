@@ -6,6 +6,11 @@
 //! `inillucent-testrun --strict`, and a suite that returns without printing is
 //! invisible to everything.
 //!
+//! It also holds [`remove_database`], the one way a test clears a scratch
+//! database before reusing its path, because a database here is a file plus
+//! numbered log segments and every copy of that list elsewhere forgot the
+//! segments.
+//!
 //! **Why this is in the bottom crate rather than in the test harness
 //! (task-1969, 4.6).** `inillucent_compat::differential::skipping` was the
 //! original home, and three crates could not reach it: the layering contract
@@ -72,9 +77,85 @@ pub fn skipping(reason: &str) {
     eprintln!("{reason}{MARKER}");
 }
 
+/// Removes a database file and every file the engine or SQLite keeps beside it.
+///
+/// **The log is not one file (task-2110, bugs 1 and 7).** The engine writes its
+/// log as numbered segments, `<name>-wal.0000000001` and on, and the helpers
+/// this replaces removed `<name>-wal` and nothing else. A test that reuses a
+/// scratch path then opened a new database beside the last run's segments, and
+/// the engine replayed them into it: `new_engine_surface` failed with "table t
+/// already exists" after any run of it that had been stopped partway, which
+/// read as a defect in whatever the branch had changed. The segments are found
+/// by listing the directory because their numbers are not predictable - a chain
+/// can start anywhere once a checkpoint has removed its early segments.
+///
+/// Every removal ignores a missing file, so this is also what a test calls
+/// before it creates a database.
+///
+/// @param path - the database file
+pub fn remove_database(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    for suffix in ["-wal", "-journal", "-shm"] {
+        let _ = std::fs::remove_file(path.with_file_name(format!("{name}{suffix}")));
+    }
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
+    let Ok(listing) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let prefix = format!("{name}-wal.");
+    for entry in listing.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|file| file.starts_with(&prefix))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every numbered segment goes with the database, and a database whose
+    /// name is a prefix of this one's is left alone.
+    #[test]
+    fn a_removed_database_takes_its_segments_with_it() {
+        let directory =
+            std::env::temp_dir().join(format!("inillucent-remove-database-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("the scratch directory is made");
+        let database = directory.join("case.rdb");
+        let names = [
+            "case.rdb",
+            "case.rdb-wal",
+            "case.rdb-shm",
+            "case.rdb-wal.0000000002",
+            "case.rdb-wal.0000000007",
+            "case.rdb2",
+            "case.rdb2-wal.0000000001",
+        ];
+        for name in names {
+            std::fs::write(directory.join(name), b"x").expect("a file is written");
+        }
+        remove_database(&database);
+        let mut left: Vec<String> = std::fs::read_dir(&directory)
+            .expect("the directory lists")
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+            .collect();
+        left.sort();
+        assert_eq!(left, ["case.rdb2", "case.rdb2-wal.0000000001"]);
+        std::fs::remove_file(directory.join("case.rdb2")).expect("cleanup");
+        std::fs::remove_file(directory.join("case.rdb2-wal.0000000001")).expect("cleanup");
+        std::fs::remove_dir(&directory).expect("cleanup");
+    }
 
     /// The message a non-strict run prints ends with the one marker.
     ///

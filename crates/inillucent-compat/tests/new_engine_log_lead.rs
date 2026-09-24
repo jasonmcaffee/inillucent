@@ -98,7 +98,7 @@ fn fixture(tag: &str) -> Option<PathBuf> {
     let area = workspace_root().join("target/scratch/log-lead");
     let _ = std::fs::create_dir_all(&area);
     let target = area.join(format!("{tag}.db"));
-    let _ = std::fs::remove_file(&target);
+    inillucent_base::testing::remove_database(&target);
     std::fs::copy(&source, &target).ok()?;
     Some(target)
 }
