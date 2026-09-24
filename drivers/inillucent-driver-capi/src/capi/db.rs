@@ -157,7 +157,7 @@ pub unsafe extern "C" fn inillucent_open(
                     database,
                     connections: Cell::new(0),
                 });
-                *out = Box::into_raw(held);
+                *out = publish(held);
                 INILLUCENT_OK
             }
             Err(why) => {
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn inillucent_connect(
         database
             .connections
             .set(database.connections.get().saturating_add(1));
-        *out = Box::into_raw(Box::new(inillucent_conn {
+        *out = publish(Box::new(inillucent_conn {
             live: Live::new(inillucent_conn::MAGIC),
             state: Rc::new(ConnState {
                 database: db as *const inillucent_db,
@@ -389,7 +389,7 @@ pub unsafe extern "C" fn inillucent_execute(
         let connection = database.database.session_as(session_of(conn));
         match connection.query(sql, &[], capped(limit)) {
             Ok(rows) => {
-                *out = Box::into_raw(Box::new(built(rows)));
+                *out = publish(Box::new(built(rows)));
                 INILLUCENT_OK
             }
             Err(why) => {
@@ -599,7 +599,7 @@ pub unsafe extern "C" fn inillucent_txn_begin(
         let Some(handle) = held(conn as *const inillucent_conn) else {
             return misused("inillucent_txn_begin", error);
         };
-        *out = Box::into_raw(Box::new(inillucent_txn {
+        *out = publish(Box::new(inillucent_txn {
             live: Live::new(inillucent_txn::MAGIC),
             connection: Rc::clone(&handle.state),
             spent: false,

@@ -268,6 +268,32 @@ fn run(exe: &Path, variant: &str) -> (String, Option<i32>) {
     (printed, produced.status.code())
 }
 
+/// Describes how the program ended, for a failure message.
+///
+/// **The exit status is what says why a run stopped early (task-2098).** A run
+/// that stopped after `ok close` was first read as a program that printed
+/// nothing and failed to load, because the message had no exit status in it.
+/// It was an access violation, `0xC0000005`, which Windows reports as a
+/// negative `i32`, so the status is printed in hex as well.
+///
+/// @param code - the exit status, when there was one
+fn ending(code: Option<i32>) -> String {
+    match code {
+        None => "it was ended by a signal and has no exit status".to_string(),
+        Some(code) => {
+            let hex = format!("{:#010X}", code as u32);
+            let meaning = match code as u32 {
+                0xC000_0005 => " (an access violation: a read or write of memory it did not own)",
+                0xC000_0135 => " (a DLL it links was not found)",
+                0xC000_0409 => " (a stack buffer overrun, or a Rust abort)",
+                0xC000_00FD => " (a stack overflow)",
+                _ => "",
+            };
+            format!("it exited {code}, {hex}{meaning}")
+        }
+    }
+}
+
 /// Reports what the program printed, failing on any refusal.
 ///
 /// @param printed - everything the program wrote
@@ -288,7 +314,8 @@ fn judge(printed: &str, code: Option<i32>, how: &str) {
         printed.contains("\ndone\n")
             || printed.starts_with("done\n")
             || printed.ends_with("done\n"),
-        "{how}: the C conformance program did not reach the end. It printed:\n{printed}"
+        "{how}: the C conformance program did not reach the end, and {}. It printed:\n{printed}",
+        ending(code)
     );
     let checks = printed
         .lines()
@@ -302,8 +329,9 @@ fn judge(printed: &str, code: Option<i32>, how: &str) {
     assert_eq!(
         code,
         Some(0),
-        "{how}: the program printed no failure and still exited {code:?}, which is what an \
-         address sanitizer does when it finds something after the last check"
+        "{how}: the program printed no failure and still {}, which is what an \
+         address sanitizer does when it finds something after the last check",
+        ending(code)
     );
 }
 

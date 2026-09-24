@@ -79,7 +79,7 @@ pub unsafe extern "C" fn inillucent_prepare(
         let Some(handle) = held(conn as *const inillucent_conn) else {
             return misused("inillucent_prepare", error);
         };
-        *out = Box::into_raw(Box::new(inillucent_stmt {
+        *out = publish(Box::new(inillucent_stmt {
             live: Live::new(inillucent_stmt::MAGIC),
             connection: Rc::clone(&handle.state),
             sql: sql.to_owned(),
@@ -280,7 +280,7 @@ pub unsafe extern "C" fn inillucent_stmt_execute(
         let connection = database.database.session_as(statement.connection.session);
         match connection.query(&statement.sql, &statement.params, capped(limit)) {
             Ok(rows) => {
-                *out = Box::into_raw(Box::new(built(rows)));
+                *out = publish(Box::new(built(rows)));
                 INILLUCENT_OK
             }
             Err(why) => {

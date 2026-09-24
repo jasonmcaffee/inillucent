@@ -112,7 +112,7 @@ pub(crate) fn report(out: *mut *mut inillucent_error, failure: &Error, diagnosti
     // SAFETY: `out` is a caller-supplied pointer the header requires to be
     // either null - checked above - or writable. Ownership of the box moves to
     // the caller, who frees it with `inillucent_error_free`.
-    unsafe { *out = Box::into_raw(held) };
+    unsafe { *out = publish(held) };
 }
 /// Builds a C string, replacing an interior NUL rather than failing.
 ///

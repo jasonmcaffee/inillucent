@@ -138,17 +138,18 @@ pub(crate) unsafe fn borrowed(text: *const c_char) -> Option<&'static str> {
 /// sometimes an abort that the panic guard cannot intercept, because an abort
 /// is not an unwind.
 ///
-/// Every handle now begins with one of these, set to its own type's magic when
-/// the handle is made and cleared to zero immediately before the box is
-/// dropped. Every entry point reads it and answers `INILLUCENT_MISUSE` for a
-/// handle that does not carry the right word.
+/// Every handle begins with one of these, set to its own type's magic when the
+/// handle is made and cleared to zero immediately before the box is dropped.
 ///
-/// **It is a check, not a guarantee, and SQLite's is the same.** Once the
-/// allocation is freed the bytes belong to the allocator, and a later
-/// allocation may happen to put the magic back. What it does catch is the two
-/// cases that actually happen: a double free, where the memory is still
-/// untouched, and a handle used after it was freed in the same breath. The
-/// alternative is undefined behaviour with no diagnosis at all.
+/// **This word is no longer what decides whether a pointer is freed
+/// (task-2098).** Reading it meant reading the freed allocation, and on
+/// Windows that read was an access violation whenever the heap had already
+/// given the page back: `tests/c/lifecycle.c` exited `0xC0000005` in 4 of 150
+/// runs, always inside `inillucent_path` on a database `inillucent_close` had
+/// just freed, and `guarded_value` cannot catch it because it is not a panic.
+/// [`held`] now asks [`LIVE_HANDLES`] first and only reads this word through a
+/// pointer that table says is still allocated, where it guards against a
+/// pointer of one handle type passed where another was expected.
 pub(crate) struct Live(std::cell::Cell<u32>);
 
 impl Live {
@@ -180,6 +181,49 @@ pub(crate) trait Handle {
     fn live(&self) -> &Live;
 }
 
+/// Every handle this library has handed to C and not yet freed: its address,
+/// and the magic of its type.
+///
+/// **Held outside the handles, so that asking about a freed one reads nothing
+/// that was freed (task-2098).** The header promises `INILLUCENT_MISUSE` for a
+/// freed handle and a double free, and the only way to keep that promise
+/// without undefined behaviour is to answer it from memory the caller cannot
+/// free. A pointer is dereferenced only after this table says it is still
+/// allocated.
+///
+/// **A reused address is still a live handle, and SQLite's check is the
+/// same.** If the allocator hands a freed handle's address to a new handle of
+/// the same type, the stale pointer reaches the new one. That is a wrong
+/// answer rather than a fault, and it is the one case no check made at the
+/// boundary can tell apart.
+static LIVE_HANDLES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, u32>>> =
+    std::sync::OnceLock::new();
+
+/// Locks [`LIVE_HANDLES`], recovering it if a panic poisoned the lock.
+///
+/// A poisoned table is still correct: every insert and remove is one call that
+/// either happened or did not.
+fn live_handles() -> std::sync::MutexGuard<'static, std::collections::HashMap<usize, u32>> {
+    let table =
+        LIVE_HANDLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    match table.lock() {
+        Ok(held) => held,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Hands a new handle to C and records it in [`LIVE_HANDLES`].
+///
+/// Every handle C receives is made through this, because a handle that is not
+/// in the table is refused by [`held`] as if it had been freed.
+///
+/// @param handle - the handle to give away
+pub(crate) fn publish<T: Handle>(handle: Box<T>) -> *mut T {
+    let raw = Box::into_raw(handle);
+    live_handles().insert(raw as usize, T::MAGIC);
+    raw
+}
+
 /// Borrows a live handle, or answers `None` for a null or freed pointer.
 ///
 /// @param handle - the caller's pointer
@@ -187,18 +231,26 @@ pub(crate) trait Handle {
 /// # Safety
 ///
 /// `handle` must be null or a pointer this library returned. A pointer the
-/// caller has freed is answered `None` rather than dereferenced further; see
-/// [`Live`] for what that promise is worth and why it is still worth making.
+/// caller has freed is answered `None` from [`LIVE_HANDLES`] without being
+/// dereferenced; see that table for the one case it cannot tell apart.
 pub(crate) unsafe fn held<'a, T: Handle>(handle: *const T) -> Option<&'a T> {
+    if handle.is_null() {
+        return None;
+    }
+    if live_handles().get(&(handle as usize)) != Some(&T::MAGIC) {
+        return None;
+    }
     let held = handle.as_ref()?;
     held.live().is(T::MAGIC).then_some(held)
 }
 
-/// Clears a handle's liveness word and hands back the box to drop.
+/// Removes a handle from [`LIVE_HANDLES`], clears its liveness word and hands
+/// back the box to drop.
 ///
-/// The order matters: the word is cleared while the allocation is still ours,
-/// so a second free of the same pointer reads a zero rather than a magic and is
-/// refused by [`held`] before it reaches `Box::from_raw` a second time.
+/// The order matters: the entry is removed before the box can be dropped, so a
+/// second free of the same pointer is refused by [`held`] without reading the
+/// freed allocation. The table's lock is released before this returns, because
+/// dropping a connection's state calls [`held`] on its database.
 ///
 /// @param handle - the pointer the caller passed
 ///
@@ -206,6 +258,7 @@ pub(crate) unsafe fn held<'a, T: Handle>(handle: *const T) -> Option<&'a T> {
 ///
 /// `handle` must be a live pointer this library returned.
 pub(crate) unsafe fn reclaim<T: Handle>(handle: *mut T) -> Box<T> {
+    live_handles().remove(&(handle as usize));
     let held = Box::from_raw(handle);
     held.live().clear();
     held
@@ -419,3 +472,50 @@ pub(crate) unsafe fn bind(stmt: *mut inillucent_stmt, index: u32, value: Value) 
 // —— a transaction ——————————————————————————————————————————————————
 
 // —— a failure ——————————————————————————————————————————————————————
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A handle whose memory is not mapped is refused without being read.
+    ///
+    /// **This is the case task-2098 was.** `tests/c/lifecycle.c` calls
+    /// `inillucent_path` on a database `inillucent_close` has just freed, and
+    /// when the heap had already returned that page the old check read the
+    /// liveness word through the pointer and the process exited `0xC0000005`,
+    /// in 4 of 150 runs. An address in the first page is never mapped, so
+    /// the old check faults here on every run rather than on some of them.
+    /// The error out-parameter is null so this test allocates nothing that
+    /// the other test could be handed at a reused address.
+    #[test]
+    fn an_unmapped_handle_is_refused_without_being_read() {
+        let unmapped = 0x100 as *mut inillucent_db;
+        assert!(unsafe { inillucent_path(unmapped) }.is_null());
+        let status = unsafe { inillucent_close(unmapped, std::ptr::null_mut()) };
+        assert_eq!(status, INILLUCENT_MISUSE);
+    }
+
+    /// A freed handle is refused, and so is a live one passed as another type.
+    #[test]
+    fn a_freed_or_mistyped_handle_is_refused() {
+        let missing = std::env::temp_dir().join("inillucent-task-2098-never-created.rdb");
+        let path = CString::new(missing.display().to_string()).unwrap();
+        let mut db: *mut inillucent_db = std::ptr::null_mut();
+        let mut error: *mut inillucent_error = std::ptr::null_mut();
+        let status = unsafe { inillucent_open(path.as_ptr(), 0, &mut db, &mut error) };
+        assert_ne!(
+            status, INILLUCENT_OK,
+            "a missing file opened without CREATE"
+        );
+        assert!(db.is_null());
+        assert!(!error.is_null(), "a refused open handed back no error");
+        assert_eq!(unsafe { inillucent_error_status(error) }, status);
+
+        let mistyped = error as *const inillucent_db;
+        assert!(unsafe { inillucent_path(mistyped) }.is_null());
+
+        unsafe { inillucent_error_free(error) };
+        assert_eq!(unsafe { inillucent_error_status(error) }, INILLUCENT_MISUSE);
+        unsafe { inillucent_error_free(error) };
+    }
+}
