@@ -535,12 +535,6 @@ fn run(options: &Options) -> Result<bool, String> {
     // "the runner could not tell" is not evidence that anything passed. What
     // stops that being the old wrong red is the retry above: a target only stays
     // undetermined here when a second, solitary attempt could not read it either.
-    //
-    // A target whose every failure is a strict skip is not red here. It is
-    // counted by `hollow` below, which is where `--absent` can excuse it; left
-    // in `red`, a skip for a prerequisite the workflow declared absent would
-    // still fail the run, and `--absent` would change the report and not the
-    // exit code.
     let red = outcomes.iter().any(is_red);
     let hollow = options.strict
         && !unexcused(
@@ -560,6 +554,11 @@ fn run(options: &Options) -> Result<bool, String> {
 /// A target that failed only because `--strict` turned its skips into failed
 /// tests is not red: it evidenced nothing, and `missing_prerequisites` is what
 /// counts it. Everything else that is not green is red, undetermined included.
+///
+/// Counting such a target as red would make `--absent` change the report and
+/// not the exit code: a skip for a prerequisite the workflow declared absent
+/// would still fail the run. `hollow` in `run` is where it is graded instead,
+/// and that is the one place `--absent` can excuse it.
 ///
 /// @param outcome - the target that ran
 fn is_red(outcome: &Outcome) -> bool {
