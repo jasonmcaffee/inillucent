@@ -737,6 +737,91 @@ round bound is within about 5% of its bar has not settled its verdict in one pas
 that family today: 1.54x at its lowest against 1.50x. The published figures on this page are four
 runs for this reason, and grading from more than one pass is task-2095.
 
+### What moves a family between passes (task-2095)
+
+task-2095 set out to find what is constant within a pass and different between passes before
+deciding how many passes a verdict needs. The tests were posted on the ticket before any pass ran:
+`_agent_output/task-2095-between-pass/preregistration.md` in the main checkout. The raw data is in
+the same folder.
+
+**Two options on `inillucent-fullgate` made the measurement possible. Both are off by default, so no
+published number moves.** `--samples <file>` appends every round's raw time for both arms and every
+workload, and each round's process costs, including a page fault count that `ProcessCost` now
+carries. `--engine-child` runs this engine's arm of each round in a new child process, which opens
+the `.rdb` the parent built. That is how the SQLite arm has always run. The configuration block says
+which of the two the run used.
+
+**The SQLite arm is a measure of how fast the box was.** It is the same `sqlite-bench.exe` on every
+pass, whichever build is under test. So its time over the read workloads, against its fastest pass,
+says how fast the machine was during that pass. In task-2093's window it read +5% to +7% on the first
+four passes, +10% to +15% on the read gate passes that ran right after the two write gate passes,
+and +0.2% to +1.1% on the last four. The pass that put `read.join` at 4.37x was the first pass of
+that window. Without it, `read.join`'s four passes of `main` span 1.7% instead of 5.2%.
+
+**Twelve passes in one settled window, 2026-09-24 00:43:28 to 01:12:07Z.** The other agents were
+paused and their process lists were checked empty before the window opened. Medium fixture, 30
+rounds, mask `0xC03C03` in each pass's own configuration, every workload agreed on every pass. The
+order was A B B A A B B A A B B A, where A is the default and B is `--engine-child`, so a drift
+across the window cannot appear as a difference between A and B. The SQLite arm's speed stayed
+within 0.4% to 1.4% of its fastest pass for all 29 minutes, so this window had none of the slowdown
+task-2093's had.
+
+| family | A pass centres, 6 passes | B pass centres, 6 passes | one pass's interval contains another pass's ratio, A | the same, B |
+|---|---|---|---|---|
+| `open.prepare` | 1.67 to 1.72 | 1.65 to 1.67 | 87% | 93% |
+| `read.point` | 28.97 to 30.15 | 29.50 to 29.76 | **57%** | 90% |
+| `read.range` | 4.96 to 5.07 | 4.97 to 5.04 | 77% | 87% |
+| `read.join` | 4.19 to 4.27 | 4.23 to 4.28 | **67%** | 100% |
+| `read.analytical` | 10.62 to 10.77 | 10.51 to 10.73 | 80% | **57%** |
+| `write` | 2.89 to 3.49 | 2.90 to 3.49 | 100% | 100% |
+| `transaction` | 2.04 to 2.38 | 2.04 to 2.29 | 100% | 97% |
+| `schema` | 1.32 to 1.63 | 0.90 to 1.20 | 70% | 100% |
+| `extension` | 1.68 to 1.79 | 1.52 to 1.76 | 80% | 83% |
+| `large.values` | 10.63 to 12.78 | 9.87 to 12.79 | 73% | 70% |
+
+The centres are the per round statistic's geometric means from the raw samples. The two coverage
+columns compare each pass's printed ratio with every other pass's printed interval, 30 pairs a mode.
+**The target for that column is about 83%, not 95%.** Two passes that differ only by round noise
+each carry that noise, so the difference between them has √2 times the spread of one, and a 95%
+interval around one contains the other about 83% of the time. A figure well under 83% means a
+component that stays the same through a pass and changes between passes.
+
+**What the passes showed, including the parts that went against the hypothesis.**
+
+1. **In the default mode it is this engine's arm that moves between passes, not SQLite's.** On all
+   four read families our arm's pass centres varied more than SQLite's: log standard deviation
+   0.0110 against 0.0033 for `read.point`, 0.0068 against 0.0057 for `read.range`, 0.0047 against
+   0.0033 for `read.analytical`, and 0.0070 against 0.0068 for `read.join`. The hypothesis written
+   before the passes said the SQLite arm would carry the shift. It did not in this window. The
+   movement is in short workloads: across the six A passes `point.rowid` spans 6.9%, `point.miss`
+   6.4%, `extension.rtree.query` 5.3%, `scan.distinct` 3.9%, `range.reverse` 3.3% and
+   `join.selective` 2.4%.
+2. **Starting our arm in a new process every round removes most of that.** Pooled over the ten
+   families, the between pass standard deviation of the family log ratio fell from 0.0119 in A to
+   0.0020 in B. On the read families that is a real reduction, because the noise inside a pass
+   barely changed (`read.join` 0.0327 in A, 0.0363 in B). Per workload, `point.miss` went from 6.4%
+   to 1.3%, `extension.rtree.query` from 5.3% to 1.0%, `scan.distinct` from 3.9% to 1.0%, and
+   `join.selective` from 2.4% to 0.4%. **Two results do not fit.** `point.rowid` still spans 5.2%
+   in B. `read.analytical` covers worse in B (57%) than in A (80%).
+3. **So what our arm carries from one round to the next inside one process is the constant.** A
+   process's memory layout is fixed when it starts: where the executable, the heap and the pool
+   land. The short workloads are the ones most sensitive to how their code and data line up with the
+   caches. In A every round of a pass shares one layout. In B every round gets a new one, so the
+   layout becomes noise inside the pass, which the interval already measures. This is an
+   explanation that fits the data. The passes did not test layout directly.
+4. **B cannot become the gate's default, because it changes what our arm is timed on.** A new
+   process pays for the first touch of every page it uses inside the clock. Our arm took about
+   157,400 page faults a round in B and about 147,400 in A, where the pool is warmed first. SQLite's
+   child took 11,634 to 11,640 on every pass. In B `schema` fell under the 1.00x floor on all six
+   passes, with lower bounds of 0.52x to 0.96x, and `extension` missed its 1.50x bar on five of six,
+   with lower bounds of 1.26x to 1.48x. In A both families met their bar or floor on every pass. The
+   noise inside a pass rose two to four times for `schema`, `extension` and `large.values`. **The
+   test written before the passes would have chosen B.** It did not check what B does to the level
+   of each family or to its noise, and on that evidence B is a different measurement, not a
+   correction.
+5. **The first pass of this window was not slow** (SQLite +1.25% against a range of 0.36% to
+   1.39%), so the first pass slowdown in task-2093's window did not repeat here.
+
 ### `read.join`'s bar under the per round statistic
 
 **The bar stays at 3.00x.** Under the per round statistic, pinned, the family's lower bound on five
