@@ -104,7 +104,8 @@ while ($true) {
         exit $LASTEXITCODE
     }
 
-    $until = $null
+    # Typed, because `[ref] $null` matches no TryParse overload and the call threw instead of parsing.
+    [datetime] $until = [datetime]::MinValue
     if (-not [datetime]::TryParse($Matches[1], [ref] $until)) {
         Write-Host "crates.io asked us back at $($Matches[1]), which could not be parsed. Run this again then."
         exit $LASTEXITCODE

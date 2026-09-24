@@ -806,7 +806,7 @@ function Get-Routes {
                 $null
             }
             Run   = {
-                & bash (Join-Path $script:Packaging 'homebrew/update.sh') --tap $script:TapPath
+                & (Get-PosixBash) (Join-Path $script:Packaging 'homebrew/update.sh') --tap $script:TapPath
                 if ($LASTEXITCODE -ne 0) { throw "homebrew/update.sh failed with $LASTEXITCODE" }
                 # **And commit and push it (task-1995).** update.sh writes Formula/inillucent.rb and
                 # prints the git commands to run next, so the route reported success while the tap
@@ -936,7 +936,34 @@ function Test-InteropFixture {
     $recorded = @(Get-Content -LiteralPath $answers).Count
     $segments = @(Get-ChildItem -Path $directory -Filter 'app.rdb-wal.*').Count
     if ($segments -lt 1) { return "tests/interop/$Version holds no log segment" }
-    return "ok: $recorded answers, $segments log segment(s)"
+    # A verify answers nothing when the route is good. This returned its own "ok" line, and the
+    # route runner reads any answer as the reason a route failed.
+    Write-Host "   ok: $recorded answers, $segments log segment(s)"
+    return $null
+}
+
+function Get-PosixBash {
+    <#
+    .SYNOPSIS
+        The bash that can run a script by its Windows path.
+
+    .DESCRIPTION
+        `bash` on this machine resolves to `C:\Windows\system32\bash.exe`, which is WSL's. WSL cannot
+        open `J:\build\...`, so `homebrew/update.sh` failed with 127 on 0.1.8. Git for Windows ships a
+        bash that reads Windows paths, in the Git installation that holds `git.exe`. Anywhere that is not Windows,
+        `bash` is right.
+    #>
+    if (-not $IsWindows) { return 'bash' }
+    $git = (Get-Command git -ErrorAction SilentlyContinue).Source
+    # git.exe is in `cmd/` or in `mingw64/bin/` depending on how PATH was set, so walk up to the
+    # directory that holds `bin/bash.exe`.
+    $dir = if ($git) { Split-Path -Parent $git } else { $null }
+    for ($up = 0; $dir -and $up -lt 3; $up++) {
+        $candidate = Join-Path $dir 'bin/bash.exe'
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+        $dir = Split-Path -Parent $dir
+    }
+    return 'bash'
 }
 
 function Get-MirrorRepo {
