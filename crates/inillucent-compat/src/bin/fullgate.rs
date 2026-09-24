@@ -144,6 +144,11 @@ struct Settings {
     put_split: bool,
     /// Which way into this engine the arm drives (task-2066 section 4.3.10).
     api: Api,
+    /// Where every round's raw timings are appended, when asked (task-2095).
+    samples: Option<PathBuf>,
+    /// Whether this engine's arm runs each round in a fresh child process, the
+    /// way the reference arm always has (task-2095).
+    engine_child: bool,
 }
 
 fn main() -> ExitCode {
@@ -172,11 +177,23 @@ fn main() -> ExitCode {
             }
         };
     }
+    // **A child that times one round of this engine (task-2095)**, spawned per
+    // round by `time_in_a_fresh_child` when the gate is given `--engine-child`.
+    if let Some(database) = flag(&arguments, "--engine-round") {
+        return match engine_round(Path::new(&database), &settings_from(&arguments)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(reason) => {
+                eprintln!("engine round: {reason}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let Some(fixture) = arguments.first().filter(|first| !first.starts_with("--")) else {
         eprintln!(
             "usage: inillucent-fullgate <sqlite fixture> [--rounds N] [--page-size N] \
              [--scale S] [--frames N] [--families a,b] [--repeat N] [--locking normal|exclusive] \
-             [--module-split] [--put-split] [--cores performance|efficiency|any]"
+             [--module-split] [--put-split] [--cores performance|efficiency|any] \
+             [--samples <file>] [--engine-child]"
         );
         return ExitCode::from(2);
     };
@@ -276,6 +293,13 @@ fn settings_from(arguments: &[String]) -> Settings {
         // `extension.rtree.insert` 1.04x, 1.01x, 1.08x; with it off they read
         // 0.46x, 0.45x, 0.42x and 1.37x, 1.14x, 1.28x.
         put_split: arguments.iter().any(|value| value == "--put-split"),
+        // **Both off by default, so no published number moves (task-2095).**
+        // `--samples` only writes a file. `--engine-child` changes what this
+        // arm pays inside its clock - process start, first touches of fresh
+        // memory - to what the reference arm has always paid, and a number
+        // taken that way is a different number from every published one.
+        samples: flag(arguments, "--samples").map(PathBuf::from),
+        engine_child: arguments.iter().any(|value| value == "--engine-child"),
     }
 }
 
@@ -303,6 +327,184 @@ fn memory_round(database: &Path, settings: &Settings) -> Result<(), String> {
         println!("mark\t{name}\t{peak}\t{resident}\t{frames}");
     }
     Ok(())
+}
+
+/// Times one round of the plan in this child process and prints the samples.
+///
+/// **The same round the in-process arm runs, in a process that starts fresh
+/// (task-2095).** The parent built the file, so the import is outside every
+/// clock, and `round_on` warms the pool before the first workload exactly as it
+/// does in process. What changes is only what the reference child has always
+/// paid inside its clock: memory this process touches for the first time.
+///
+/// Every line carries a tag, `sample` or `state`, because `round_on` and the
+/// splits print lines of their own.
+///
+/// @param database - the `.rdb` the parent built
+/// @param settings - the page size, frame count, scale, families and lock mode
+fn engine_round(database: &Path, settings: &Settings) -> Result<(), String> {
+    let mut plan = filtered_plan(settings)?;
+    plan.locking.clone_from(&settings.locking);
+    let mut opened =
+        ImportedDatabase::open(database.to_path_buf(), settings.page_size, settings.frames)
+            .map_err(|error| format!("open failed: {}", why(&error)))?;
+    let (samples, state, _) = round_on(&mut opened, &plan, splits_of(settings))?;
+    for sample in &samples {
+        println!("sample\t{}", sample.render());
+    }
+    for answer in &state {
+        println!("state\t{answer}");
+    }
+    Ok(())
+}
+
+/// Times one round of this engine in a fresh child process.
+///
+/// The import happens here, in the parent and outside every clock, into one
+/// reused name, which `import_into` removes before it builds - the same thing
+/// the in-process arm does through `import_with`. The file is closed before the
+/// child opens it, because two processes on one file is a thing this engine
+/// does not do.
+///
+/// @param fixture - the pristine SQLite database
+/// @param scratch - where the copy and the built file go
+/// @param settings - the page size, frame count, scale, families and lock mode
+fn time_in_a_fresh_child(
+    fixture: &Path,
+    scratch: &Path,
+    settings: &Settings,
+) -> Result<(Vec<Sample>, Vec<String>, RoundCost), String> {
+    let copy = restore(fixture, scratch, "ours-child")?;
+    let target = scratch.join("ours-child.rdb");
+    let built =
+        ImportedDatabase::import_into(copy, target.clone(), settings.page_size, settings.frames)
+            .map_err(|error| format!("import failed: {}", why(&error)))?;
+    drop(built);
+    let exe = std::env::current_exe().map_err(|error| format!("no executable: {error}"))?;
+    let mut child = affinity::spawn_on_same_cores(
+        Command::new(exe)
+            .arg("--engine-round")
+            .arg(&target)
+            .args(child_arguments(settings))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+        "the engine child",
+    )?;
+    let mut out = String::new();
+    let mut err = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut out);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut err);
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("the engine child did not finish: {error}"))?;
+    let cost = inillucent_compat::procstat::child_cost(&child);
+    if !status.success() {
+        return Err(format!("the engine child failed: {}", err.trim()));
+    }
+    let samples = out
+        .lines()
+        .filter_map(|line| line.strip_prefix("sample\t"))
+        .filter_map(Sample::parse)
+        .collect();
+    let state = out
+        .lines()
+        .filter_map(|line| line.strip_prefix("state\t"))
+        .map(str::to_string)
+        .collect();
+    let round = RoundCost {
+        round: cost,
+        costs: Vec::new(),
+        marks: Vec::new(),
+    };
+    Ok((samples, state, round))
+}
+
+/// Returns the flags a child needs to run the same plan the parent runs.
+///
+/// @param settings - what the parent was asked to measure
+fn child_arguments(settings: &Settings) -> Vec<String> {
+    let mut arguments = vec![
+        "--scale".to_string(),
+        settings.scale.clone(),
+        "--page-size".to_string(),
+        settings.page_size.to_string(),
+        "--frames".to_string(),
+        settings.frames.to_string(),
+        "--families".to_string(),
+        settings.families.join(","),
+        "--locking".to_string(),
+        settings.locking.clone(),
+    ];
+    if let Some(repeat) = settings.repeat_override {
+        arguments.push("--repeat".to_string());
+        arguments.push(repeat.to_string());
+    }
+    arguments
+}
+
+/// Appends one round's raw timings, both arms, to the samples file.
+///
+/// **What the family table cannot give back (task-2095).** The report prints a
+/// median per workload and an interval per family, and neither separates what
+/// moved between rounds from what moved between passes, or says which arm
+/// moved. One line per arm per workload per round does, and so do the two
+/// processes' costs for the round. A write that fails is reported and does not
+/// stop the gate: the file is evidence about the run, not part of its verdict.
+///
+/// @param path - the file to append to
+/// @param round - the round's index
+/// @param elapsed - seconds since the first round started
+/// This engine's page faults are also written per workload, because its arm
+/// runs in this process and can be read either side of each timed region; the
+/// reference's can only be read for its whole child. A round run in a fresh
+/// child has no per workload costs, and writes none.
+///
+/// @param path - the file to append to
+/// @param round - the round's index
+/// @param elapsed - seconds since the first round started
+/// @param ours - this engine's samples and what its round cost
+/// @param theirs - the reference's samples and what its child cost
+fn record_samples(
+    path: &Path,
+    round: u32,
+    elapsed: f64,
+    ours: (&[Sample], &RoundCost),
+    theirs: (&[Sample], &ProcessCost),
+) {
+    let mut text = String::new();
+    for (workload, cost, _, _) in &ours.1.costs {
+        text.push_str(&format!(
+            "{round}\t{elapsed:.3}\tours\t(faults)\t{workload}\t{}\n",
+            cost.page_faults
+        ));
+    }
+    for (arm, samples, cost) in [
+        ("ours", ours.0, &ours.1.round),
+        ("theirs", theirs.0, theirs.1),
+    ] {
+        for sample in samples {
+            text.push_str(&format!(
+                "{round}\t{elapsed:.3}\t{arm}\t{}\t{:.0}\n",
+                sample.workload, sample.nanos
+            ));
+        }
+        text.push_str(&format!(
+            "{round}\t{elapsed:.3}\t{arm}\t(cost)\tuser {} kernel {} faults {} peak {}\n",
+            cost.user_nanos, cost.kernel_nanos, cost.page_faults, cost.peak_working_set
+        ));
+    }
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, text.as_bytes()));
+    if let Err(error) = written {
+        eprintln!("  samples: could not append to {path:?}: {error}");
+    }
 }
 
 /// Returns the plan for the scale, filtered to the families asked for.
@@ -440,6 +642,16 @@ fn print_configuration(
     println!("  inillucent lock: locking_mode = normal, the shipped default - the file is");
     println!("                taken and released once per statement, exactly as SQLite's arm does");
     println!("  api         : {}", settings.api.name());
+    // task-2095: which process this engine's arm runs in is part of what it
+    // measures, so a run that changed it says so before anything is timed.
+    println!(
+        "  engine arm  : {}",
+        if settings.engine_child {
+            "a fresh child process per round, as the reference arm is"
+        } else {
+            "inside this process, every round"
+        }
+    );
     if settings.api.drives_a_connection() {
         println!(
             "                the connection arm goes through Connection::prepare and Statement::step,"
@@ -679,6 +891,16 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
             let ours = time_new_engine(fixture, &scratch, &plan, settings)?;
             (ours, theirs)
         };
+        if let Some(path) = &settings.samples {
+            let elapsed = started.elapsed().as_secs_f64();
+            record_samples(
+                path,
+                round,
+                elapsed,
+                (&ours, &our_cost),
+                (&theirs, &their_cost),
+            );
+        }
         our_rounds.push(our_cost);
         their_rounds.push(their_cost);
         run_the_connection_arm(&mut api_pairs, &arm_inputs, round, &ours, &our_state)?;
@@ -998,6 +1220,9 @@ fn time_new_engine(
     // it in the same round; see `run`.
     if settings.api == Api::Connection {
         return time_through_a_connection(fixture, scratch, plan, settings);
+    }
+    if settings.engine_child {
+        return time_in_a_fresh_child(fixture, scratch, settings);
     }
     let copy = restore(fixture, scratch, "ours")?;
     let mut database = ImportedDatabase::import_with(copy, settings.page_size, settings.frames)

@@ -538,6 +538,90 @@ fn fullgate_measures_the_small_fixture() {
     });
 }
 
+/// The full gate's arm runs in a fresh child each round and writes every round's
+/// raw times, when asked (task-2095).
+///
+/// **Both options exist to take numbers, so the test reads the numbers.** A child
+/// round that ran nothing would still let the gate exit, with an empty sample list
+/// and every workload unpaired. What this checks is that each of the two rounds
+/// wrote a positive time for `point.rowid` on both arms, and that the child's own
+/// process accounting was read: a round of the plan faults in pages, so a fault
+/// count of zero means the cost was never taken from the child.
+#[test]
+fn fullgate_times_its_arm_in_a_fresh_child_and_writes_the_samples() {
+    if !sqlite_bench_built() {
+        inillucent_compat::differential::skipping(
+            "sqlite-bench is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
+        return;
+    }
+    let Some(fixture) = fixture_copy("fullgate-child") else {
+        inillucent_compat::differential::skipping(
+            "the small gate fixture is not built; run tools/build-gate-fixtures.sh",
+        );
+        return;
+    };
+    let samples = fixture.with_file_name("samples.tsv");
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-fullgate"),
+        &[
+            &fixture.to_string_lossy(),
+            "--scale",
+            "small",
+            "--rounds",
+            "2",
+            "--families",
+            "read.point",
+            "--engine-child",
+            "--samples",
+            &samples.to_string_lossy(),
+        ],
+    );
+    let text = said(&output);
+    assert_ne!(
+        code(&output),
+        2,
+        "the gate did not run. It printed:\n{text}"
+    );
+    assert!(
+        text.contains("a fresh child process per round"),
+        "the configuration does not say the arm ran in a child. It printed:\n{text}"
+    );
+    let written = std::fs::read_to_string(&samples).unwrap_or_default();
+    for round in ["0", "1"] {
+        for arm in ["ours", "theirs"] {
+            let nanos: Vec<f64> = written
+                .lines()
+                .map(|line| line.split('\t').collect::<Vec<&str>>())
+                .filter(|fields| {
+                    fields.len() == 5
+                        && fields.first() == Some(&round)
+                        && fields.get(2) == Some(&arm)
+                        && fields.get(3) == Some(&"point.rowid")
+                })
+                .filter_map(|fields| fields.get(4).and_then(|value| value.parse().ok()))
+                .collect();
+            assert!(
+                nanos.len() == 1 && nanos.first().is_some_and(|value| *value > 0.0),
+                "round {round}, {arm}: expected one positive point.rowid time, found {nanos:?} \
+                 in:\n{written}"
+            );
+        }
+    }
+    let faults: Vec<u64> = written
+        .lines()
+        .filter(|line| line.contains("\tours\t(cost)\t"))
+        .filter_map(|line| line.split("faults ").nth(1))
+        .filter_map(|rest| rest.split(' ').next())
+        .filter_map(|count| count.parse().ok())
+        .collect();
+    assert!(
+        faults.len() == 2 && faults.iter().all(|count| *count > 0),
+        "expected a page fault count above zero for each child round, found {faults:?} \
+         in:\n{written}"
+    );
+}
+
 // --- prepareperf ------------------------------------------------------------
 
 /// The prepare report refuses a fixture that is not there.

@@ -41,6 +41,16 @@ pub struct ProcessCost {
     pub user_nanos: u64,
     /// Processor time spent in the kernel on this process's behalf.
     pub kernel_nanos: u64,
+    /// Page faults the process has taken, soft and hard together.
+    ///
+    /// **Recorded because a fault is paid inside whichever clock is running when
+    /// memory is first touched (task-2095).** The reference arm is a fresh child
+    /// every round, so every page its cache and its sorter use is faulted in
+    /// while a workload is being timed; this engine's arm is one long lived
+    /// process whose pool is warmed before the round. The count says how many
+    /// faults a round paid, so a pass whose time moved can be checked for
+    /// whether the count moved with it or only the cost of each fault did.
+    pub page_faults: u64,
 }
 
 impl ProcessCost {
@@ -68,6 +78,7 @@ impl ProcessCost {
                 .saturating_sub(earlier.peak_working_set),
             user_nanos: self.user_nanos.saturating_sub(earlier.user_nanos),
             kernel_nanos: self.kernel_nanos.saturating_sub(earlier.kernel_nanos),
+            page_faults: self.page_faults.saturating_sub(earlier.page_faults),
         }
     }
 
@@ -125,6 +136,7 @@ mod platform {
             if GetProcessMemoryInfo(handle, &mut counters, counters.cb) != 0 {
                 cost.working_set = counters.WorkingSetSize as u64;
                 cost.peak_working_set = counters.PeakWorkingSetSize as u64;
+                cost.page_faults = u64::from(counters.PageFaultCount);
             }
             let mut created = core::mem::zeroed();
             let mut exited = core::mem::zeroed();
@@ -200,6 +212,7 @@ mod platform {
             if libc::getrusage(libc::RUSAGE_SELF, &mut usage) == 0 {
                 cost.user_nanos = nanos(&usage.ru_utime);
                 cost.kernel_nanos = nanos(&usage.ru_stime);
+                cost.page_faults = (usage.ru_minflt as u64).saturating_add(usage.ru_majflt as u64);
                 // `ru_maxrss` is kilobytes on Linux and bytes on macOS; the
                 // status file above is the Linux answer and is preferred when
                 // it is there.
@@ -226,6 +239,7 @@ mod platform {
             if libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) == 0 {
                 cost.user_nanos = nanos(&usage.ru_utime);
                 cost.kernel_nanos = nanos(&usage.ru_stime);
+                cost.page_faults = (usage.ru_minflt as u64).saturating_add(usage.ru_majflt as u64);
                 cost.peak_working_set = (usage.ru_maxrss as u64).saturating_mul(1024);
                 cost.working_set = cost.peak_working_set;
             }
