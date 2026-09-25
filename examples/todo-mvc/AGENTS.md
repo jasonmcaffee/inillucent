@@ -32,9 +32,9 @@ cargo test --release             # the end to end tests, about a second once bui
   not repeat the rule in Rust.
 - **A change to more than one row is one transaction.** Use `self.begin()`, and let an early `?` drop
   the transaction, which rolls it back.
-- **Keep `todo_fts` in step by hand.** Every write to `todo.title` or `todo.notes`, and every delete
-  of a todo, updates `todo_fts` in the same transaction. A trigger cannot do it in inillucent 1.0.30.
-  `README.md` says why.
+- **Let the triggers keep `todo_fts` in step.** `SEARCH_TRIGGERS` in `src/schema.rs` writes the
+  search entry on every insert, every change to `title` or `notes`, and every delete of a todo.
+  Do not write `todo_fts` from the store.
 - **Read cells by column name**, with `Record`, so adding a column to a `SELECT` cannot shift the
   others.
 - **Each test starts the real server** and checks the JSON it returns. Put new tests in

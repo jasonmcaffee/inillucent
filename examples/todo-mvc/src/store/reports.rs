@@ -99,8 +99,9 @@ impl Store {
     /// columns are NULL, and a busy day gets one row per todo.
     ///
     /// The open todos are a derived table rather than a condition in the
-    /// join's `ON` clause. That keeps each part readable, and it avoids the
-    /// `LEFT JOIN` defect that `lists.rs` describes.
+    /// join's `ON` clause, which keeps the calendar and the filter apart.
+    /// The rows are grouped into days here, in Rust, so each todo is built by
+    /// the same `card_from` every other endpoint uses.
     ///
     /// @param from - the first day, or nothing for today
     /// @param days - how many days, from 1 to 60

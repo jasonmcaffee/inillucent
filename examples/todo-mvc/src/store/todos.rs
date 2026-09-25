@@ -200,7 +200,6 @@ impl Store {
         )?;
         let id = Record::first(&rows).map(|row| row.int("id")).ok_or_else(|| ApiError::conflict("the todo was not added"))?;
         super::tags::replace_tags(&tx, id, &todo.tags)?;
-        index_todo(&tx, id)?;
         tx.commit()?;
         self.todo_card(id, None)
     }
@@ -312,9 +311,6 @@ impl Store {
             reparent(&tx, id, list_id, parent)?;
         }
         update_fields(&tx, id, patch)?;
-        if patch.title.is_some() || patch.notes.is_some() {
-            index_todo(&tx, id)?;
-        }
         tx.commit()?;
         self.todo_card(id, None)
     }
@@ -322,17 +318,14 @@ impl Store {
     /// Deletes a todo and every subtask below it, and returns how many todos went.
     ///
     /// `ON DELETE CASCADE` on `parent_id` deletes the subtree, and on
-    /// `todo_tag` and `comment` it deletes their rows. The search entries are
-    /// deleted by hand, first, because a virtual table has no foreign keys.
+    /// `todo_tag` and `comment` it deletes their rows. The `todo_fts_delete`
+    /// trigger removes the search entry of every todo that goes.
     ///
     /// @param id - the todo's id
     pub fn delete_todo(&self, id: i64) -> ApiResult<u64> {
         let tx = self.begin()?;
         require_todo(&tx, id)?;
         let subtree = subtree_ids(&tx, id)?;
-        for todo in &subtree {
-            tx_execute(&tx, "DELETE FROM todo_fts WHERE rowid = ?1", &[Value::Integer(*todo)])?;
-        }
         tx_execute(&tx, "DELETE FROM todo WHERE id = ?1", &[Value::Integer(id)])?;
         tx.commit()?;
         Ok(subtree.len() as u64)
@@ -368,21 +361,6 @@ pub(super) fn card_from(row: &Record) -> TodoCard {
         updated_at: row.text("updated_at"),
         completed_at: row.opt_text("completed_at"),
     }
-}
-
-/// Writes a todo's search entry again from its current title and notes.
-///
-/// The old entry is deleted and a new one is copied from the `todo` row with
-/// `INSERT ... SELECT`. It runs inside the caller's transaction, so the todo
-/// and its entry change together. See `schema.rs` for why a trigger does not
-/// do this.
-///
-/// @param tx - the open transaction
-/// @param id - the todo's id
-pub(super) fn index_todo(tx: &SharedTransaction, id: i64) -> ApiResult<()> {
-    tx_execute(tx, "DELETE FROM todo_fts WHERE rowid = ?1", &[Value::Integer(id)])?;
-    tx_execute(tx, "INSERT INTO todo_fts (rowid, title, notes) SELECT id, title, notes FROM todo WHERE id = ?1", &[Value::Integer(id)])?;
-    Ok(())
 }
 
 /// The list and parent of a todo, read before it is changed.

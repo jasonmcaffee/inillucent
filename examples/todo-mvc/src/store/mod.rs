@@ -31,7 +31,7 @@ use std::path::Path;
 use inillucent::{Rows, SharedDatabase, SharedTransaction, Value};
 
 use crate::error::{ApiError, ApiResult};
-use crate::schema::SCHEMA;
+use crate::schema::{SCHEMA, SEARCH_TRIGGERS};
 
 pub use lists::{ListPatch, NewList, TodoFilter};
 pub use people::NewPerson;
@@ -65,14 +65,25 @@ impl Store {
         Ok(store)
     }
 
-    /// Creates the tables the first time the database is opened.
+    /// Creates the tables the first time the database is opened, and the search triggers when they are missing.
+    ///
+    /// A file created before the search triggers existed has a `todo_fts` the
+    /// service kept in step itself, so adding the triggers is all it needs.
     fn ensure_schema(&self) -> Result<(), String> {
         let found = self
             .db
-            .query_all("SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'todo'", &[])
+            .query_all(
+                "SELECT (SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'todo'),
+                        (SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name = 'todo_fts_insert')",
+                &[],
+            )
             .map_err(|error| error.to_string())?;
-        if Record::first(&found).map(|row| row.int_at(0)) == Some(0) {
+        let (tables, triggers) = Record::first(&found).map(|row| (row.int_at(0), row.int_at(1))).unwrap_or((0, 0));
+        if tables == 0 {
             self.db.execute_batch(SCHEMA).map_err(|error| format!("cannot create the schema: {error}"))?;
+        }
+        if triggers == 0 {
+            self.db.execute_batch(SEARCH_TRIGGERS).map_err(|error| format!("cannot create the search triggers: {error}"))?;
         }
         Ok(())
     }

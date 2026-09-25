@@ -94,40 +94,28 @@ pub struct ListTodos {
 
 /// The overview columns.
 ///
-/// The counts are worked out once per list in a derived table, `s`, which
-/// groups the top level todos by list. The outer query joins each list to its
-/// row of `s`. A `LEFT JOIN` keeps a list with no todos, whose row of `s` is
-/// NULL, so `coalesce` turns its counts into zeros.
+/// Each list is joined to its top level todos with a `LEFT JOIN`, so a list
+/// with no todos still has one row, whose todo columns are NULL. The
+/// condition `t.parent_id IS NULL` is in the `ON` clause and not in `WHERE`:
+/// in `WHERE` it would be tested after the join and would drop an empty
+/// list's NULL row. `count(t.id)` counts only real todos, so an empty list
+/// counts 0.
 ///
-/// `rank()` is a window function over the joined rows: it numbers the lists
+/// `rank()` is a window function over the grouped rows: it numbers the lists
 /// by open todos, and two lists with the same number get the same rank.
-///
-/// The filter `parent_id IS NULL` is inside the derived table, not in the
-/// `ON` clause of a `LEFT JOIN` to `todo`. The second form is the obvious one,
-/// and inillucent 1.0.30 answers it wrongly: a `LEFT JOIN` that reaches
-/// `todo` through the index on `list_id`, with a second condition in `ON` on a
-/// column that index does not hold, returns NULL for every `todo` column.
 const OVERVIEW_SELECT: &str = "
 SELECT l.id, l.name, l.owner_id, o.name AS owner_name, l.created_at,
-       coalesce(s.total, 0) AS total,
-       coalesce(s.open, 0) AS open,
-       coalesce(s.total, 0) - coalesce(s.open, 0) AS done,
-       coalesce(s.overdue, 0) AS overdue,
-       round(100.0 * (s.total - s.open) / s.total, 1) AS percent_done,
-       s.next_due,
-       rank() OVER (ORDER BY coalesce(s.open, 0) DESC) AS busiest_rank
+       count(t.id) AS total,
+       count(t.id) FILTER (WHERE t.completed = 0) AS open,
+       count(t.id) FILTER (WHERE t.completed = 1) AS done,
+       count(t.id) FILTER (WHERE t.completed = 0 AND t.due_on < ?1) AS overdue,
+       round(100.0 * count(t.id) FILTER (WHERE t.completed = 1) / count(t.id), 1) AS percent_done,
+       min(t.due_on) FILTER (WHERE t.completed = 0) AS next_due,
+       rank() OVER (ORDER BY count(t.id) FILTER (WHERE t.completed = 0) DESC) AS busiest_rank
 FROM list l
 JOIN person o ON o.id = l.owner_id
-LEFT JOIN (
-  SELECT list_id,
-         count(*) AS total,
-         count(*) FILTER (WHERE completed = 0) AS open,
-         count(*) FILTER (WHERE completed = 0 AND due_on < ?1) AS overdue,
-         min(due_on) FILTER (WHERE completed = 0) AS next_due
-  FROM todo
-  WHERE parent_id IS NULL
-  GROUP BY list_id
-) s ON s.list_id = l.id";
+LEFT JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL
+GROUP BY l.id, l.name, l.owner_id, o.name, l.created_at";
 
 impl Store {
     /// Creates a list and returns its overview.
@@ -154,17 +142,15 @@ impl Store {
     /// Returns one list with its summary.
     ///
     /// The window function has to see every list to rank this one, so a
-    /// `WHERE l.id = ?` would rank the list against itself alone. In SQL the
-    /// answer is to rank every list in a derived table and pick the row in an
-    /// outer query, `SELECT * FROM (...) WHERE id = ?`. inillucent 1.0.30
-    /// refuses a window function inside a derived table, a CTE or a view with
-    /// status `unsupported`, so the row is picked here instead, from the
-    /// overview of every list.
+    /// `WHERE l.id = ?` would rank the list against itself alone. Every list
+    /// is ranked in a derived table, and the outer query picks the one row.
     ///
     /// @param id - the list's id
     /// @param today - the day that decides what is overdue
     pub fn list(&self, id: i64, today: Option<&str>) -> ApiResult<ListOverview> {
-        self.lists(today)?.into_iter().find(|list| list.id == id).ok_or_else(|| ApiError::not_found(format!("list {id}")))
+        let today = self.today(today)?;
+        let rows = self.query(&format!("SELECT * FROM ({OVERVIEW_SELECT}) WHERE id = ?2"), &[text(&today), Value::Integer(id)])?;
+        Record::first(&rows).map(|row| overview_from(&row)).ok_or_else(|| ApiError::not_found(format!("list {id}")))
     }
 
     /// Renames a list.
@@ -181,21 +167,18 @@ impl Store {
     /// Deletes a list and every todo in it, and returns how many todos went.
     ///
     /// `ON DELETE CASCADE` deletes the todos, and through them their tags
-    /// links and comments. The search entries are deleted first, in the same
-    /// transaction, because a virtual table has no foreign keys.
+    /// links and comments. The `todo_fts_delete` trigger fires for each todo
+    /// the cascade removes, so the search entries go too.
     ///
     /// @param id - the list's id
     pub fn delete_list(&self, id: i64) -> ApiResult<u64> {
         let tx = self.begin()?;
         require_list(&tx, id)?;
-        let rows = tx_query(&tx, "SELECT id FROM todo WHERE list_id = ?1", &[Value::Integer(id)])?;
-        let todos: Vec<i64> = Record::all(&rows).map(|row| row.int("id")).collect();
-        for todo in &todos {
-            tx_execute(&tx, "DELETE FROM todo_fts WHERE rowid = ?1", &[Value::Integer(*todo)])?;
-        }
+        let rows = tx_query(&tx, "SELECT count(*) FROM todo WHERE list_id = ?1", &[Value::Integer(id)])?;
+        let todos = Record::first(&rows).map(|row| row.int_at(0)).unwrap_or(0);
         tx_execute(&tx, "DELETE FROM list WHERE id = ?1", &[Value::Integer(id)])?;
         tx.commit()?;
-        Ok(todos.len() as u64)
+        Ok(todos as u64)
     }
 
     /// Returns the todos in a list that pass a filter, and the list's counts.
@@ -272,8 +255,8 @@ impl Store {
     /// Deletes every completed todo in a list, and returns how many todos went.
     ///
     /// A completed todo's subtasks go with it, done or not, through `ON DELETE
-    /// CASCADE`. The count includes them, and so do the search entries this
-    /// deletes first.
+    /// CASCADE`, and the count includes them. The `todo_fts_delete` trigger
+    /// removes the search entry of every todo that goes.
     ///
     /// @param list_id - the list
     pub fn clear_completed(&self, list_id: i64) -> ApiResult<u64> {
@@ -288,9 +271,6 @@ impl Store {
                 }
             }
         }
-        for id in &gone {
-            tx_execute(&tx, "DELETE FROM todo_fts WHERE rowid = ?1", &[Value::Integer(*id)])?;
-        }
         tx_execute(&tx, "DELETE FROM todo WHERE list_id = ?1 AND completed = 1", &[Value::Integer(list_id)])?;
         tx.commit()?;
         Ok(gone.len() as u64)
@@ -302,10 +282,9 @@ impl Store {
     /// so a client working from an old copy of the list cannot lose a todo.
     /// The check and the writes are in one transaction.
     ///
-    /// The positions are written with one `UPDATE` per todo. The shorter form,
-    /// `UPDATE todo SET position = p.pos FROM (SELECT value, key + 1 AS pos FROM
-    /// json_each(?1)) p WHERE todo.id = p.value`, changes no rows in
-    /// inillucent 1.0.30, and reports success.
+    /// The positions are written with one `UPDATE ... FROM`. The order goes in
+    /// as one JSON array, `json_each` turns it into rows of index and id, and
+    /// each todo takes its index plus one as its position.
     ///
     /// @param list_id - the list
     /// @param order - the todo ids, first to last
@@ -322,9 +301,14 @@ impl Store {
                 "the order must name every top level todo in list {list_id} once: expected {current:?}, got {order:?}"
             )));
         }
-        for (index, id) in order.iter().enumerate() {
-            tx_execute(&tx, "UPDATE todo SET position = ?2 WHERE id = ?1", &[Value::Integer(*id), Value::Integer(index as i64 + 1)])?;
-        }
+        let ids: Vec<String> = order.iter().map(i64::to_string).collect();
+        tx_execute(
+            &tx,
+            "UPDATE todo SET position = p.pos
+             FROM (SELECT value AS id, key + 1 AS pos FROM json_each(?1)) AS p
+             WHERE todo.id = p.id",
+            &[text(&format!("[{}]", ids.join(",")))],
+        )?;
         tx.commit()?;
         Ok(self.list_todos(list_id, &TodoFilter::default())?.todos)
     }

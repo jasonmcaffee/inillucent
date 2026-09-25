@@ -13,7 +13,7 @@
 //!                       └── parent_id: a todo can have subtasks, to any depth
 //!
 //! activity   one row per change to a todo, written by triggers
-//! todo_fts   an FTS5 table over each todo's title and notes, for /search
+//! todo_fts   an FTS5 table over each todo's title and notes, for /search, written by triggers
 //! todo_card  a view: a todo with its list, assignee, tags and subtask counts
 //! ```
 //!
@@ -35,15 +35,13 @@
 //! - **Case insensitive uniqueness.** `COLLATE NOCASE` on `person.email` and
 //!   `tag.name` makes `Home` and `home` the same tag.
 //!
-//! ## Why the search table is not kept up to date by a trigger
+//! ## How the search table stays in step
 //!
-//! The usual SQLite pattern keeps an FTS5 table in step with its source table
-//! with three triggers. inillucent 1.0.30 refuses every write to a table
-//! that has a trigger writing a virtual table, with status `syntax` and the
-//! message "bad parameter or other API misuse". So `todo_fts` is written by
-//! the store, in the same transaction as the change to `todo`, and it is just
-//! as consistent: a search sees the todo and its index entry change together.
-//! See `store/todos.rs`, `index_todo`.
+//! Three triggers on `todo` write `todo_fts`, the usual SQLite pattern for an
+//! FTS5 table. They run inside the statement that changed `todo`, so a search
+//! sees a todo and its index entry change together, and a todo removed by an
+//! `ON DELETE CASCADE` loses its entry too. They are in [`SEARCH_TRIGGERS`] so
+//! `Store::open` can add them to a file made before they existed.
 
 /// The schema. Run once, when the database has no `todo` table.
 pub const SCHEMA: &str = "
@@ -187,16 +185,14 @@ END;
 -- it has. Each count is a correlated subquery, which the engine runs once per
 -- todo it returns.
 --
--- The tags are sorted by lower(g.name). ORDER BY g.name should be enough,
--- because tag.name is COLLATE NOCASE, but inillucent 1.0.30 ignores the
--- collation in an ORDER BY inside an aggregate and puts 'Repairs' before
--- 'outdoor'.
+-- The tags are sorted by g.name, which sorts ignoring case because tag.name
+-- is COLLATE NOCASE: 'outdoor' comes before 'Repairs'.
 CREATE VIEW todo_card AS
 SELECT
   t.id, t.list_id, l.name AS list_name, t.parent_id, t.title, t.notes, t.completed,
   t.priority, t.due_on, t.assignee_id, a.name AS assignee_name, t.position,
   t.created_at, t.updated_at, t.completed_at,
-  (SELECT json_group_array(g.name ORDER BY lower(g.name))
+  (SELECT json_group_array(g.name ORDER BY g.name)
    FROM todo_tag tt JOIN tag g ON g.id = tt.tag_id
    WHERE tt.todo_id = t.id) AS tags,
   (SELECT count(*) FROM todo s WHERE s.parent_id = t.id) AS subtasks,
@@ -205,4 +201,23 @@ SELECT
 FROM todo t
 JOIN list l ON l.id = t.list_id
 LEFT JOIN person a ON a.id = t.assignee_id;
+";
+
+/// The triggers that keep `todo_fts` in step with `todo`.
+///
+/// Part of the schema, and kept apart from [`SCHEMA`] so `Store::open` can add
+/// them to a database file created before they existed.
+pub const SEARCH_TRIGGERS: &str = "
+CREATE TRIGGER todo_fts_insert AFTER INSERT ON todo BEGIN
+  INSERT INTO todo_fts (rowid, title, notes) VALUES (NEW.id, NEW.title, NEW.notes);
+END;
+
+CREATE TRIGGER todo_fts_delete AFTER DELETE ON todo BEGIN
+  DELETE FROM todo_fts WHERE rowid = OLD.id;
+END;
+
+-- Only a change to the title or the notes rewrites the entry.
+CREATE TRIGGER todo_fts_update AFTER UPDATE OF title, notes ON todo BEGIN
+  UPDATE todo_fts SET title = NEW.title, notes = NEW.notes WHERE rowid = NEW.id;
+END;
 ";

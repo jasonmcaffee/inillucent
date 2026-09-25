@@ -16,7 +16,7 @@ license = "MIT"
 # The database, from crates.io, exactly as an application outside this
 # repository gets it. No features: this example uses the relational engine and
 # FTS5 keyword search, so it needs no embedding model.
-inillucent = "1.0.30"
+inillucent = "1.0.31"
 
 # The HTTP server. axum routes requests to handlers, and tokio runs them.
 axum = { version = "0.8", features = ["macros"] }

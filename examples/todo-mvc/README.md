@@ -175,7 +175,7 @@ person ──< list ──< todo ──< todo_tag >── tag
                       └── parent_id: a todo can have subtasks, to any depth
 
 activity   one row per change to a todo, written by triggers
-todo_fts   an FTS5 table over each todo's title and notes
+todo_fts   an FTS5 table over each todo's title and notes, written by triggers
 todo_card  a view: a todo with its list, assignee, tags and subtask counts
 ```
 
@@ -191,41 +191,39 @@ todo_card  a view: a todo with its list, assignee, tags and subtask counts
 | `WITHOUT ROWID` on `todo_tag` | the link table is stored in the order of its primary key, `(todo_id, tag_id)`, with no second copy |
 | a partial index, `ON todo (due_on) WHERE completed = 0` | only open todos are asked about by due date, so completed ones are left out of the index |
 | seven triggers | `created`, `completed`, `reopened`, `renamed`, `moved`, `assigned`, `deleted` and `comment` rows in `activity`. `todo_completed` also stamps and clears `completed_at` |
+| three more triggers | keep `todo_fts` in step with `todo`: an insert adds the search entry, a change to the title or notes rewrites it, and a delete, including one an `ON DELETE CASCADE` makes, removes it |
 | the `todo_card` view | one definition of "a todo as the API shows it", used by every endpoint |
 
 ## The queries
 
 Each of these is in `src/store/`, with a comment that explains it.
 
-### The list overview: aggregate, then join, then rank
+### The list overview: join, aggregate, then rank
 
-`GET /lists` counts each list's todos in a derived table, joins every list to its row, and ranks the
-lists with a window function:
+`GET /lists` joins every list to its top level todos, counts them per list, and ranks the lists with
+a window function:
 
 ```sql
 SELECT l.id, l.name, o.name AS owner_name,
-       coalesce(s.total, 0) AS total,
-       coalesce(s.open, 0) AS open,
-       coalesce(s.overdue, 0) AS overdue,
-       round(100.0 * (s.total - s.open) / s.total, 1) AS percent_done,
-       s.next_due,
-       rank() OVER (ORDER BY coalesce(s.open, 0) DESC) AS busiest_rank
+       count(t.id) AS total,
+       count(t.id) FILTER (WHERE t.completed = 0) AS open,
+       count(t.id) FILTER (WHERE t.completed = 0 AND t.due_on < ?1) AS overdue,
+       round(100.0 * count(t.id) FILTER (WHERE t.completed = 1) / count(t.id), 1) AS percent_done,
+       min(t.due_on) FILTER (WHERE t.completed = 0) AS next_due,
+       rank() OVER (ORDER BY count(t.id) FILTER (WHERE t.completed = 0) DESC) AS busiest_rank
 FROM list l
 JOIN person o ON o.id = l.owner_id
-LEFT JOIN (
-  SELECT list_id,
-         count(*) AS total,
-         count(*) FILTER (WHERE completed = 0) AS open,
-         count(*) FILTER (WHERE completed = 0 AND due_on < ?1) AS overdue,
-         min(due_on) FILTER (WHERE completed = 0) AS next_due
-  FROM todo
-  WHERE parent_id IS NULL
-  GROUP BY list_id
-) s ON s.list_id = l.id
+LEFT JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL
+GROUP BY l.id, l.name, l.owner_id, o.name, l.created_at
 ```
 
-`count(*) FILTER (WHERE ...)` counts only the rows that pass the filter, so one scan gives four
-numbers. The `LEFT JOIN` keeps a list with no todos, and `coalesce` turns its NULL counts into zeros.
+`count(t.id) FILTER (WHERE ...)` counts only the rows that pass the filter, so one scan gives four
+numbers. The `LEFT JOIN` keeps a list with no todos as one row whose todo columns are NULL, and
+`count(t.id)` counts NULL as nothing, so that list counts 0. `t.parent_id IS NULL` is in the `ON`
+clause because in `WHERE` it would be tested after the join and would drop that row.
+
+`GET /lists/{id}` needs the same rank, which depends on every list, so it ranks them all in a
+derived table and picks one row in the outer query: `SELECT * FROM (...) WHERE id = ?2`.
 
 ### The subtask tree: a recursive CTE with a sort path
 
@@ -368,33 +366,25 @@ the database until it commits. Every change that touches more than one row is on
 
 | Change | What the transaction holds |
 |---|---|
-| create a todo | check the list and the parent, insert the todo, write its tags, write its search entry |
-| change a todo | check the move and the new parent, move the subtree, update the fields, rewrite the search entry |
-| delete a todo, a list, or the completed todos | delete the search entries of every todo that will go, then delete the rows and let the cascades run |
-| reorder a list | check the request names every top level todo once, then write each position |
+| create a todo | check the list and the parent, insert the todo, write its tags |
+| change a todo | check the move and the new parent, move the subtree, update the fields |
+| delete a todo, a list, or the completed todos | count the todos that will go, then delete the rows and let the cascades run |
+| reorder a list | check the request names every top level todo once, then write every position with one `UPDATE ... FROM json_each(?1)` |
 
 A `SharedTransaction` that is dropped without `commit` rolls back, so an early return with `?` never
 leaves half a change behind.
 
-### Why the search table is written by the service and not by a trigger
+The triggers in `SEARCH_TRIGGERS` keep `todo_fts` in step inside the same statement, so a search
+sees a todo and its entry change together.
 
-The usual SQLite pattern keeps an FTS5 table in step with three triggers. inillucent 1.0.30 refuses
-every write to a table that has a trigger writing a virtual table. The store writes `todo_fts` in the
-same transaction as the change to `todo` instead, so the two still change together.
+## Which inillucent it needs
 
-## What inillucent 1.0.30 got wrong, and what this example does about it
-
-Building this example found these problems in inillucent 1.0.30. Each was checked against SQLite
-3.53.4. The example avoids each one and says so in a comment where it does.
-
-| Problem | What SQLite does | What the example does instead |
-|---|---|---|
-| A `LEFT JOIN` that reaches the right table through an index on the join column, with a second condition in `ON` on a column the index does not hold, returns NULL for every right side column | returns the matching rows | the list overview filters in a derived table. `tests/e2e.rs` fails with the obvious form: every list reports 0 todos |
-| A trigger that writes an FTS5 or `inillucent_search` table makes every write to its table fail, with status `syntax` | runs the trigger | the store writes `todo_fts` itself |
-| A window function inside a derived table, a CTE or a view is refused as `unsupported` | runs it | `GET /lists/{id}` ranks every list and picks the row in Rust |
-| `ORDER BY` inside an aggregate, such as `json_group_array(name ORDER BY name)`, ignores the column's collation | sorts `apple, outdoor, Repairs` | the view sorts by `lower(g.name)` |
-| `json_group_array(json_object(...))` returns an array of strings | returns an array of objects | the agenda groups its rows in Rust |
-| `UPDATE ... FROM` a derived table over `json_each` changes no rows and reports success | changes the rows | reordering writes one `UPDATE` per todo |
+The example needs inillucent 1.0.31 or later. Building it against 1.0.30 found six problems that
+1.0.31 fixes, each checked against SQLite 3.53.4: the overview's `LEFT JOIN` with a second condition
+in `ON` returned NULL for every todo column, a trigger writing `todo_fts` made every write to `todo`
+fail, a window function inside a derived table was refused, `ORDER BY` inside `json_group_array`
+ignored `tag.name`'s collation, `json_group_array(json_object(...))` returned an array of strings, and
+`UPDATE ... FROM json_each(...)` changed no rows.
 
 ## Tests
 
