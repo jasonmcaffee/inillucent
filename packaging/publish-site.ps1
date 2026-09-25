@@ -31,7 +31,8 @@
     Rewrite the site's download entries to point at this version.
 
 .PARAMETER SitePath
-    The inillucent-site checkout. Defaults to a sibling of this repository.
+    The site folder. Defaults to `black-rainbow-labs-sites/sites/inillucent` beside this repository
+    (task-2128 moved the site there).
 
 .EXAMPLE
     pwsh packaging/publish-site.ps1 -Version 0.1.1 -Stage
@@ -71,7 +72,7 @@ C:\Program Files\PowerShell\7\Modules, then run this again.
 }
 
 if (-not $Stage -and -not $Link) { throw 'pass -Stage, -Link, or both' }
-if (-not $SitePath) { $SitePath = Join-Path (Split-Path -Parent $root) 'inillucent-site' }
+if (-not $SitePath) { $SitePath = Join-Path (Split-Path -Parent $root) 'black-rainbow-labs-sites/sites/inillucent' }
 if (-not (Test-Path -LiteralPath $SitePath)) {
     throw "$SitePath does not exist. Pass -SitePath."
 }

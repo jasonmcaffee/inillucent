@@ -1,45 +1,43 @@
 <#
 .SYNOPSIS
-    Builds inillucent.com's static export and restarts the service that serves it.
+    Builds inillucent.com's static export and deploys it to Cloudflare and to the origin.
 
 .DESCRIPTION
     **Staging the files is not publishing them.** `publish-site.ps1` copies the artifacts into the
     site checkout and rewrites the download list, and then prints "now rebuild and deploy the site so
     the change is live" - which is a person's job that nothing in a release does. Measured on the
     0.1.5 run: every artifact was staged and linked, and `inillucent.com/downloads/VERSION` still
-    answered 0.1.3, because the site is a Next.js static export served by a small Rust binary out of
-    `out/` and neither had been rebuilt.
+    answered 0.1.3, because the site is a Next.js static export and it had not been rebuilt.
 
     `public/downloads/` is gitignored, so the artifacts do not travel through git at all: the build
-    is what copies them into `out/`, and the restart is what makes the running server see them.
+    is what copies them into `out/`.
 
-    The service is found by name through the Service Manager rather than by an id written down here,
-    because an id is per machine and a name is not.
+    Since task-2128 the site lives at `sites/inillucent` in the black-rainbow-labs-sites repository.
+    Cloudflare serves its pages from Workers static assets, and the `brl-sites` origin on this machine
+    serves `/downloads/` through Cloudflare's cache. `tools/deploy.mjs` in that repository uploads the
+    export, purges any download whose bytes changed from the edge cache, waits for the origin to pick
+    up the new export (it reloads by itself, so there is no restart), and checks every file at the
+    public URL.
 
 .PARAMETER SitePath
-    The inillucent-site checkout. Defaults to a sibling of this repository.
-
-.PARAMETER ServiceName
-    The Service Manager service that serves the site.
-
-.PARAMETER ServiceManager
-    The Service Manager's base URL.
+    The site folder. Defaults to `black-rainbow-labs-sites/sites/inillucent` beside this repository.
 
 .EXAMPLE
     pwsh packaging/deploy-site.ps1
-    pwsh packaging/deploy-site.ps1 -SitePath C:/jason/dev/inillucent-site
+    pwsh packaging/deploy-site.ps1 -SitePath C:/jason/dev/black-rainbow-labs-sites/sites/inillucent
 #>
 [CmdletBinding()]
 param(
-    [string] $SitePath,
-    [string] $ServiceName = 'Inillucent Site',
-    [string] $ServiceManager = 'http://127.0.0.1:4000'
+    [string] $SitePath
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $SitePath) { $SitePath = Join-Path (Split-Path -Parent $root) 'inillucent-site' }
+if (-not $SitePath) { $SitePath = Join-Path (Split-Path -Parent $root) 'black-rainbow-labs-sites/sites/inillucent' }
 if (-not (Test-Path -LiteralPath $SitePath)) { throw "$SitePath does not exist. Pass -SitePath." }
+$sitesRepo = (Resolve-Path (Join-Path $SitePath '../..')).Path
+$deploy = Join-Path $sitesRepo 'tools/deploy.mjs'
+if (-not (Test-Path -LiteralPath $deploy)) { throw "$deploy does not exist. Is $SitePath inside the black-rainbow-labs-sites repository?" }
 
 Write-Host "building $SitePath"
 & npm --prefix $SitePath run build
@@ -53,18 +51,6 @@ $count = @(Get-ChildItem -Path $exported -File -ErrorAction SilentlyContinue).Co
 if ($count -lt 1) { throw "$exported is empty after the build, so nothing would be served." }
 Write-Host "  $count files in out/downloads"
 
-Write-Host "restarting '$ServiceName'"
-try {
-    $services = Invoke-RestMethod -Uri "$ServiceManager/api/services" -TimeoutSec 30
-} catch {
-    throw "the Service Manager at $ServiceManager could not be reached: $($_.Exception.Message). The site is built; restart '$ServiceName' by hand."
-}
-$list = if ($services -is [array]) { $services } else { $services.services }
-$service = $list | Where-Object { $_.name -eq $ServiceName } | Select-Object -First 1
-if (-not $service) { throw "the Service Manager knows no service named '$ServiceName'." }
-
-# A restart can outlast a short client timeout, and the call is cancellable - a timeout kills the
-# work the handler was doing rather than only the waiting. 120s is well past what this takes.
-$answer = Invoke-RestMethod -Uri "$ServiceManager/api/services/$($service.id)/control" -Method Post `
-    -ContentType 'application/json' -Body '{"action":"restart"}' -TimeoutSec 120
-Write-Host "  $($service.name) is $($answer.status), pid $($answer.pid)"
+Write-Host "deploying with $deploy"
+& node $deploy inillucent --skip-build
+if ($LASTEXITCODE -ne 0) { throw "tools/deploy.mjs failed with $LASTEXITCODE. The site is built; run 'node $deploy inillucent --skip-build' again." }

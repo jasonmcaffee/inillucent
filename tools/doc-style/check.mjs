@@ -17,8 +17,8 @@
  * Usage:
  *   node tools/doc-style/check.mjs                                   # every page in scope
  *   node tools/doc-style/check.mjs docs/sql.md README.md             # only these files
- *   node tools/doc-style/check.mjs --site ../inillucent-site         # only the site chapters
- *   node tools/doc-style/check.mjs --site ../inillucent-site --all   # the site and every page
+ *   node tools/doc-style/check.mjs --site ../black-rainbow-labs-sites/sites/inillucent         # only the site chapters
+ *   node tools/doc-style/check.mjs --site ../black-rainbow-labs-sites/sites/inillucent --all   # the site and every page
  *
  * A page that has to quote a banned phrase, as `docs/writing-style.md` does, puts the quote between
  * `<!-- doc-style: off -->` and `<!-- doc-style: on -->`.
@@ -261,7 +261,7 @@ export function checkMarkdown(file, rules) {
  * The chapters are data in `src/data/documentation.ts`. The titles, summaries, paragraphs, points
  * and example explanations are prose. The example code and its recorded result are not.
  *
- * @param site - the root of an inillucent-site checkout
+ * @param site - the site folder, black-rainbow-labs-sites/sites/inillucent
  * @param rules - the phrases from `rules.txt`
  */
 export async function checkSite(site, rules) {

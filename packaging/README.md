@@ -58,7 +58,7 @@ repository the worktree belongs to. A worktree on another drive needs no extra a
 | `-SkipTests` | Skips the test phase. `ship.ps1` prints that the release is untested and writes the same sentence into the GitHub release notes. |
 | `-AllowDirty` | Builds from a checkout with uncommitted changes. |
 | `-Otp <six digits>` | A one time code for npm, for an npm token that cannot publish without one. |
-| `-SitePath <path>` | The `inillucent-site` checkout. The default is a folder named `inillucent-site` beside the main checkout. |
+| `-SitePath <path>` | The site folder. The default is `black-rainbow-labs-sites/sites/inillucent` beside the main checkout (task-2128 moved the site there). |
 | `-TapPath <path>` | The Homebrew tap checkout. The default is a folder named `homebrew-inillucent` beside the main checkout. |
 
 ## The six phases
@@ -97,7 +97,7 @@ The routes run in this order.
 | `mirror` | One commit on the mirror whose tree is the tag's tree, and the tag `v<version>` on it. Runs `mirror-github.ps1 -Push`. | the `brl` git remote | none |
 | `github` | A GitHub release on the mirror with every artifact attached. A draft release is made public. | `gh`, and a GitHub token | The release exists and has assets |
 | `interop` | `tests/interop/<version>/`, a database written by the Windows binary this release published. Committed and pushed. | nothing | `app.rdb`, `expected.tsv` and a log segment exist |
-| `site` | The downloads on inillucent.com, then the links on its home page, then a rebuild and restart of the site. | The site checkout. `install.sh` and `macos/verify-macos.sh` must parse and contain no carriage return. | `downloads/VERSION`, a link for each of the nine downloads, every name in `SHA256SUMS` served at the built size, and the smallest file hashed in full |
+| `site` | The downloads on inillucent.com, then the links on its home page, then a rebuild and deploy of the site. | The site checkout. `install.sh` and `macos/verify-macos.sh` must parse and contain no carriage return. | `downloads/VERSION`, a link for each of the nine downloads, every name in `SHA256SUMS` served at the built size, and the smallest file hashed in full |
 | `crates` | Every publishable workspace crate on crates.io. Runs `cargo-publish.ps1 -Execute -Confirmed`. | `CARGO_REGISTRY_TOKEN` | crates.io names the version for `inillucent-cli` |
 | `npm` | The five platform packages `@blackrainbowlabs/cli-*`, then the `inillucent` wrapper. | `npm`, and a credential `npm whoami` accepts | The npm registry names the version |
 | `pypi` | Four wheels: Windows, macOS, and Linux x86-64 and aarch64. | a PyPI token, `python` and `twine` | PyPI names the version |
@@ -246,7 +246,7 @@ tagged and left half published for four days, with its GitHub release still a dr
 | `sign-sums.ps1` | Signs `SHA256SUMS` with minisign |
 | `mirror-github.ps1` | Builds, pushes or checks the mirror commit for a release |
 | `publish-site.ps1` | `-Stage` copies the downloads to the site, `-Link` adds the links |
-| `deploy-site.ps1` | Builds the site and restarts the service that serves it |
+| `deploy-site.ps1` | Builds the site and deploys it to Cloudflare and the brl-sites origin with `tools/deploy.mjs` from the black-rainbow-labs-sites repository |
 | `cargo-publish.ps1` | Publishes the workspace to crates.io. Without `-Execute` it is a dry run |
 | `homebrew/update.sh` | Writes the formula with the checksums from `dist/SHA256SUMS` |
 | `fetch-macos-artifacts.ps1` | Collects and checks macOS files built on a Mac |

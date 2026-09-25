@@ -29,8 +29,8 @@ here. A test that cannot fail proves nothing.
 ## Documentation
 
 - [ ] Pages that describe the changed behavior are updated in this pull request (docs/,
-      agent-skills/, package readmes, drivers/README.md, and the inillucent.com chapter in the
-      inillucent-site repository)
+      agent-skills/, package readmes, drivers/README.md, and the inillucent.com chapter in
+      sites/inillucent of the black-rainbow-labs-sites repository)
 - [ ] `node tools/doc-style/check.mjs` reports no problems
 
 <!--

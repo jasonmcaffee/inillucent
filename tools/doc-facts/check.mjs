@@ -14,7 +14,7 @@
  * rather than passed over, so deleting a sentence does not make the check green.
  *
  * Usage:
- *   node tools/doc-facts/check.mjs [--site <path to inillucent-site>] [--json]
+ *   node tools/doc-facts/check.mjs [--site <path to black-rainbow-labs-sites/sites/inillucent>] [--json]
  *   node tools/doc-facts/check.mjs --run-tests      # adds the test counts, about five minutes
  *   node tools/doc-facts/check.mjs --self-test      # shows that the test-run judgement can fail
  *

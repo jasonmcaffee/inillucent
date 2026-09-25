@@ -98,7 +98,8 @@ param(
     # machine holds.
     [ValidatePattern('^[0-9]{6}$')]
     [string] $Otp,
-    # Where inillucent-site and the Homebrew tap are. Both default to siblings of the main checkout,
+    # Where the site (black-rainbow-labs-sites/sites/inillucent since task-2128) and the Homebrew tap
+    # are. Both default to siblings of the main checkout,
     # which is right whether this runs there or in a worktree somewhere else.
     [string] $SitePath,
     [string] $TapPath,
@@ -140,7 +141,7 @@ $script:Dist = Join-Path $root 'dist'
 # **Resolved against the main checkout, not against $root (task-1995).** A release is often cut from
 # a `git worktree` - the ordinary checkout is where day to day work happens and is frequently dirty,
 # and `cargo publish` and this script both refuse a dirty tree. A worktree lives wherever it was put,
-# usually on another drive, so `../inillucent-site` and `../homebrew-inillucent` resolve to nothing
+# usually on another drive, so `../black-rainbow-labs-sites` and `../homebrew-inillucent` resolve to nothing
 # and the site and Homebrew routes skip with "does not exist" - the two routes a person is most
 # likely to assume ran. `git rev-parse --git-common-dir` names the original repository's .git from
 # inside any worktree, so the siblings are found from there.
@@ -157,7 +158,7 @@ $script:CrossBin = Get-CrossBin -Root $root
 # Exported so every script this one calls resolves the same directory, rather than each repeating
 # the search and one of them getting a different answer from the preflight that cleared it.
 $env:INILLUCENT_CROSS_BIN = $script:CrossBin
-$script:SitePath = if ($SitePath) { $SitePath } else { Join-Path (Split-Path -Parent $script:MainCheckout) 'inillucent-site' }
+$script:SitePath = if ($SitePath) { $SitePath } else { Join-Path (Split-Path -Parent $script:MainCheckout) 'black-rainbow-labs-sites/sites/inillucent' }
 $script:TapPath = if ($TapPath) { $TapPath } else { Join-Path (Split-Path -Parent $script:MainCheckout) 'homebrew-inillucent' }
 $script:Packaging = $PSScriptRoot
 # Packagist signs in with GitHub, so the account is a person rather than the organisation.
@@ -678,8 +679,8 @@ function Get-Routes {
                 & (Join-Path $script:Packaging 'publish-site.ps1') -Version $Version -Stage -SitePath $script:SitePath
                 & (Join-Path $script:Packaging 'publish-site.ps1') -Version $Version -Link -SitePath $script:SitePath
                 # **And deploy it, because staging is not publishing.** The site is a static export
-                # served out of `out/` by a small Rust binary, and `public/downloads/` is gitignored
-                # - so the artifacts reach the live site only through a build and a restart. Without
+                # served by Cloudflare and the brl-sites origin, and `public/downloads/` is gitignored
+                # - so the artifacts reach the live site only through a build and a deploy. Without
                 # this the 0.1.5 run staged and linked everything and inillucent.com still answered
                 # 0.1.3, which the route's own Verify caught.
                 & (Join-Path $script:Packaging 'deploy-site.ps1') -SitePath $script:SitePath

@@ -263,7 +263,7 @@ Read three neighbouring files before you write a new one. Then follow these rule
      `.claude/skills` and `.agents/skills`;
    - the package readmes under `packages/`;
    - `drivers/README.md`;
-   - the chapter in `src/data/documentation.ts` in the `inillucent-site` repository, which is
+   - the chapter in `src/data/documentation.ts` in `sites/inillucent` of the black-rainbow-labs-sites repository, which is
      published at https://inillucent.com/docs.
 7. `node tools/doc-style/check.mjs` reports no problems, and
    `cargo test -p inillucent-compat --test tooling documentation::` passes.
