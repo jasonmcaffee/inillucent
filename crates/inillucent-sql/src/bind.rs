@@ -157,8 +157,15 @@ pub enum BoundExpr {
     Raise {
         /// Which action.
         action: crate::ast::RaiseAction,
-        /// The message, when the action takes one.
+        /// The message, when the action takes one and it is a string literal.
         message: Option<Vec<u8>>,
+        /// The message, when it is any other expression.
+        ///
+        /// Evaluated when the `RAISE` fires, and read as text: NULL is an empty
+        /// message and a number is its text, which is what SQLite reports. A
+        /// literal stays in `message`, so the bodies the binder synthesises for
+        /// foreign keys compile as they always have.
+        computed: Option<Box<BoundExpr>>,
         /// Whether the abort is a foreign key's rather than a trigger's.
         ///
         /// The two are the same expression and report different codes, and
@@ -585,7 +592,7 @@ impl BoundExpr {
             | BoundExpr::Text(_)
             | BoundExpr::Blob(_)
             | BoundExpr::Parameter(_)
-            | BoundExpr::Raise { .. }
+            | BoundExpr::Raise { computed: None, .. }
             | BoundExpr::Column { .. }
             | BoundExpr::Rowid { .. }
             | BoundExpr::WindowRef { .. }
@@ -595,7 +602,11 @@ impl BoundExpr {
             | BoundExpr::Not(operand)
             | BoundExpr::IsNull { operand, .. }
             | BoundExpr::Collate { operand, .. }
-            | BoundExpr::Cast { operand, .. } => vec![operand],
+            | BoundExpr::Cast { operand, .. }
+            | BoundExpr::Raise {
+                computed: Some(operand),
+                ..
+            } => vec![operand],
             BoundExpr::Arithmetic { left, right, .. }
             | BoundExpr::Compare { left, right, .. }
             | BoundExpr::Is { left, right, .. }
@@ -672,7 +683,7 @@ impl BoundExpr {
             | BoundExpr::Text(_)
             | BoundExpr::Blob(_)
             | BoundExpr::Parameter(_)
-            | BoundExpr::Raise { .. }
+            | BoundExpr::Raise { computed: None, .. }
             | BoundExpr::Column { .. }
             | BoundExpr::Rowid { .. }
             | BoundExpr::WindowRef { .. }
@@ -682,7 +693,11 @@ impl BoundExpr {
             | BoundExpr::Not(operand)
             | BoundExpr::IsNull { operand, .. }
             | BoundExpr::Collate { operand, .. }
-            | BoundExpr::Cast { operand, .. } => vec![operand],
+            | BoundExpr::Cast { operand, .. }
+            | BoundExpr::Raise {
+                computed: Some(operand),
+                ..
+            } => vec![operand],
             BoundExpr::Arithmetic { left, right, .. }
             | BoundExpr::Compare { left, right, .. }
             | BoundExpr::Is { left, right, .. }
@@ -858,7 +873,11 @@ impl BoundExpr {
             | BoundExpr::Not(operand)
             | BoundExpr::IsNull { operand, .. }
             | BoundExpr::Collate { operand, .. }
-            | BoundExpr::Cast { operand, .. } => operand.sources_used(into),
+            | BoundExpr::Cast { operand, .. }
+            | BoundExpr::Raise {
+                computed: Some(operand),
+                ..
+            } => operand.sources_used(into),
             BoundExpr::Arithmetic { left, right, .. }
             | BoundExpr::Compare { left, right, .. }
             | BoundExpr::Is { left, right, .. }
@@ -3848,9 +3867,19 @@ impl<'a> Binder<'a> {
                 if self.row_aliases.is_none() {
                     return Err(unsupported("RAISE outside a trigger", span));
                 }
+                let bound = match message {
+                    Some(id) => Some(self.bind_expr(id)?),
+                    None => None,
+                };
+                let (message, computed) = match bound {
+                    Some(BoundExpr::Text(text)) => (Some(text), None),
+                    Some(other) => (None, Some(Box::new(other))),
+                    None => (None, None),
+                };
                 Ok(BoundExpr::Raise {
                     action,
-                    message: message.clone(),
+                    message,
+                    computed,
                     foreign_key: false,
                 })
             }

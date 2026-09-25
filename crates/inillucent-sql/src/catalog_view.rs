@@ -133,6 +133,22 @@ pub struct IndexColumnInfo {
     pub declared_descending: bool,
 }
 
+impl IndexColumnInfo {
+    /// Returns the table column the key holds as it is stored, when it holds one.
+    ///
+    /// **Not the same as `column`.** A key on a `VIRTUAL` generated column
+    /// names that column, so `PRAGMA index_info`, a unique violation's message
+    /// and `DROP COLUMN` all see it, and it also carries the column's
+    /// expression in `expr_sql`, because the column is in no record and every
+    /// entry has to be computed. The binder replaces a reference to such a
+    /// column with its expression, so a planner that matched the key by column
+    /// would never find a term to seek on. The planner reads this instead and
+    /// matches a computed key by its expression.
+    pub fn plain_column(&self) -> Option<u16> {
+        self.column.filter(|_| self.expr_sql.is_none())
+    }
+}
+
 /// An index over a table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexInfo {

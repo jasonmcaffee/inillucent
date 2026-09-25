@@ -1301,7 +1301,7 @@ fn path_ordering(table: &TableInfo, path: &AccessPath) -> Option<PathOrdering> {
             for (at, key_column) in index.columns.iter().enumerate() {
                 // An expression key orders by something no ORDER BY term here
                 // can name, so the walk stops describing itself at that point.
-                let Some(column) = key_column.column else {
+                let Some(column) = key_column.plain_column() else {
                     break;
                 };
                 let named = named_key(table, OrderedBy::Column(column));
@@ -1336,7 +1336,7 @@ fn path_ordering(table: &TableInfo, path: &AccessPath) -> Option<PathOrdering> {
                 .find(|candidate| candidate.name == *index_name)?;
             let mut columns: Vec<(OrderedBy, bool, Collation)> = Vec::new();
             for key_column in &index.columns {
-                let Some(column) = key_column.column else {
+                let Some(column) = key_column.plain_column() else {
                     break;
                 };
                 let named = named_key(table, OrderedBy::Column(column));
@@ -2550,7 +2550,7 @@ fn index_candidate(
     let mut key = 0usize;
     while let Some(key_column) = index.columns.get(key) {
         let collation = collation_of(&key_column.collation);
-        let found = match key_column.column {
+        let found = match key_column.plain_column() {
             Some(column) => {
                 find_equality(id, position, ids, column, collation, terms, consumed, &used)
                     .map(|(term_index, value)| (term_index, value, Some(column)))
@@ -2701,7 +2701,7 @@ fn covering_slots(
         let position = index
             .columns
             .iter()
-            .position(|key| key.column == Some(*slot))?;
+            .position(|key| key.plain_column() == Some(*slot))?;
         slots.push((*slot, position));
     }
     Some(slots)

@@ -40,6 +40,10 @@ fn expression_children(ast: &crate::ast::Ast, expr: ast::ExprId) -> Vec<ast::Exp
         }
         ast::Expr::Collate { operand, .. } | ast::Expr::Cast { operand, .. } => out.push(*operand),
         ast::Expr::IsNull { operand, .. } => out.push(*operand),
+        ast::Expr::Raise {
+            message: Some(message),
+            ..
+        } => out.push(*message),
         ast::Expr::Is { left, right, .. } => {
             out.push(*left);
             out.push(*right);

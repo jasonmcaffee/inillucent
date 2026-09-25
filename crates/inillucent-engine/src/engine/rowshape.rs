@@ -581,6 +581,20 @@ pub(crate) fn index_shape(
             types.push(StaticType::Unknown);
             continue;
         };
+        if column.expr_sql.is_some() {
+            // A `VIRTUAL` generated column: the key is its expression's value,
+            // which is computed with no affinity applied and so may be of any
+            // type. The table carries no slot for it to map, and a walk of this
+            // tree is not ordered by any column a query can name.
+            ordered = false;
+            columns.push(
+                ColumnSpec::key(PhysicalType::Any)
+                    .with_collation(collation_of(&column.collation))
+                    .with_descending(column.descending),
+            );
+            types.push(StaticType::Unknown);
+            continue;
+        }
         let (physical, static_type) = match table.columns.get(declared) {
             Some(info) => physical_for(info.affinity),
             None => (PhysicalType::Any, StaticType::Unknown),

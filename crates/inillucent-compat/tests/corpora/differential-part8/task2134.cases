@@ -1,0 +1,20 @@
+# Differential cases, category `task2134`: defects found while building the coffee shop example.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
+#
+# jd: julianday() on a whole millisecond. SQLite keeps a Julian day as an integer count of
+# milliseconds and divides by 86400000 when asked; adding the clock as fractions of a day in
+# doubles landed on a neighbouring double, and a difference of two days was off by 5e-10.
+t2134-jd-001	SELECT julianday('2026-09-25T17:30:00Z'), julianday('2026-09-25T17:30:00Z') - julianday('2026-09-25T08:00:00Z')
+t2134-jd-002	SELECT julianday('2026-09-25 17:30:00.123'), julianday('2026-09-25 17:30:00+05:30'), julianday('2026-09-25 17:30:00-01:15')
+t2134-jd-003	SELECT julianday('2026-09-25','+7 hours','+3 minutes','+1.5 seconds'), julianday('2026-09-25','-7 hours'), julianday('2026-09-25T17:30:00Z','+0.1 day')
+t2134-jd-004	SELECT julianday(2461309.12345678912), strftime('%J','2026-09-25T17:30:00'), (julianday('2026-09-25 17:31:07') - julianday('2026-09-25 08:00:00')) * 24
+#
+# vgi: an index on a VIRTUAL generated column. The column is in no record, so the index is kept
+# as an index on the column's expression: the build, every write and the integrity check compute
+# the key, and a query on the column seeks it, because the binder turns the column into its
+# expression.
+t2134-vgi-001	CREATE TABLE payment (id INTEGER PRIMARY KEY, at TEXT NOT NULL, business_day TEXT GENERATED ALWAYS AS (date(at)) VIRTUAL, amount INTEGER) STRICT;\nINSERT INTO payment (at, amount) VALUES ('2026-09-20 10:00:00', 5), ('2026-09-21 09:00:00', 7);\nCREATE INDEX payment_day ON payment (business_day);\nINSERT INTO payment (at, amount) VALUES ('2026-09-20 18:00:00', 11), ('2026-09-22 08:00:00', 13);\nUPDATE payment SET at = '2026-09-22 12:00:00' WHERE id = 2;\nDELETE FROM payment WHERE id = 1;\nSELECT id, business_day, amount FROM payment WHERE business_day = '2026-09-22' ORDER BY id;\nSELECT business_day, sum(amount) FROM payment GROUP BY business_day ORDER BY business_day;\nPRAGMA integrity_check
+t2134-vgi-002	CREATE TABLE payment (id INTEGER PRIMARY KEY, at TEXT NOT NULL, business_day TEXT GENERATED ALWAYS AS (date(at)) VIRTUAL);\nINSERT INTO payment (at) VALUES ('2026-09-20 10:00:00'), ('2026-09-20 11:00:00');\nCREATE INDEX payment_day ON payment (business_day);\nEXPLAIN QUERY PLAN SELECT id FROM payment WHERE business_day = '2026-09-20';\nPRAGMA index_info(payment_day)
+t2134-vgi-003	CREATE TABLE g (a INTEGER, b INTEGER GENERATED ALWAYS AS (a * 2) VIRTUAL);\nINSERT INTO g (a) VALUES (1), (2), (3);\nCREATE UNIQUE INDEX gb ON g (b);\nINSERT INTO g (a) VALUES (4);\nSELECT a FROM g WHERE b = 4;\nSELECT a, b FROM g WHERE b > 2 ORDER BY b;\nREINDEX gb;\nPRAGMA integrity_check
+t2134-vgi-004	CREATE TABLE g (a INTEGER, b INTEGER GENERATED ALWAYS AS (a * 2) VIRTUAL);\nINSERT INTO g (a) VALUES (1), (1);\nCREATE UNIQUE INDEX gb ON g (b);\nSELECT count(*) FROM g

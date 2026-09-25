@@ -273,6 +273,17 @@ pub fn compare_with_counters(
             "{label} `{sql}`: extended code\n  inillucent: {} ({})\n  SQLite:  {} ({})",
             candidate.extended, candidate.message, reference.extended, reference.message
         );
+        // **A `RAISE` is graded on its message too.** The message is what the
+        // trigger's author wrote for the caller to read, and since it can be an
+        // expression over the row (`RAISE(ABORT, 'too big: ' || NEW.n)`) it is
+        // a computed answer like any other. Every other failure's text is the
+        // engine's own wording and is not compared.
+        if reference.extended == inillucent_sql::dml::codes::TRIGGER {
+            assert_eq!(
+                candidate.message, reference.message,
+                "{label} `{sql}`: RAISE message"
+            );
+        }
         // **The rows are not compared and the counters are**, which is why this
         // returns here rather than skipping the whole tail. A failed statement
         // produced no rows to compare, but it has counters and they are a

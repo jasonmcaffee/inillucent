@@ -500,6 +500,10 @@ impl Parser<'_> {
     }
 
     /// Parses `RAISE(IGNORE)` or `RAISE(ROLLBACK|ABORT|FAIL, message)`.
+    ///
+    /// The message is any expression, which is SQLite's grammar: it is
+    /// evaluated when the `RAISE` fires, so it can name the row that broke
+    /// the rule.
     fn parse_raise(&mut self) -> Result<ExprId, ParseError> {
         let start = self.expect_keyword(Keyword::RAISE)?.span;
         self.expect(Punctuator::LeftParen)?;
@@ -518,12 +522,7 @@ impl Parser<'_> {
             None
         } else {
             self.expect(Punctuator::Comma)?;
-            let token = self.peek()?;
-            if token.kind != TokenKind::String {
-                return Err(self.unexpected(&["a string"])?);
-            }
-            self.bump()?;
-            Some(lexer::string_text(self.source(), token).into_owned())
+            Some(self.parse_expr()?)
         };
         let end = self.expect(Punctuator::RightParen)?.span;
         Ok(self

@@ -187,20 +187,48 @@ struct Raise {
     code: i32,
     /// The message.
     message: String,
+    /// The expression the message is computed from, when it is not a literal.
+    computed: Option<Box<dyn Eval>>,
     /// What the action undoes.
     unwind: Unwind,
 }
 
 impl Eval for Raise {
-    fn value<'p>(&self, _batch: &Batch<'p>, _nth: usize) -> DbResult<Computed<'p>> {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        let message = match &self.computed {
+            Some(expr) => raise_message(&expr.value(batch, nth)?.get()),
+            None => self.message.clone(),
+        };
         Err(
             inillucent_base::error::DbError::new(inillucent_base::error::ExtendedCode(self.code))
-                .with_message(self.message.clone())
+                .with_message(message)
                 // Written out, so nothing overrides it: a trigger body's
                 // `RAISE(ROLLBACK)` rolls the transaction back whatever the
                 // statement that fired the trigger asked for.
                 .with_raised_unwind(self.unwind),
         )
+    }
+}
+
+/// Returns the text a computed `RAISE` message reports.
+///
+/// SQLite reads the message with `sqlite3_value_text`, so NULL is an empty
+/// message and a number is the text a `CAST` to TEXT would give. Measured
+/// against 3.53.4: `RAISE(ABORT, NULL)` reports an empty message,
+/// `RAISE(ABORT, 42)` reports `42` and `RAISE(ABORT, 1.5)` reports `1.5`.
+///
+/// @param value - the message expression's value
+fn raise_message(value: &Datum<'_>) -> String {
+    match value {
+        Datum::Null => String::new(),
+        Datum::Int(number) => {
+            String::from_utf8_lossy(&inillucent_value::numeric::integer_to_text(*number))
+                .into_owned()
+        }
+        Datum::Real(number) => {
+            String::from_utf8_lossy(&inillucent_value::numeric::real_to_text(*number)).into_owned()
+        }
+        Datum::Text(bytes) | Datum::Blob(bytes) => String::from_utf8_lossy(bytes).into_owned(),
     }
 }
 

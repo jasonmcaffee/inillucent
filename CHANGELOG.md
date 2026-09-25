@@ -26,6 +26,27 @@ triggers that write a history, a view, recursive CTEs, window functions, filtere
 `UPSERT`, JSON functions and FTS5 search. Its README also lists six ways 1.0.30 answers differently
 from SQLite, and what the example does in each case.
 
+**`RAISE()` takes any expression as its message.** `SELECT RAISE(ABORT, 'too big: ' || NEW.n)` and
+`RAISE(FAIL, printf('huge: %d', NEW.n))` in a trigger body report the computed text, as SQLite
+does. Release 1.0.30 refused both `CREATE TRIGGER` statements with a syntax error at the `||`.
+NULL is an empty message and a number is its text.
+
+**`inillucent-shell` no longer cuts a trigger at the `END` of a `CASE`.** A body written as
+`SELECT CASE WHEN NEW.n < 0 THEN RAISE(ABORT, 'negative') END; END;` was sent to the parser after
+the first `END;` and refused as incomplete. The shell now ends a trigger only at an `END` that
+follows a semicolon, which is SQLite's rule.
+
+**An index on a `VIRTUAL` generated column.** `CREATE INDEX payment_day ON payment (business_day)`
+over `business_day TEXT GENERATED ALWAYS AS (date(at)) VIRTUAL` was refused with "an index on a
+column the tree does not carry". The index is now kept as an index on the column's expression, so a
+query on the column seeks it, every write keeps it current, and a `UNIQUE` one refuses a duplicate
+computed value.
+
+**`julianday()` gives SQLite's digits.** `julianday('2026-09-25T17:30:00Z')` answered
+`2461309.229166667` where SQLite answers `2461309.2291666665`. The value is now computed in whole
+milliseconds, as SQLite keeps it, so a difference of two Julian days multiplied by 24 gives the
+same number of hours in both engines.
+
 **The Rust rag example uses what 1.0.30 added.** It depends on `inillucent` alone with
 `features = ["embed"]`, fills `chunk_search` from `chunk` with one `INSERT ... SELECT` per document,
 embeds each question inside the search SQL, declares `vector_weight = 0.5`, and compacts the search

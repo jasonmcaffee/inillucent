@@ -1088,10 +1088,22 @@ pub fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResu
             Some(Expr::Column { column, .. }) => table.column_position(parsed.ast.folded(*column)),
             _ => None,
         };
+        // **A `VIRTUAL` generated column is indexed as its expression.** It is
+        // in no record, so the scan that fills an ordinary index has nothing to
+        // read, and `CREATE INDEX` on one was refused with "an index on a
+        // column the tree does not carry". SQLite accepts it, and it is the way
+        // to give an expression index a name. Carrying the column's expression
+        // here makes the build, every write and the integrity check compute
+        // the key, as they already do for `CREATE INDEX ix ON t(date(at))`,
+        // while `column` still names the column for the pragmas and messages.
+        let virtual_expression = column
+            .and_then(|index| table.column(index))
+            .filter(|info| info.generated && !info.stored)
+            .and_then(|info| info.generated_sql.clone());
         let expr_sql = if column.is_none() {
             Some(parsed.ast.expr_span(key.expr).slice(sql).to_vec())
         } else {
-            None
+            virtual_expression
         };
         let collation = match written_collation {
             Some(name) => parsed.ast.folded(name).to_vec(),

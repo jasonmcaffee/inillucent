@@ -39,7 +39,7 @@ pub(super) fn key_range(
     key_column: &crate::catalog_view::IndexColumnInfo,
     used: &mut Vec<usize>,
 ) -> Option<KeyRange> {
-    let column = key_column.column?;
+    let column = key_column.plain_column()?;
     let collation = collation_of(&key_column.collation);
     let mut low = None;
     let mut high = None;

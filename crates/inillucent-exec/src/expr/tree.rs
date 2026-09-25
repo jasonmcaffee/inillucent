@@ -232,6 +232,10 @@ pub enum Expr {
         code: i32,
         /// The message the caller sees.
         message: Vec<u8>,
+        /// The expression the message is computed from, when it was not a
+        /// string literal. Evaluated when the node fires, in place of
+        /// `message`.
+        computed: Option<Box<Expr>>,
         /// How much of what has been written the action undoes.
         ///
         /// The whole of the difference between `RAISE(ABORT)`, `RAISE(FAIL)`
@@ -532,10 +536,15 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
         Expr::Raise {
             code,
             message,
+            computed,
             unwind,
         } => Box::new(Raise {
             code: *code,
             message: String::from_utf8_lossy(message).into_owned(),
+            computed: match computed {
+                Some(expr) => Some(compile(expr, types)?),
+                None => None,
+            },
             unwind: *unwind,
         }),
         Expr::CompareWith {

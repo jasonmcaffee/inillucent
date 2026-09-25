@@ -346,7 +346,12 @@ pub enum Expr {
         /// Which action.
         action: RaiseAction,
         /// The message, when the action takes one.
-        message: Option<Vec<u8>>,
+        ///
+        /// An expression, as SQLite takes it: `RAISE(ABORT, 'too big: ' ||
+        /// NEW.n)` names the value that broke the rule, which is the reason to
+        /// write a guard trigger at all. It used to be a string literal only,
+        /// and anything else was a syntax error pointing at the `||`.
+        message: Option<ExprId>,
     },
 }
 
@@ -1642,7 +1647,11 @@ impl Ast {
             | Expr::Star { .. }
             | Expr::Exists { .. }
             | Expr::Subquery(_)
-            | Expr::Raise { .. } => 0,
+            | Expr::Raise { message: None, .. } => 0,
+            Expr::Raise {
+                message: Some(message),
+                ..
+            } => self.expr_depth(*message),
             Expr::Unary { operand, .. }
             | Expr::Collate { operand, .. }
             | Expr::Cast { operand, .. }

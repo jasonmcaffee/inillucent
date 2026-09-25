@@ -92,6 +92,29 @@ pub(crate) fn translate(
         return Ok(found);
     }
     if let Some(found) = translate_literal(expr, params)? {
+        // `RAISE(ABORT, 'too big: ' || NEW.n)`: the node itself is a leaf, and
+        // its message is an expression over the row, translated here where the
+        // row's columns can be resolved.
+        if let (
+            Expr::Raise {
+                code,
+                message,
+                unwind,
+                ..
+            },
+            BoundExpr::Raise {
+                computed: Some(computed),
+                ..
+            },
+        ) = (&found, expr)
+        {
+            return Ok(Expr::Raise {
+                code: *code,
+                message: message.clone(),
+                computed: Some(Box::new(translate(computed, space, params, frame)?)),
+                unwind: *unwind,
+            });
+        }
         return Ok(found);
     }
     if let Some(found) = translate_reference(expr, space, params, frame)? {
@@ -234,7 +257,11 @@ fn translate_literal(expr: &BoundExpr, params: &Params) -> DbResult<Option<Expr>
             action,
             message,
             foreign_key,
+            ..
         } => Expr::Raise {
+            // A computed message has a child, which only `translate` can
+            // resolve; it attaches the translated child after this returns.
+            computed: None,
             code: match (action, foreign_key) {
                 (inillucent_sql::ast::RaiseAction::Ignore, _) => 0,
                 (_, true) => inillucent_sql::dml::codes::FOREIGN_KEY,

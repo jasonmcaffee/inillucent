@@ -1156,20 +1156,31 @@ enum State {
     Trigger,
     /// Inside a trigger body, where a semicolon ends a nested statement.
     Body,
-    /// `END` has been read inside a body, so a semicolon ends the whole thing.
+    /// A semicolon inside a body has just been read, so an `END` now would
+    /// close the trigger.
+    ///
+    /// **Only an `END` straight after a semicolon closes a trigger**, which is
+    /// `sqlite3_complete`'s table. Any `END` in the body used to count, so the
+    /// `END` of a `CASE` did: `BEGIN SELECT CASE WHEN NEW.n < 0 THEN
+    /// RAISE(ABORT, 'negative') END; END;` was cut after the first `END;` and
+    /// sent to the parser as a trigger with no end, which is the usual way to
+    /// write a guard trigger.
+    Semi,
+    /// `END` has been read after a semicolon inside a body, so a semicolon
+    /// ends the whole thing.
     End,
 }
 
 impl State {
     /// Returns whether a semicolon here finishes the statement.
     fn ends_here(self) -> bool {
-        !matches!(self, State::Trigger | State::Body)
+        !matches!(self, State::Trigger | State::Body | State::Semi)
     }
 
     /// Returns the state after a semicolon that did not finish anything.
     fn after_semicolon(self) -> State {
         match self {
-            State::Trigger | State::Body => State::Body,
+            State::Trigger | State::Body | State::Semi => State::Semi,
             _ => State::Start,
         }
     }
@@ -1193,8 +1204,8 @@ impl State {
             State::Create if word == b"TRIGGER" => State::Trigger,
             State::Create => State::Plain,
             State::Trigger if word == b"BEGIN" => State::Body,
-            State::Body if word == b"END" => State::End,
-            State::End => State::Body,
+            State::Semi if word == b"END" => State::End,
+            State::Semi | State::End => State::Body,
             other => other,
         }
     }
@@ -1203,7 +1214,7 @@ impl State {
     fn after_other(self) -> State {
         match self {
             State::Start => State::Plain,
-            State::End => State::Body,
+            State::Semi | State::End => State::Body,
             other => other,
         }
     }
@@ -1564,6 +1575,8 @@ mod trailing_statement_tests {
             "CREATE TABLE a (id INTEGER PRIMARY KEY);;;",
             // A trigger body holds semicolons, which is why counting them is the wrong test.
             "CREATE TRIGGER t AFTER INSERT ON a FOR EACH ROW BEGIN UPDATE a SET id = id; END",
+            // And the `END` of a `CASE` inside one is not the trigger's.
+            "CREATE TRIGGER t AFTER INSERT ON a BEGIN SELECT CASE WHEN NEW.id < 0 THEN RAISE(ABORT, 'no') END; END",
         ] {
             assert_eq!(
                 held.trailing_statement(one),
@@ -1593,6 +1606,32 @@ CREATE TABLE b (id INTEGER PRIMARY KEY)",
             commented.starts_with("CREATE TABLE b"),
             "said {commented:?}"
         );
+    }
+
+    /// The shell cuts its input where `sqlite3_complete` would, and a `CASE` inside a trigger
+    /// body does not end the trigger.
+    ///
+    /// Each case is the text the shell has read so far and how much of it is one complete
+    /// statement. The last three are the guard triggers the coffee shop example writes, which
+    /// were cut after the `CASE`'s `END;` and sent to the parser as a trigger with no end.
+    #[test]
+    fn a_statement_ends_where_sqlite3_complete_says() {
+        let held = shell();
+        let guard = "CREATE TRIGGER g BEFORE UPDATE ON o BEGIN SELECT CASE WHEN NEW.n < 0 THEN RAISE(ABORT, 'negative ' || NEW.n) END; END;";
+        for (text, wanted) in [
+            ("SELECT 1; SELECT 2;", Some(9)),
+            ("CREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE a SET id = id; END; SELECT 1;", Some(67)),
+            ("CREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE a SET id = id;", None),
+            (guard, Some(guard.len())),
+            ("CREATE TRIGGER g BEFORE UPDATE ON o BEGIN SELECT CASE WHEN 1 THEN 2 END; SELECT 3; END;", Some(87)),
+            ("CREATE TRIGGER g BEFORE UPDATE ON o BEGIN SELECT CASE WHEN 1 THEN 2 END;", None),
+        ] {
+            assert_eq!(
+                super::complete_statement(&held, text),
+                wanted,
+                "how much of {text:?} is one statement"
+            );
+        }
     }
 
     /// Text that will not compile is a syntax error, not a script with too many statements in it.

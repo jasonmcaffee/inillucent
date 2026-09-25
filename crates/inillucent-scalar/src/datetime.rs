@@ -43,6 +43,45 @@ const UNIX_EPOCH_JD: f64 = 2440587.5;
 /// Seconds in a day, as the conversion between the two scales.
 const SECONDS_PER_DAY: f64 = 86_400.0;
 
+/// Milliseconds in a day, the unit SQLite keeps a Julian day in.
+const MILLIS_PER_DAY: f64 = 86_400_000.0;
+
+/// Returns a Julian day as the whole number of milliseconds SQLite would hold.
+///
+/// **SQLite's `DateTime` holds `iJD`, an integer count of milliseconds, and
+/// `julianday()` answers `iJD / 86400000.0`.** A day built here by adding
+/// fractions of a day as doubles lands on a neighbouring double:
+/// `julianday('2026-09-25T17:30:00Z')` answered `2461309.229166667` where
+/// SQLite answers `2461309.2291666665`, and a difference of two such days was
+/// off by 5e-10, which is enough to change a rounded number of hours. Rounding
+/// recovers the integer exactly for any day in the supported range, because a
+/// double near 5.4 million days still resolves a hundredth of a millisecond.
+///
+/// @param day - the Julian day
+fn millis_of(day: f64) -> i64 {
+    (day * MILLIS_PER_DAY).round() as i64
+}
+
+/// Returns the Julian day a whole number of milliseconds names.
+///
+/// @param millis - milliseconds since Julian day 0
+fn day_of_millis(millis: i64) -> f64 {
+    millis as f64 / MILLIS_PER_DAY
+}
+
+/// Returns a Julian day the way SQLite reports one: on a whole millisecond.
+///
+/// A value outside the range a date function answers with is left alone, since
+/// it is never reported as a Julian day.
+///
+/// @param day - the Julian day
+fn on_the_millisecond(day: f64) -> f64 {
+    if !(FIRST_JULIAN_DAY..PAST_LAST_JULIAN_DAY).contains(&day) {
+        return day;
+    }
+    day_of_millis(millis_of(day))
+}
+
 /// Returns the Julian day of the wall clock, now.
 ///
 /// It is read once per statement rather than per call, which is what makes two
@@ -255,7 +294,7 @@ pub fn call(
     // the one outcome a caller cannot detect.
     let subsec = asks_for_subsec(rest);
     match func {
-        TimeFunc::JulianDay => Value::Real(day),
+        TimeFunc::JulianDay => Value::Real(on_the_millisecond(day)),
         TimeFunc::UnixEpoch => unix_epoch(rest, day, encoding),
         TimeFunc::Date => render(day, civil, b"%Y-%m-%d", YearStyle::Signed),
         TimeFunc::Time => render(
@@ -571,11 +610,13 @@ fn parse_iso(bytes: &[u8]) -> Option<(f64, Option<Civil>)> {
     if date_part.is_none() && time_part.is_none() {
         return None;
     }
-    let day = julian_of(civil);
+    let millis = julian_millis_of(civil);
     if offset_minutes != 0 {
-        return Some((day - (offset_minutes as f64) / 1440.0, None));
+        // Taken off in whole milliseconds, as SQLite's `computeJD` does.
+        let shifted = millis.checked_sub(offset_minutes.checked_mul(60_000)?)?;
+        return Some((day_of_millis(shifted), None));
     }
-    Some((day, Some(civil)))
+    Some((day_of_millis(millis), Some(civil)))
 }
 
 /// Splits a timestamp into its date and time halves.
@@ -723,8 +764,21 @@ pub fn civil_of_unix_day(days: i64) -> Civil {
 /// Returns the Julian day of a civil date and time.
 ///
 /// The formula is the standard one for the proleptic Gregorian calendar, and
-/// the half-day is the reason a Julian day starts at noon.
+/// the half-day is the reason a Julian day starts at noon. The value is on a
+/// whole millisecond - see [`julian_millis_of`].
 pub fn julian_of(civil: Civil) -> f64 {
+    day_of_millis(julian_millis_of(civil))
+}
+
+/// Returns the Julian day of a civil date and time, in whole milliseconds.
+///
+/// **This is SQLite's `computeJD`, step for step.** The date part is a whole
+/// day plus a half, which a double holds exactly; the clock is then added as
+/// integers, and the seconds are rounded to the millisecond on their own. The
+/// division into days happens once, when a caller asks for a Julian day.
+///
+/// @param civil - the date and time
+fn julian_millis_of(civil: Civil) -> i64 {
     let (mut year, mut month) = (civil.year, civil.month);
     if month <= 2 {
         year -= 1;
@@ -737,9 +791,8 @@ pub fn julian_of(civil: Civil) -> f64 {
         + civil.day as f64
         + b as f64
         - 1524.5;
-    days + (civil.hour as f64) / 24.0
-        + (civil.minute as f64) / 1440.0
-        + civil.second / SECONDS_PER_DAY
+    let clock = civil.hour * 3_600_000 + civil.minute * 60_000;
+    (days * MILLIS_PER_DAY) as i64 + clock + (civil.second * 1000.0 + 0.5) as i64
 }
 
 /// Returns the civil date and time of a Julian day.
@@ -954,11 +1007,19 @@ fn apply_offset(moment: Moment, folded: &[u8]) -> Option<Moment> {
     let parsed = numeric::atof(magnitude, TextEncoding::Utf8).value;
     let signed = if negative { -parsed } else { parsed };
     let unit = unit.strip_suffix(b"s").unwrap_or(unit);
+    // SQLite adds `(i64)(r * 1000.0 * seconds + rounder)` to its integer
+    // milliseconds, with the rounder half a millisecond away from zero. Adding
+    // `r / 24.0` to a double day instead lands on a neighbouring double.
+    let rounder = if signed < 0.0 { -0.5 } else { 0.5 };
+    let moved = |seconds: f64| {
+        let step = (signed * 1000.0 * seconds + rounder) as i64;
+        moment.moved_to(day_of_millis(millis_of(day).saturating_add(step)))
+    };
     match unit {
-        b"day" => Some(moment.moved_to(day + signed)),
-        b"hour" => Some(moment.moved_to(day + signed / 24.0)),
-        b"minute" => Some(moment.moved_to(day + signed / 1440.0)),
-        b"second" => Some(moment.moved_to(day + signed / SECONDS_PER_DAY)),
+        b"day" => Some(moved(SECONDS_PER_DAY)),
+        b"hour" => Some(moved(3600.0)),
+        b"minute" => Some(moved(60.0)),
+        b"second" => Some(moved(1.0)),
         // Months and years move the calendar rather than a fixed number of
         // days, and the day of the month is clamped the way SQLite clamps it:
         // one month after 31 January is 3 March in a non-leap year, because the
@@ -1051,7 +1112,7 @@ fn render(day: f64, civil: Civil, format: &[u8], years: YearStyle) -> Value<'sta
                 // SQLite prints this one with sixteen significant digits, which
                 // is not what the shortest round-trip rendering gives:
                 // `2460370.878553241` against `2460370.8785532406`.
-                out.extend_from_slice(sixteen_significant(day).as_bytes());
+                out.extend_from_slice(sixteen_significant(on_the_millisecond(day)).as_bytes());
             }
             // The space-padded hours, which were being echoed back as `%k` and
             // `%l`. Fixing one member of a specifier family and assuming the

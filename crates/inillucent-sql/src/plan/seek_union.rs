@@ -118,7 +118,7 @@ pub(super) fn in_list_union_path(
     let mut columns: Vec<Option<u16>> = Vec::new();
     let mut at = 0usize;
     while let Some(key_column) = index.columns.get(at) {
-        let Some(column) = key_column.column else {
+        let Some(column) = key_column.plain_column() else {
             break;
         };
         let collation = collation_of(&key_column.collation);
@@ -148,7 +148,7 @@ pub(super) fn in_list_union_path(
     }
 
     let key_column = index.columns.get(at)?;
-    let column = key_column.column?;
+    let column = key_column.plain_column()?;
     let collation = collation_of(&key_column.collation);
     collations.push(collation);
     descending.push(key_column.descending);
@@ -292,7 +292,7 @@ pub(super) fn keyset_range_union_path(
         for key_column in index.columns.iter().take(depth) {
             collations.push(collation_of(&key_column.collation));
             descending.push(key_column.descending);
-            columns.push(key_column.column);
+            columns.push(key_column.plain_column());
         }
         let covering = levers
             .has(Levers::COVERING_INDEX)
@@ -435,7 +435,7 @@ fn keyset_branches(
         let mut unconverted = Vec::new();
         for (at, eq_term) in equality_terms.iter().enumerate() {
             let key_column = index.columns.get(at)?;
-            let column = key_column.column?;
+            let column = key_column.plain_column()?;
             let collation = collation_of(&key_column.collation);
             let (op, value) = indexable_comparison(id, column, eq_term)?;
             if op != BinaryOp::Equal
@@ -450,7 +450,7 @@ fn keyset_branches(
             equalities.push(value);
         }
         let key_column = index.columns.get(equality_terms.len())?;
-        let column = key_column.column?;
+        let column = key_column.plain_column()?;
         if key_column.descending {
             return None;
         }

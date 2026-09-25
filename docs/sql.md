@@ -131,7 +131,7 @@ otherwise.
 | Writes | `INSERT`, `UPDATE`, `DELETE` and `REPLACE`, every `OR` conflict clause, `RETURNING`, `UPDATE ... FROM`, and `ON CONFLICT ... DO UPDATE` and `DO NOTHING` |
 | Tables | `CREATE TABLE`, `CREATE TABLE ... AS SELECT`, `WITHOUT ROWID`, `STRICT`, `VIRTUAL` and `STORED` generated columns, `AUTOINCREMENT` |
 | Indexes | unique, descending, partial, on an expression, with `COLLATE`, on a `WITHOUT ROWID` table. `REINDEX`, `INDEXED BY`, and `ANALYZE`, which writes `sqlite_stat1` |
-| Views and triggers | `CREATE VIEW`. `CREATE TRIGGER` with `BEFORE`, `AFTER` and `INSTEAD OF`, `UPDATE OF`, `WHEN`, `RAISE`, and recursive triggers |
+| Views and triggers | `CREATE VIEW`. `CREATE TRIGGER` with `BEFORE`, `AFTER` and `INSTEAD OF`, `UPDATE OF`, `WHEN`, `RAISE` with a message that is any expression, and recursive triggers |
 | `ALTER TABLE` | `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` and `DROP COLUMN` |
 | Constraints | `NOT NULL`, `UNIQUE`, `PRIMARY KEY`, `CHECK`, `DEFAULT`, and foreign keys with all five actions, immediate or deferred, and `PRAGMA foreign_key_check` |
 | Values | type affinity on write, `CAST`, the `BINARY`, `NOCASE` and `RTRIM` collations, `LIKE`, `GLOB`, values larger than a page |
@@ -328,7 +328,6 @@ the limit.
 | Topic | inillucent | SQLite 3.53.4 |
 |---|---|---|
 | `SELECT * FROM pragma_foreign_keys` | fails with `no such table: pragma_foreign_keys`. Use `PRAGMA foreign_keys` | returns one row with the setting |
-| an index on a `VIRTUAL` generated column | refused with `an index on a column the tree does not carry`. A `STORED` generated column can be indexed | allowed. The index stores the computed value |
 | `inillucent vector-search` result columns | the primary key appears twice: once as the table's column, and once as the column the search adds | no vector search |
 | an `inillucent_search` insert with a vector of the wrong length | fails with status `syntax` and the message `SQL logic error`, which does not name the vector | no vector search |
 
