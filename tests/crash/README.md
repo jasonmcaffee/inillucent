@@ -1,66 +1,108 @@
 # Crash and failure schedules
 
-Each file here is what one failure campaign did, written by the campaign that
-ran it. The runs are seeded, so a file is reproducible: a diff on one is a
-change in what the engine does under failure, which is the thing a review
-should be shown rather than told.
+Each file here is the report of one failure campaign. A failure campaign runs a write, injects a
+failure (a power loss, an I/O error, a full disk or a short write) at every point the write touches
+the file system, and reopens the database after each one. The campaign writes its own report file.
 
-| file | campaign | what each line says |
+The runs are seeded, so each report is reproducible. A diff on a report file means the engine now
+behaves differently under failure. Show that diff in the review.
+
+## Terms used on this page
+
+| Term | Meaning |
+|---|---|
+| cut point | one call to the file system during a write. The campaign injects its failure at that call |
+| journal mode | how the engine protects a write that is in progress: DELETE, TRUNCATE and PERSIST keep a rollback journal, WAL keeps a write ahead log. See [the glossary](../../docs/glossary.md) |
+| checkpoint | copying committed pages from the write ahead log into the database file |
+| old, new | the database as it was before the transaction, and as it is after the transaction committed. After a failure, recovery must produce one of the two |
+| short write | a write call that stores fewer bytes than it was given |
+
+## How to run the campaigns
+
+The campaigns are ordinary test targets in `inillucent-compat`, in the `durability` tier of
+`tests/selection.toml`:
+
+```sh
+target/debug/inillucent-testrun --tier durability     # every campaign, through the parallel runner
+
+cargo test -p inillucent-compat --test durability     # the rollback journal campaigns and recovery-crash.txt
+cargo test -p inillucent-compat --test wal_crash      # the write ahead log campaigns
+cargo test -p inillucent-compat --test faults         # allocation.txt
+cargo test -p inillucent-compat --test crash_reports  # checks every report against its floor
+```
+
+## The reports
+
+### Rollback journal commits
+
+These campaigns cut the power, or inject another failure, inside a commit with `synchronous = FULL`.
+Each row gives the cut point, whether the transaction reported a commit (`committed` or `failed`),
+and whether recovery produced the `old` or the `new` database.
+
+| File | Failure | Journal mode |
 |---|---|---|
-| `delete-full-crash.txt` | power loss at every cut point of a DELETE-mode FULL commit | the call the power went at, whether the transaction had reported a commit, and whether recovery produced the old or the new database |
-| `truncate-full-crash.txt` | the same in TRUNCATE mode, whose commit point is the truncation | as above |
-| `persist-full-crash.txt` | the same in PERSIST mode, whose commit point is the header write | as above |
-| `delete-full-io-error.txt` | an I/O error at every cut point | as above |
-| `delete-full-disk-full.txt` | a full disk at every cut point | as above |
-| `delete-full-short-write.txt` | a short write at every cut point | as above, plus `detected` for a run the engine reported as damaged |
-| `delete-full-checkpoint-crash.txt` | power loss at every cut point of the **checkpoint** that follows a DELETE-mode commit | the call the power went at, and that recovery produced the committed database |
-| `truncate-full-checkpoint-crash.txt` | the same in TRUNCATE mode | as above |
-| `persist-full-checkpoint-crash.txt` | the same in PERSIST mode | as above |
-| `delete-full-checkpoint-io-error.txt` | an I/O error at every cut point of a checkpoint | as above |
-| `delete-full-checkpoint-disk-full.txt` | a full disk at every cut point of a checkpoint | as above |
-| `recovery-crash.txt` | a power loss *during* the recovery of a power loss | the first cut point, the second, and which database the second recovery produced |
-| `allocation.txt` | a memory failure at every allocation of a write | the allocation, and whether it was refused. Written by the old engine (`inillucent-session`); `an_injected_allocation_failure_never_reaches_the_write_path` in `faults.rs` now writes `points: 0, refused: 0` here, because the shipping engine's write path makes no allocation the failpoint counts - see `txn.oom-injection` in `compat/sqlite-3.53.4.toml` |
+| `delete-full-crash.txt` | power loss | DELETE |
+| `truncate-full-crash.txt` | power loss | TRUNCATE. The commit point is the truncation |
+| `persist-full-crash.txt` | power loss | PERSIST. The commit point is the header write |
+| `delete-full-io-error.txt` | an I/O error | DELETE |
+| `delete-full-disk-full.txt` | a full disk | DELETE |
+| `delete-full-short-write.txt` | a short write | DELETE. The header also counts runs the engine reported as damaged |
 
-The header line of a campaign report carries the totals: how many cut points
-were covered, how many runs had reported a commit before the power went, and
-how many ended in damage the engine detected rather than served.
+The header line of each report gives the totals: the cut points covered, the commits acknowledged
+before the failure, the runs that ended in damage the engine detected, and the runs lost to a half
+written call.
 
-**Two different things used to be called `reported` in the same file** - the
-header's count of runs that ended in detected damage, and a per-row column
-saying whether the transaction had reported a commit. A reader comparing
-`0 reported` in the header against six rows saying `true` had every reason to
-think one of them was wrong. The column is `committed` now and the header says
-`damaged and detected`.
+### Rollback journal checkpoints
 
-A campaign that reports fewer cut points than it used to has stopped testing
-something. That is the failure mode these files exist to make visible: the
-first version of this campaign reported 127 cut points while causing thirteen
-crashes, because a crash armed at a read did nothing and the failpoint counter
-was already past the low numbers before the run began.
+A rollback journal is written only while a checkpoint moves pages out of the log and into the data
+file. A commit that reaches the log and then stops never writes a journal record. So the commit
+campaigns above never test the journal. These campaigns cut inside the checkpoint that follows a
+commit.
 
-## The checkpoint campaigns, and why the commit campaigns were not enough
+The failure is injected after the transaction is acknowledged. So the committed database is the only
+correct result at every cut point.
 
-The commit campaigns above crash inside the commit. **A rollback journal is not
-on that path.** The journal holds page pre-images while a *checkpoint* moves
-pages out of the log and into the data file, and nowhere else - so a commit
-that reaches the log and stops never writes a journal record, and a campaign
-that only crashes inside the commit never tests one.
+| File | Failure | Journal mode |
+|---|---|---|
+| `delete-full-checkpoint-crash.txt` | power loss | DELETE |
+| `truncate-full-checkpoint-crash.txt` | power loss | TRUNCATE |
+| `persist-full-checkpoint-crash.txt` | power loss | PERSIST |
+| `delete-full-checkpoint-io-error.txt` | an I/O error | DELETE |
+| `delete-full-checkpoint-disk-full.txt` | a full disk | DELETE |
 
-TRUNCATE and PERSIST were covered by accident. `PRAGMA journal_mode = truncate`
-is a real change from the connection's default and runs two checkpoints on its
-way in, so those campaigns crashed inside a checkpoint without anybody
-intending it - and that is where all three of the journal defects task-1911
-fixed were found. `PRAGMA journal_mode = delete` matches the default, returns
-without doing anything, and left the **default** journal mode the only one of
-the three never tested inside a checkpoint.
+### Write ahead log
 
-The `*-checkpoint-*` files close that. Their assertion is also the stronger one:
-the failure is armed *after* the transaction is acknowledged, so the committed
-state is the only answer allowed at any cut point, where a crash inside a
-commit can only be asked for the old database or the new one.
+Written by `crates/inillucent-compat/tests/wal_crash.rs`. Each row gives the cut point, the database
+recovery produced (`old` or `new`), and whether the transaction reported a commit (`committed`). The
+first line counts the cuts, how many ended `old`, how many ended `new`, and how many ended damaged
+and detected.
 
-The same gap was in `crates/inillucent-compat/tests/search_crash.rs`, whose
-`TAIL` was two `SELECT count(*)` statements - both served out of the buffer
-pool, making no VFS call at all, so `a_rollback_journal_commit_is_atomic_across_both`
-was covering the log rather than the journal its name claims. It runs
-`PRAGMA wal_checkpoint` now.
+| File | What it cuts |
+|---|---|
+| `wal-commit.tsv` | a commit |
+| `wal-io-error.tsv` | a commit, with an I/O error |
+| `wal-short-write.tsv` | a commit, with a short write |
+| `wal-checkpoint.tsv` | a checkpoint |
+| `wal-recovery-idempotent.tsv` | a second power loss during recovery. Each row gives the first cut, the second cut and the result |
+
+### Other reports
+
+| File | What it records |
+|---|---|
+| `recovery-crash.txt` | a power loss during the recovery from a power loss. Each row gives the first cut point, the second, and the database the second recovery produced |
+| `multi-database-commit.tsv`, `multi-database-short-write.tsv` | a commit that spans two attached databases. These were written by the campaign for the earlier engine. `multi_database_crash.rs` cannot run that campaign on the current engine yet, and its opening comment says why |
+| `allocation.txt` | a memory failure at every allocation of a write. It reads `points: 0, refused: 0`, because the current write path makes no allocation that the failpoint counts. `an_injected_allocation_failure_never_reaches_the_write_path` in `faults.rs` writes it. See `txn.oom-injection` in `compat/sqlite-3.53.4.toml` |
+
+## A report that shrinks is a failure
+
+A campaign that reports fewer cut points than before has stopped testing something.
+`crates/inillucent-compat/tests/crash_reports.rs` holds a floor for each report except
+`allocation.txt`, and fails when a report falls below its floor. The floor lives in the test source
+because a campaign rewrites its own report file. Raising a floor is a deliberate edit.
+
+The first version of the DELETE campaign reported 127 cut points while causing only thirteen
+crashes. A crash armed at a read did nothing, and the failpoint counter had already passed the low
+numbers before the run began.
+
+`crash_reports.rs` also checks that no report contains a carriage return. `.gitattributes` gives
+`tests/crash/` LF line endings, so a checkout does not show every report as modified.

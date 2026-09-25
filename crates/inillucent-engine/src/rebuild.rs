@@ -679,7 +679,7 @@ fn reopened(
 /// `MemoryVfs`, `SimVfs` or an application's own encrypting VFS either
 /// failed to find its own database or silently finished the statement on
 /// the operating system's file system and stayed there (task-1946, H2).
-/// `docs/relational-architecture.md` §6 has the argument for the rename.
+/// `docs/relational-architecture.md` section 7 describes the rename.
 ///
 /// **Every temporary table and every attached database is carried across
 /// too**, by `AttachedSchemas` (see its doc) - `main` is

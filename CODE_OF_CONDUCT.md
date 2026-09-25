@@ -6,27 +6,26 @@ Be decent to people. Argue about code, not about the person who wrote it.
 
 ## What that means here
 
-**Technical disagreement is the point of this project and is always welcome.**
+**Technical disagreement is always welcome.**
 Nearly every design decision in this repository has an argument written beside it
-in a comment, precisely so somebody can read it and say it is wrong. Do that.
+in a comment, so somebody can read it and say it is wrong. Do that.
 Bring a measurement if you have one.
 
 **What is not welcome:**
 
-- Personal attacks, insults, or comments about somebody rather than their work.
+- Personal attacks, insults, or comments about a person instead of their work.
 - Harassment of any kind, in the repository or anywhere it follows a person from
   here.
 - Sexualised language or imagery, and unwelcome attention of that kind.
 - Publishing anybody's private information without their permission.
-- Sustained disruption: re-litigating a settled decision without new evidence,
+- Sustained disruption: arguing a settled decision again without new evidence,
   derailing threads, or demanding attention from maintainers as though it were
   owed.
 
 **And two that are specific to a project like this one:**
 
 - **Do not report a security problem in public.** [`SECURITY.md`](SECURITY.md)
-  says where. Posting a working exploit in an issue puts users at risk to make a
-  point.
+  says where. A working exploit posted in an issue puts users at risk.
 - **Do not paste somebody's data into an issue.** A database is somebody's data.
   A reproduction is a schema and a statement, not a file from production.
 
@@ -48,7 +47,6 @@ report does not handle it.
 
 ## Attribution
 
-This is a plain-language version of the commitments the
-[Contributor Covenant](https://www.contributor-covenant.org) makes, written out
-rather than linked so a reader knows what they agreed to without leaving the
-repository.
+This page states the commitments of the
+[Contributor Covenant](https://www.contributor-covenant.org) in plain language. The commitments
+are written out here so a reader can see what they agreed to without leaving the repository.

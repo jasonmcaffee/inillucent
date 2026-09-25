@@ -1,27 +1,48 @@
 # inillucent
 
-An embedded SQL database that speaks SQLite's dialect on its own storage, with
-full-text and vector search built in — the job of PostgreSQL + pgvector + an
-embedding server, in one process and one file.
+inillucent is an embedded SQL database. It speaks SQLite's dialect on its own storage, and it has
+keyword search and vector search built in. One `.rdb` file holds the tables and the search indexes,
+and one process reads and writes it.
+
+This npm package installs the four inillucent programs and a small JavaScript API that runs them.
+
+## Install
 
 ```sh
 npm install -g inillucent
-# or, without installing anything permanently:
+```
+
+Or run a program once without installing it:
+
+```sh
 npx inillucent help
 ```
 
-No native build step and no postinstall download: the binaries ship as
-per-platform packages that npm installs only where they run, so `npm ci` works
-offline and behind a proxy.
+The package needs Node 18 or later. There is no install script and nothing downloads at install
+time. The programs come in one extra package per platform, listed as optional dependencies. npm
+installs only the one that matches your machine, so `npm ci` works offline and behind a registry
+proxy.
 
-## Four programs
-
-| | |
+| Platform | Package npm installs |
 |---|---|
-| `inillucent` | the command line: `query`, `exec`, `describe`, `import`, `export`, `search`, and twenty more |
-| `inillucent-shell` | an interactive shell shaped like `sqlite3`, with all 63 of its dot commands |
-| `inillucent-mcp` | the same commands served to an AI agent over MCP |
-| `inillucent-migrate` | builds an inillucent database from a SQLite file |
+| Windows, x64 | `@blackrainbowlabs/cli-win32-x64` |
+| macOS, Apple silicon | `@blackrainbowlabs/cli-darwin-arm64` |
+| macOS, Intel | `@blackrainbowlabs/cli-darwin-x64` |
+| Linux, x64 | `@blackrainbowlabs/cli-linux-x64` |
+| Linux, arm64 | `@blackrainbowlabs/cli-linux-arm64` |
+
+Each platform package holds the four programs in `bin/`, the C library in `lib/`, and its header
+`inillucent_driver.h` in `include/`. If you installed with `--no-optional`, install the platform
+package by name, for example `npm install @blackrainbowlabs/cli-linux-x64`.
+
+## The four programs
+
+| Program | What it is |
+|---|---|
+| `inillucent` | the command line: 30 commands, such as `query`, `exec`, `describe`, `import`, `export` and `search` |
+| `inillucent-shell` | an interactive shell that works like `sqlite3`, with 63 of its 65 dot commands |
+| `inillucent-mcp` | an MCP server: 28 of the same commands served to an AI agent |
+| `inillucent-migrate` | builds a database from a legacy retrieval index. `inillucent migrate` copies a SQLite file or a PostgreSQL or MySQL database |
 
 ## From a shell
 
@@ -34,69 +55,130 @@ inillucent --db app.rdb describe notes
 inillucent help
 ```
 
-Exit codes carry meaning: `0` success, `1` failed, `2` a command line nobody
-could act on, and **`3` a construct the engine has not built yet** — so a script
-can branch on "not yet" without matching on a message.
+`--params` binds `?1`, `?2` and so on, in order. Add `--output json` to any command to get a JSON
+object a program can parse.
 
-## From Node
+| Exit code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | the command failed |
+| `2` | the command line could not be read, such as an unknown command |
+| `3` | the engine has not built that feature. Rewording the SQL does not help |
+
+## From JavaScript
 
 ```js
 import { query, inillucent } from 'inillucent';
 
-const rows = await query('SELECT id, body FROM notes WHERE id > ?1', {
-  db: 'app.rdb',
-  params: [3],
-});
-// [{ id: 4, body: 'hello' }]
+await inillucent('exec', { db: 'app.rdb', sql: 'INSERT INTO notes (body) VALUES (?1)', params: ['world'] });
+
+const rows = await query('SELECT id, body FROM notes WHERE id > ?1', { db: 'app.rdb', params: [1] });
+// [ { id: 2, body: 'world' } ]
 
 const described = await inillucent('describe', { db: 'app.rdb', table: 'notes' });
 console.log(described.ddl, described.indexes, described.row_count_in_table);
 ```
 
-Each call is a process, so this is the right tool for the dozen calls a build
-script or a tool wrapper makes and the wrong one for a loop over a million rows.
-For that, write a binding over the C ABI — the header ships in this package's
-platform dependency under `include/`, and
-[`drivers/README.md`](https://github.com/Black-Rainbow-Labs/Inillucent/blob/main/drivers/README.md)
-is written to be followed.
+Each call starts one `inillucent` process with `--output json` and parses the object it prints.
+`params` travels to the process on standard input, so a large value does not hit the operating
+system's limit on command line length.
 
-## For an agent
+Starting a process costs time on every call. This package suits a build script or a tool wrapper
+that makes a dozen calls. It does not suit a loop over a million rows. For that, write a binding over
+the C library in the platform package. The
+[driver guide](https://github.com/Black-Rainbow-Labs/Inillucent/blob/main/drivers/README.md)
+explains how.
+
+Because each call is its own process, this package has no connection object and no transaction that
+spans two calls. To run several statements as one transaction, use the `batch` command:
+`inillucent('batch', { db, sql: 'INSERT ...; UPDATE ...' })`.
+
+### Values
+
+| JavaScript value | Bound as |
+|---|---|
+| `null` or `undefined` | `NULL` |
+| a number | `INTEGER` or `REAL`. `-0` keeps its sign |
+| `NaN`, `Infinity` | refused with a `TypeError`, because SQL has no value for them |
+| a string | `TEXT` |
+| a `Uint8Array` | `BLOB` |
+
+`query()` returns a BLOB column as a `Uint8Array`, so bytes read by one query can be bound into the
+next.
+
+## Errors
+
+```js
+const result = await inillucent('query', { db: 'app.rdb', sql: 'SELECT * FROM absent' });
+// result.ok === false, result.status === 'not_found', result.message === 'no such table: absent'
+
+try {
+  await query('SELECT * FROM absent', { db: 'app.rdb' });
+} catch (error) {
+  console.log(error.status); // 'not_found'
+}
+```
+
+`inillucent()` returns a refusal as its result object with `ok: false`. `query()` throws an `Error`
+with three extra fields: `status`, `message` and `feature`. Both throw only when the program could
+not be run at all.
+
+`status` is one of thirteen names: `unsupported`, `syntax`, `not_found`, `constraint`, `readonly`,
+`busy`, `interrupted`, `corrupt`, `io`, `full`, `too_big`, `invalid_state` and `internal`.
+
+`unsupported` means the engine has not built that feature, and `feature` names it. The SQL is not
+wrong, and a different spelling fails the same way. Check `inillucent capabilities` before you
+write an unusual statement.
+
+## For an AI agent
+
+MCP, the Model Context Protocol, is how an AI agent calls tools. Add `inillucent-mcp` to an MCP
+client's configuration:
 
 ```json
 {
   "mcpServers": {
     "inillucent": {
       "command": "npx",
-      "args": ["-y", "inillucent-mcp", "--db", "app.rdb"]
+      "args": ["-y", "-p", "inillucent", "inillucent-mcp", "--db", "app.rdb"]
     }
   }
 }
 ```
 
-27 tools, generated from the same command table the CLI reads, so the two can
-never drift. `--readonly` refuses every statement that changes something, and
-`--root DIR` refuses every path outside a directory.
-
-## Licence
-
-MIT. Source: <https://github.com/Black-Rainbow-Labs/Inillucent>
+`inillucent-mcp` serves 28 of the command line's commands as MCP tools. The tools are generated from
+the same command table as the command line. `--readonly` refuses every statement that changes data.
+`--root DIR` refuses every path outside `DIR`.
 
 ## The API
 
-Every method this binding has. The worked example each one appears in is the link; nothing here is
-a summary of a method that does not exist, because
-`cargo test -p inillucent-compat --test documentation` reads this table and fails on a name the
-binding source does not declare.
+`cargo test -p inillucent-compat --test documentation` reads this table and fails if a name in the
+first column is not declared in `index.mjs` or `resolve.mjs`.
 
 | what | one line |
 |---|---|
-| `inillucent(command, options)` | run one command of the command line and return its parsed JSON. `options.db` names the file, `options.args` the rest. |
-| `query(sql, options)` | run one `SELECT` and return its rows. `options.params` binds `?1`, `?2`; `options.limit` caps the rows kept. |
-| `resolveBinary(program)` | the path to one of the four programs on this platform, from the platform package npm installed. |
-| `platformPackage()` | the name of the platform package this machine needs, which is what an install failure should name. |
-| `PROGRAMS` | the four programs and what each is for, as an object. |
+| `inillucent(command, options)` | runs one command and resolves to its parsed JSON result. `options.db` names the file. Every other key becomes a flag: `{ table: 'notes' }` is `--table notes`, `true` is a bare flag. |
+| `query(sql, options)` | runs one query and resolves to its rows as objects keyed by column name. `options` takes `db`, `params` and `limit`. Throws on a refusal. |
+| `resolveBinary(program)` | returns the path to one of the four programs on this machine. `INILLUCENT_BIN` overrides it. |
+| `platformPackage()` | returns the platform package this machine needs, or `null` when there is none. |
+| `PROGRAMS` | an object naming the four programs. |
 
-Every call goes through the command line rather than through the C ABI: the four programs are what
-the platform package ships, and `--output json` is the same object every other binding sees. That
-is why there is no `Connection` here and no transaction - a command is one process, and a
-transaction that spanned two of them would be a transaction nothing held open.
+A result object from `inillucent()` has these fields on success: `ok`, `command`, `columns`, `rows`,
+`row_count`, `total`, `more`, `changes`, `last_insert_rowid`, `elapsed_ms` and `text`. Some commands
+add their own, such as `ddl` and `indexes` from `describe`. `total` counts every row the statement
+produced, even when `limit` cut the rows returned.
+
+The `query` command returns at most 200 rows unless you pass `limit`. `limit: 0` returns every row.
+`more: true` in the result means rows were left out.
+
+`INILLUCENT_BIN` names an `inillucent` binary to use in place of the platform package. The other
+three programs are then looked for in the same folder.
+
+## More
+
+- [Getting started](https://github.com/Black-Rainbow-Labs/Inillucent/blob/main/docs/getting-started.md)
+- [SQL support](https://github.com/Black-Rainbow-Labs/Inillucent/blob/main/docs/sql.md)
+- [Vector and keyword search](https://github.com/Black-Rainbow-Labs/Inillucent/blob/main/docs/vector-search.md)
+- [Glossary](https://github.com/Black-Rainbow-Labs/Inillucent/blob/main/docs/glossary.md)
+
+MIT licence. Source: <https://github.com/Black-Rainbow-Labs/Inillucent>

@@ -40,7 +40,7 @@ export const PROGRAMS = {
   inillucent: 'the command line: query, exec, describe, import, export, search',
   'inillucent-shell': 'the interactive sqlite3-shaped shell',
   'inillucent-mcp': 'the MCP server, for an agent',
-  'inillucent-migrate': 'builds an inillucent database from a SQLite file',
+  'inillucent-migrate': 'builds an inillucent database from a legacy retrieval index',
 };
 
 /**

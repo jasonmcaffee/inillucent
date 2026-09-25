@@ -1,123 +1,124 @@
 ---
 name: inillucent-search
-description: Full-text and vector search inside inillucent - VECTOR(N) columns, HNSW indexes, FTS5 with bm25, the inillucent_search hybrid table, and the CLI verbs for each. Use when asked to add semantic or keyword search, build a RAG store, replace pgvector, or query embeddings from SQL.
+description: Full text and vector search inside inillucent. Covers VECTOR(N) columns, HNSW indexes, FTS5 with bm25, the inillucent_search table that combines keyword and vector search, embed() for making vectors in SQL, and the command line verbs for each. Use when asked to add semantic or keyword search, build a RAG store, replace pgvector, or query embeddings from SQL.
 ---
 
-# Search: full text and vectors, in the same file
+# Search: full text and vectors in the same file
 
-inillucent does the job of "PostgreSQL + pgvector + an embedding server", in process. There is no
-extension to load and no second service to run — a `.rdb` can hold ordinary tables *and* a hybrid
-index, and the two commit and roll back together as one change.
+inillucent does keyword search and vector search inside the same `.rdb` file as your tables. There
+is no extension to load and no second server to run. A search index and the table it indexes
+commit together and roll back together.
 
-Three surfaces, and picking the right one is most of the work:
+This page shows the three ways to search, how to choose between them, and how to make vectors with
+`embed()`.
 
-| you want | use |
+## Terms used on this page
+
+| Term | Meaning |
 |---|---|
-| nearest-neighbour search over embeddings you already have | a **`VECTOR(N)` column** + `CREATE INDEX … USING inillucent_hnsw` |
-| keyword search over text | an **FTS5** table, with `bm25()` |
-| both at once over one corpus, fused and scored | an **`inillucent_search`** virtual table |
+| vector, embedding | a list of numbers that stands for the meaning of a piece of text. Texts with similar meaning have vectors that are close together |
+| nearest neighbor search | finding the stored vectors closest to a query vector |
+| cosine distance | a measure of how far apart two vectors point. 0 means the same direction |
+| HNSW | the graph index inillucent uses to find near vectors without comparing every row |
+| FTS5 | SQLite's full text search table, which inillucent implements |
+| BM25 | the formula that scores a keyword match. `bm25()` returns it |
+| facet | a column of an `inillucent_search` table that a search can filter on |
 
-## A corpus to try it on, with nothing to build
+The [glossary](../../docs/glossary.md) explains other terms.
 
-`examples/rag-agent/` is a database of Greek philosophy that is already embedded and committed: 80
-Wikipedia articles, 2,661 passages, a 768 dimension vector on each. Install the model and search it:
+## Which one to use
 
-```sh
-inillucent setup-embeddings all
-inillucent --db examples/rag-agent/greek-philosophy.rdb query \
-  "SELECT title, body FROM passage
-   ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5" \
-  --params '["who was Seneca"]'
+```mermaid
+flowchart TB
+    A["What do you search by?"] --> B["Meaning only, over rows in a table you already have"]
+    A --> C["Keywords only"]
+    A --> D["Both, over one collection of documents"]
+    B --> E["VECTOR(N) column and an inillucent_hnsw index"]
+    C --> F["FTS5 table, ranked with bm25()"]
+    D --> G["inillucent_search table"]
 ```
 
-**`embed` runs once for the statement, not once per row**, because it is registered deterministic and
-its argument does not vary within one execution. Before this was fixed, nothing read that flag and the same
-query took 105 seconds on that corpus instead of one and a half. A function you register yourself
-gets the same treatment only if you set `FunctionFlags::deterministic` — the default for anything
-registered from outside is `false`, which is the safe assumption about code this engine did not write.
+| You want | Use | Why |
+|---|---|---|
+| nearest neighbor search over vectors in a table you already have | a `VECTOR(N)` column and `CREATE INDEX ... USING inillucent_hnsw` | keeps your schema and your joins |
+| keyword search over text | an FTS5 table and `bm25()` | behaves as SQLite's FTS5 does |
+| keyword and vector search over one corpus, combined into one ranking | an `inillucent_search` table | one table, one commit, one score |
 
-Its `AGENTS.md` is the page to copy when you build one of these for somebody else.
-
-## Where the vectors come from
-
-You can supply them, and most callers do. inillucent can also produce them, in this process, with no
-embedding server and no socket:
-
-```sh
-inillucent setup-embeddings all     # ONNX Runtime + nomic-embed-text-v1.5, about 620 MB, once
-```
+## Vectors in ordinary SQL
 
 ```sql
-INSERT INTO note (body, v) SELECT ?1, embed(?1);
-SELECT id FROM note ORDER BY vector_distance_cos(v, embed('flight details')) LIMIT 10;
-```
-
-`embed(TEXT)` returns the 3,072 bytes a `VECTOR(768)` column holds. Three things to know before
-reaching for it:
-
-- **The published 0.1.2 archives carry it**, because `packaging/release-all.ps1` passes
-  `--features inillucent-cli/embed`. The 0.1.1 archives do not, and a build from a checkout needs
-  that flag as well, because the feature is off by default. A build without it says
-  `no such function: embed`, with the status `not_found`. A build with it and no model installed
-  refuses by name, with the status `invalid_state` and the command that installs one, rather than
-  returning a NULL or a vector of zeroes:
-
-  ```
-  Error [invalid_state]: embed: no embedding model is installed. Run `inillucent setup-embeddings`
-  to download nomic-embed-text-v1.5 and the ONNX Runtime it needs, or set INILLUCENT_ONNX_DIR to a
-  directory that already holds them
-  ```
-
-  A vector whose provenance is unknown is worse than no vector: it goes into an index, and every
-  neighbour it is ever compared against is wrong.
-
-  The 0.1.2 archives printed `Error [syntax]: bad parameter or other API misuse` for that case, which
-  named neither the function nor the fix. This is now fixed.
-- **Nothing has to be exported after the install.** The engine finds the runtime and the weights
-  where the command put them. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` still override.
-- **A registered function reaches the write path.** `INSERT ... VALUES`, `UPDATE ... SET` and
-  `RETURNING` all take one, so `INSERT INTO note (body, v) VALUES (?1, embed(?1))` writes the vector
-  the function returns. Until this was fixed, those three were refused with the `unsupported` status and
-  `INSERT ... SELECT` was the only shape that worked.
-- **Loading the model costs 650 to 800 ms and an embedding costs 12 to 36 ms**, so when it is in
-  memory matters. `--residency resident` keeps it, `on-demand` drops it after every call, and the
-  default `idle:5m` keeps it through a burst of questions and lets it go afterwards. A process that
-  answers one question and exits wants `on-demand`; an ingestion run wants `resident`.
-  → [Embeddings](../../docs/embeddings.md)
-
-## Vectors, from ordinary SQL
-
-```sql
-CREATE TABLE embedding (id INTEGER PRIMARY KEY, source TEXT, v VECTOR(768));
-INSERT INTO embedding (id, source, v) VALUES (1, 'note-1', x'3f80000000000000…');
-CREATE INDEX ix ON embedding USING inillucent_hnsw (v);
+CREATE TABLE embedding (id INTEGER PRIMARY KEY, source TEXT, v VECTOR(3));
+INSERT INTO embedding (id, source, v) VALUES (1, 'note-1', x'0000803f0000000000000000');
+CREATE INDEX embedding_v ON embedding USING inillucent_hnsw (v);
 SELECT id, source FROM embedding ORDER BY vector_distance_cos(v, ?1) LIMIT 10;
 ```
 
-- **A `VECTOR(N)` literal is a blob of N little-endian `f32`s** — `x'…'`, four bytes per element. A
-  vector of the wrong width is refused rather than resized.
-- `vector_distance_cos`, `vector_distance_l2` and `vector_dot`, plus pgvector's operator spellings
-  `<->`, `<#>`, `<=>`, `<+>`, `<~>`, `<%>`.
-- **`ORDER BY vector_distance_cos(v, ?) LIMIT k` is planned onto the index** and rescored exactly.
-  Graded at recall 1.000 against an exhaustive cosine, and measured at 0.98x the cost of querying the
-  store directly — the SQL path is free.
-- **`CREATE INDEX … USING inillucent_hnsw` backfills**: an index made over a table that already holds
-  rows is not an empty index, and rows inserted, updated and deleted afterwards are applied to it
-  before the commit.
-- With no index the same query is an exhaustive scan and **is still correct**. Build the index when
-  it is slow, not before.
-- Ordering on the index is cosine unless the index says `WITH (metric = 'l2')`, and a query whose
-  distance function does not match the index's metric plans as a scan rather than a probe;
-  `USING ivfflat` is a second structure beside the graph.
+Real embeddings are wider. `nomic-embed-text-v1.5` makes vectors of 768 numbers, so its column is
+`VECTOR(768)`.
 
-From the command line, which writes the query for you:
+**Writing a vector.** A `VECTOR(N)` column holds N 32 bit floats. You can write one in three ways:
 
-```sh
-inillucent --db app.rdb vector-search embedding --column v \
-  --vector '[0.01, -0.42, …]' --k 10 --measure cos
+| Form | Example for `VECTOR(3)` |
+|---|---|
+| a blob of little endian `f32` values, four bytes each | `x'0000803f0000000000000000'` |
+| a JSON array of numbers, as text | `'[0.1, 0.2, 0.3]'` |
+| a bound parameter | `--params '[[0.1, 0.2, 0.3]]'` on the command line |
+
+A vector of the wrong width is refused with the status `constraint`:
+
+```
+Error [constraint]: cannot store this value in embedding.v: it is not a vector of the declared width, and the column is declared VECTOR(3)
 ```
 
-## Full text
+**Distance functions.**
+
+| Function | Measures |
+|---|---|
+| `vector_distance_cos(a, b)` | cosine distance |
+| `vector_distance_l2(a, b)` | Euclidean distance |
+| `vector_dot(a, b)` | inner product |
+
+pgvector's operators also work: `<->` (Euclidean), `<=>` (cosine), `<#>` (negative inner product),
+`<+>` (taxicab), `<~>` (Hamming) and `<%>` (Jaccard). A query written for pgvector often runs
+unchanged.
+
+**The index.** `CREATE INDEX ... USING inillucent_hnsw (v)` builds the index over the rows already
+in the table. Every later insert, update and delete is applied to the index before the commit.
+
+The planner uses the index for `ORDER BY vector_distance_cos(v, ?) LIMIT k`. `EXPLAIN QUERY PLAN`
+shows it:
+
+```
+SEARCH embedding USING VECTOR INDEX embedding_v (k=10)
+```
+
+- The default search mode is `approximate`. The search walks the HNSW graph, which is fast and can
+  miss a true neighbor.
+- `mode = 'exact'` compares the query with every row, so the answer is the true top k.
+- With no index, the same query compares every row and still returns the correct answer. Build the
+  index when that query becomes slow.
+
+**The metric.** An index uses cosine distance unless it says otherwise:
+
+```sql
+CREATE INDEX embedding_l2 ON embedding USING inillucent_hnsw (v) WITH (metric = 'l2');
+```
+
+The planner uses an index only when the function in `ORDER BY` matches the index's metric. A
+`vector_distance_cos` query over an L2 index compares every row instead. `vector_dot` has no index.
+When a query is slower than you expect, check the metric first.
+
+`CREATE INDEX ... USING ivfflat (v)` builds pgvector's other index type beside the graph.
+
+**From the command line.** `inillucent vector-search` writes the query for you:
+
+```sh
+inillucent --db app.rdb vector-search embedding --column v --vector '[0.01, -0.42, 0.33]' --k 10 --measure cos
+```
+
+`--measure` takes `cos` (the default), `l2` or `dot`. The result has a `distance` column.
+
+## Keyword search with FTS5
 
 ```sql
 CREATE VIRTUAL TABLE doc USING fts5(title, body);
@@ -129,75 +130,145 @@ SELECT title, bm25(doc) AS score FROM doc WHERE doc MATCH 'body OR text' ORDER B
 inillucent --db app.rdb search 'body OR text' --table doc --k 10
 ```
 
-The verb writes the `MATCH … ORDER BY rank` idiom, which is the part nobody remembers. Query syntax
-is FTS5's: bare words are ANDed, `"a phrase"` is quoted, `OR` and `NOT` are available. The `porter`
-tokenizer stems whatever tokenizer it wraps.
+`inillucent search` writes the `MATCH ... ORDER BY rank` query for you. `--k` defaults to 10.
 
-## Both at once — the hybrid table
+The query uses FTS5 syntax: bare words must all match, `"a phrase"` matches the words in order, and
+`OR` and `NOT` work. The `porter` tokenizer reduces words to their stem, so `run` matches `running`.
+Write `tokenize = 'porter unicode61'` in the `CREATE VIRTUAL TABLE` to use it.
+
+## Keyword and vector search together: `inillucent_search`
 
 ```sql
 CREATE VIRTUAL TABLE store USING inillucent_search(title, body, dims = 768);
-INSERT INTO store (rowid, title, body, vector) VALUES (1, 'a title', 'body text', x'…');
+INSERT INTO store (rowid, title, body, vector) VALUES (1, 'a title', 'body text', ?1);
 
--- lexical
+-- keywords only
 SELECT title FROM store WHERE store MATCH 'body' ORDER BY rank;
--- vector
-SELECT title FROM store WHERE vector = x'…' AND k = 10;
--- both, fused
-SELECT title FROM store WHERE store MATCH 'body' AND vector = x'…' AND k = 10 ORDER BY rank;
+-- vector only
+SELECT title FROM store WHERE vector = ?1 AND k = 10;
+-- both, combined into one ranking
+SELECT title FROM store WHERE store MATCH 'body' AND vector = ?1 AND k = 10 ORDER BY rank;
 ```
 
-`dims = N` makes it a vector table as well as a lexical one; without it, a vector is **refused
-rather than ignored**. This is the same HNSW the retrieval engine uses — there is one implementation
-of an approximate index in this repository, not two — with BM25 carrying coverage and proximity
-weighting, three fusion methods, and a calibrated confidence beside every score.
+| Declaration or column | What it does |
+|---|---|
+| `dims = N` | makes the table hold vectors of N numbers. Without `dims`, an insert with a vector is refused with the status `constraint` |
+| `mode = 'exact'` or `mode = 'approximate'` | how the vector half searches. The default is `approximate` |
+| `store MATCH '...'` | the keyword query, in FTS5 syntax |
+| `vector = ?` | the query vector |
+| `k = 10` | how many results to retrieve |
+| `ORDER BY rank` | best result first |
 
-`inillucent-search` is also what `CREATE INDEX … USING inillucent_hnsw` builds underneath, which is
-why the two agree.
+When a query has both a keyword part and a vector part, inillucent runs both searches and combines
+the two ranked lists into one. [Vector search](../../docs/vector-search.md) explains how the lists
+are combined and the `confidence` value each hit has.
 
-## Filtering a hybrid table — facet columns
+`inillucent search` also works on an `inillucent_search` table.
 
-A column declared `FACET` is stored and can be constrained inside the search. Its value is not
-indexed as text, so it changes no ranking of the prose beside it.
+### Filtering inside the search with facets
+
+A column declared `FACET` is stored and can be filtered on inside the search. Its text is not
+indexed for keywords, so it does not change any score.
 
 ```sql
 CREATE VIRTUAL TABLE store USING inillucent_search(title, body, live FACET, region FACET, dims = 768);
-INSERT INTO store (rowid, title, body, live, region, vector) VALUES (1, 'a title', 'body text', '1', 'eu', x'…');
+INSERT INTO store (rowid, title, body, live, region, vector) VALUES (1, 'a title', 'body text', '1', 'eu', ?1);
 
 SELECT title FROM store
  WHERE store MATCH 'body' AND k = 10 AND live = '1' AND region = 'eu'
  ORDER BY rank;
 ```
 
-**Do not filter outside the search instead.** Joining to another table and putting the predicate
-there is a different answer, not a slower spelling of the same one: the keyword ranking rescores the
-best `k * 6` hits by where the query's terms sit inside them, so which hits get rescored depends on
-which rows the scan admitted. Measured on a 400 row corpus, the two shared one hit of the top ten.
-It also returns fewer rows than the `LIMIT` asked for. Facets are how a predicate reaches the scan.
+**Put the filter on a facet. Do not filter the results afterwards.** A join to another table that
+removes rows after the search gives a different answer. The keyword ranking rescores the best
+`k * 6` hits, and which hits are in that group depends on which rows the search admitted. On a 400
+row corpus measured for [Vector search](../../docs/vector-search.md), the two methods shared one hit
+of the top ten. Filtering afterwards also returns fewer rows than `k`.
 
-A facet is otherwise an ordinary column: it comes back from a `SELECT`, and on a query that is not a
-search the engine evaluates the predicate itself. A table declaring one is stored in format 2 and an
-older build refuses to open it by name.
+A facet is also an ordinary column. It comes back from a `SELECT`, and `WHERE live = '0'` works on a
+query that is not a search. A table that declares a facet is stored in format 2, and a build older
+than the one that added facets refuses to open it, with a message that says so.
 
-## Choosing between them
+## Making vectors with `embed()`
 
-- **Only embeddings, and the rows live in a table you already have** → `VECTOR(N)` plus an HNSW
-  index. It keeps your schema and your joins.
-- **Only keywords** → FTS5. It is SQLite's, it behaves as SQLite's does, and `bm25()` is there.
-- **A retrieval corpus you will query both ways** → `inillucent_search`. One table, one commit, one
-  score, and the fusion is done for you.
-
-## What to expect of it
-
-Measured against PostgreSQL 17 with pgvector on the same corpus and the same recall target
-(`README.md` and `inillucent-scorecard.md` carry the full table): semantic p50 **1.44 ms** against
-36.71 ms, filtered to a minority source **1.65 ms** against 45.06 ms, **no processes to run** against
-a server plus an embedding service.
-
-Before you design around a construct, ask:
+inillucent can make the vectors itself, inside your process, with no embedding server:
 
 ```sh
-inillucent capabilities            # every row checked against the running engine, both directions
+inillucent setup-embeddings all        # ONNX Runtime and nomic-embed-text-v1.5, about 620 MB, once
 ```
 
-And read `docs/feature-comparison.md` — it is the measured side-by-side, not a feature list.
+```sql
+INSERT INTO note (body, v) VALUES (?1, embed('search_document: ' || ?1));
+SELECT id FROM note ORDER BY vector_distance_cos(v, embed('search_query: flight details')) LIMIT 10;
+```
+
+`embed(TEXT)` returns the 3,072 bytes a `VECTOR(768)` column holds.
+
+| Situation | What `embed()` does |
+|---|---|
+| the release archives from inillucent.com, the model installed | returns the vector |
+| the release archives, no model installed | fails with the status `invalid_state` and a message that names `inillucent setup-embeddings` |
+| a build from source without `--features inillucent-cli/embed` | fails with the status `unsupported` (exit code 3): `embed(TEXT): this build has no embedding support compiled in` |
+
+- **Nothing has to be exported after the install.** The engine finds the runtime and the model
+  where `inillucent setup-embeddings` put them. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` override
+  those locations.
+- **`embed()` runs once for a statement when its argument does not change between rows.** `embed`
+  is registered as deterministic, so the planner can compute it once.
+- **`embed()` cannot be used in a `CHECK` constraint or an index expression.** Loading the model
+  there would happen once per row.
+- **Add the prefix the model expects.** `nomic-embed-text-v1.5` expects `search_query: ` before a
+  question and `search_document: ` before a stored passage.
+
+Loading the model takes 650 to 800 ms. After it is loaded, one embedding takes 12 to 36 ms, and the
+model holds about 1.9 GB of memory. `inillucent setup-embeddings --residency` records when the model
+stays in memory:
+
+| Residency | When to use it |
+|---|---|
+| `resident` | a bulk import, or a server that searches all the time |
+| `on-demand` | a process that answers one question and exits |
+| `idle:<time>`, default `idle:300s` | a person asking a few questions in a row |
+
+[Embeddings](../../docs/embeddings.md) has the details.
+
+### A corpus to try
+
+`examples/rag-agent/greek-philosophy.rdb` is already embedded: 80 Wikipedia articles on Greek and
+Roman philosophy, split into 2,661 passages, each with a 768 number vector. Install the model and
+search it:
+
+```sh
+inillucent setup-embeddings all
+inillucent --db examples/rag-agent/greek-philosophy.rdb query \
+  "SELECT title, body FROM passage
+   ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5" \
+  --params '["who was Seneca"]'
+```
+
+`examples/rag-agent/AGENTS.md` is a good page to copy when you build a search database for someone
+else.
+
+## How fast it is
+
+[Retrieval quality](../../docs/retrieval-quality.md) compares inillucent with PostgreSQL and
+pgvector on 185,078 passages at 768 dimensions, graded on 20 September 2026. Median vector search
+time:
+
+| Query | inillucent | pgvector, configured to return full results | pgvector, defaults |
+|---|---|---|---|
+| no filter | 0.8462 ms | 2.315 ms | 1.492 ms |
+| filtered to one source | 0.5820 ms | 36.486 ms | 1.114 ms |
+
+inillucent runs inside the calling process, so it pays no network cost. pgvector pays a round trip
+to its server.
+
+## Before you design around a feature
+
+```sh
+inillucent capabilities
+```
+
+`inillucent capabilities` lists what the engine can do, and a test checks each row against the
+running engine. [Feature comparison](../../docs/feature-comparison.md) has the measured comparison
+with SQLite.

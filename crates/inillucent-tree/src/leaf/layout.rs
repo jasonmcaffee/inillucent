@@ -360,8 +360,8 @@ fn implied_class(physical: PhysicalType) -> ExtentClass {
 /// sixteen bytes are then what every build has always written, so a file this
 /// build produces is read by an earlier one everywhere an earlier one could
 /// have produced it - and the references it could not read are the ones for
-/// values it refused to store. `docs/relational-architecture.md` section 5a
-/// carries the whole argument.
+/// values it refused to store. `docs/relational-architecture.md` section 6
+/// describes what each format version promises.
 ///
 /// Written beside [`extent_datum`], which is the reader that consumes it: the
 /// two are one rule seen from each end, and a writer that stated a class the

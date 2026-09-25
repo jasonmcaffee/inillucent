@@ -1,97 +1,119 @@
 # Contributing
 
-**[`AGENTS.md`](AGENTS.md) §2 is the contributor guide.** It is written for an AI
-agent and it is exactly as true for a person: the five contracts a test enforces,
-what a dependency is allowed to be, where a test goes, and the house style. Read
-it before writing code and you will not have to undo anything.
+**[`AGENTS.md`](AGENTS.md) section 2 is the contributor guide.** It is written for an AI agent, and
+every rule in it applies to a person too. It covers the five rules a test checks, which dependencies
+are allowed, where a test goes, and the house style. Read `AGENTS.md` before you write code.
 
-This file adds the two things it does not say.
+This file adds three things `AGENTS.md` does not cover: the prerequisites the test suite needs, the
+files a pull request must update, and the pages a change must update.
 
-## Running the suite without the oracle
+## Install the prerequisites before you run the tests
 
-Most of what this repository asserts is a comparison against a pinned SQLite
-3.53.4, built from the published amalgamation and verified against the SHA3-256
-sum SQLite publishes. It is not checked in and it is not a dependency; it is a
-child process the differential suites talk to.
+Most tests in this repository compare inillucent's answer with the answer from a pinned build of
+SQLite 3.53.4. This build is called the oracle. The oracle is built from SQLite's published
+amalgamation and checked against the SHA3-256 sum SQLite publishes. The oracle is not checked in and
+is not a Rust dependency. The differential suites run it as a child process.
 
 ```sh
 pwsh tools/sqlite-reference.ps1     # Windows
-sh   tools/sqlite-reference.sh      # everything else
+sh   tools/sqlite-reference.sh      # Linux and macOS
 ```
 
-Seventy-odd differential suites need it. **Without it they skip, and a skip here
-is not a pass** — `target/debug/inillucent-testrun --strict` counts every suite
-that ran with a prerequisite missing and fails, naming each one. A green run with
-nothing installed would otherwise look exactly like a green run.
+**Without the oracle, the differential suites skip and report success.** A skipped suite is not a
+passed suite. `target/debug/inillucent-testrun --strict` counts every suite that ran with a missing
+prerequisite, names each one, and fails.
 
-The other prerequisites, and what skips without each:
-
-| absent | what stops running |
+| Missing prerequisite | What does not run |
 |---|---|
-| the pinned oracle | every differential suite, about seventy |
-| a built `inillucent` binary | the command-line and confinement suites |
+| the pinned oracle | every differential suite |
+| a built `inillucent` binary | the command line suites and the confinement suite |
 | a PostgreSQL server | `inillucent-remote::live_postgres` |
 | a MySQL server | `inillucent-remote::live_mysql` |
-| an ONNX model | the embedding suites in `inillucent-core` |
+| an ONNX model | the embedding tests in `inillucent-core` |
 
-The last two are expected to be absent on an ordinary machine; the rest are one
-command each. `tools/validate.ps1` and `tools/validate.sh` build everything that
-can be built before they grade anything, which is why they are the gate rather
-than `cargo test`.
+An ordinary machine usually has no PostgreSQL server, no MySQL server and no ONNX model. The oracle
+and the `inillucent` binary each take one command to build.
 
-**Do not run `cargo test --workspace` while you iterate.** There is a parallel,
-selective runner and it is much faster:
+**Do not run `cargo test --workspace` while you edit.** Use the parallel runner. The runner runs only
+the tests your change can affect:
 
 ```sh
 cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
 
-target/debug/inillucent-testrun --tier smoke     # about a second, mid-edit
-target/debug/inillucent-testrun --changed        # what your edits can break
+target/debug/inillucent-testrun --tier smoke     # the smallest tier, while editing
+target/debug/inillucent-testrun --changed        # what your uncommitted edits can break
 target/debug/inillucent-testrun                  # everything
-target/debug/inillucent-testrun --strict         # and fail on a missing prerequisite
+target/debug/inillucent-testrun --strict         # fail when a prerequisite is missing
 ```
 
-## A pull request carries its contract files
-
-Five things in this repository are enforced by a test rather than by a reviewer,
-and each of them fails a build on somebody else's machine if it is not updated in
-**the same change**:
-
-| you changed | update, in the same commit |
-|---|---|
-| a crate's dependencies | `docs/dependency-policy.md` and `docs/invariants/layering.toml` |
-| a `tests/*.rs` file, or added one | its row in `tests/selection.toml` |
-| the command line or MCP | `crates/inillucent-cli/src/command/registry.rs`, which both are generated from |
-| a module or function past its recorded size | extract something; the ratchets in `crates/inillucent-compat/tests/policy.rs` only ever come down |
-| anything a document states a number about | the document, which `tools/doc-facts/check.mjs` checks against the running engine |
-
-Before opening a pull request:
+## Run the gate before a pull request
 
 ```sh
 pwsh tools/validate.ps1        # Windows
-sh   tools/validate.sh         # everything else
+sh   tools/validate.sh         # Linux and macOS
 ```
 
-That is the whole gate, and it runs nowhere else. It builds the oracle and the
-fixtures, runs `fmt`, `clippy -D warnings`, `cargo deny check`, `cargo doc` with
-warnings denied, the four contracts, the security suites, and the whole selected
-suite with `--strict`.
+`tools/validate.ps1` and `tools/validate.sh` are the full gate. Nothing else runs them. The gate
+builds the oracle and the fixtures first, then runs:
 
-## What a change looks like when it is finished
+- `cargo fmt --check`;
+- `cargo clippy` with `-D warnings`;
+- `cargo deny check`;
+- `cargo doc` with warnings denied;
+- the contract suites: `policy`, `selection`, `command_parity`, `harness` and `gates_fail_closed`;
+- the security suites: `confinement`, the C ABI suites `abi` and `conformance`, and the migration
+  `transport` suite;
+- every selected test with `inillucent-testrun --strict`.
 
-1. The code, with its doc comments and the argument for why the obvious thing is
-   wrong.
-2. Its tests, where `tests/inillucent-testing-tdd.md` §2.1 says they go,
-   registered in `tests/selection.toml`.
-3. `target/debug/inillucent-testrun --changed`, green.
-4. `cargo fmt`.
-5. Whatever contract file the change touched, from the table above.
+## Update the rule files in the same change
 
-And one rule from the testing standard that is worth repeating here, because it
-is the one most often broken: **a test asserts a value, not the absence of a
-crash**, and **a test that cannot fail is worse than no test**. If you are not
-sure yours can fail, revert the fix and watch it go red.
+A test checks each of these files. If a change leaves one out, the build fails on the next person's
+machine.
+
+| You changed | Update, in the same commit |
+|---|---|
+| a crate's dependencies | `docs/dependency-policy.md` and `docs/invariants/layering.toml` |
+| a `tests/*.rs` file, or added one | its row in `tests/selection.toml` |
+| the command line or MCP | `crates/inillucent-cli/src/command/registry.rs`. Both are generated from it |
+| a module past its recorded size | split the module. `no_module_grows_past_the_size_it_is_recorded_at` in `crates/inillucent-compat/tests/policy.rs` only lets a recorded size go down |
+| a number that a page states | the page. `tools/doc-facts/check.mjs` compares page counts with the built programs |
+
+## Update the documentation in the same change
+
+A change that alters what a user sees updates every page that describes that behavior, in the same
+change. These are the pages:
+
+- the pages under `docs/`;
+- the skills under `agent-skills/`, then run `node tools/sync-skills.mjs` to copy them into
+  `.claude/skills` and `.agents/skills`;
+- the package readmes under `packages/`;
+- `drivers/README.md`;
+- the chapter in `src/data/documentation.ts` in the `inillucent-site` repository, which is published
+  at https://inillucent.com/docs.
+
+Write each page by the rules in [the writing style guide](docs/writing-style.md). Two checks read
+those rules:
+
+```sh
+node tools/doc-style/check.mjs                              # every page in scope
+cargo test -p inillucent-compat --test documentation        # the same rules, plus links and commands
+```
+
+## What a finished change includes
+
+1. The code, with doc comments that explain why.
+2. Its tests, placed where section 2.1 of `tests/inillucent-testing-tdd.md` says, each registered in
+   `tests/selection.toml`.
+3. `target/debug/inillucent-testrun --changed` exits 0.
+4. `cargo fmt` has run.
+5. Every rule file from the table above that the change touched.
+6. Every page from the list above that describes the changed behavior.
+
+The testing standard has two rules that are broken most often. **A test asserts a value.** A check
+that only proves nothing crashed is not enough. **A test must be able to fail.** A test that cannot
+fail is worse than no test. To check that yours can fail, revert the fix and run the test.
 
 ## Reporting a security problem
 
-Not here. [`SECURITY.md`](SECURITY.md) says where.
+Do not report a security problem in a public issue. [`SECURITY.md`](SECURITY.md) says where to send
+it.

@@ -1,390 +1,502 @@
 # How the retrieval engine works
 
-This explains the retrieval engine from the beginning, assuming no background in databases or in
-machine learning. Read it top to bottom; each section only uses ideas the earlier ones introduced.
+inillucent has two engines in one file. This page is about the **retrieval engine**: vector search
+with an HNSW index, keyword search with BM25, and the `inillucent_search` table that combines them.
+It also covers how a search computes a confidence for each row, and how a query uses that
+confidence to return nothing when nothing is good enough.
 
-inillucent has two engines. This page is the **retrieval** one: semantic search, keyword search,
-filters, and the ranking that combines them. The **relational** engine — SQLite's SQL on B+trees, a
-page pool, a redo log, snapshot isolation and a vectorised executor — is a separate subject, and
-[Relational architecture](relational-architecture.md) is its page, with
-[SQL support](sql.md) and [Performance](performance.md) beside it.
-[Vector search](vector-search.md) is where the two meet: a `VECTOR(N)` column and an HNSW index
-reachable from ordinary SQL.
+You need to know SQL. You do not need to know anything about vector search. The other engine, the
+SQL engine, is described in [Relational architecture](relational-architecture.md), and
+[Architecture overview](architecture-overview.md) shows how the two fit together. For the SQL you
+write day to day, read [Vector search](vector-search.md).
 
-## 1. The problem it solves
+## Terms used on this page
 
-An organisation writes things down in six places: wiki pages, chat messages, issue threads, source files, design files and boards. Someone asks "how does the release process work?" and the answer is in there somewhere, in a page nobody remembers the title of.
-
-Ordinary search matches words. If the page says "shipping a new version" and you searched for "release process", word matching finds nothing, because the two share no words. inillucent is built to find that page anyway, and to also find pages that do share the exact words, because both kinds of matching are useful and they fail in different situations.
-
-## 2. Words to know
-
-Every term in this table appears later in the document. Nothing else is assumed.
-
-The storage and SQL words - page, B-tree, WAL, pragma, rowid, collation - are in
-[the glossary](glossary.md), which carries this table's terms too and is the one place to look up
-a word from either half of the engine.
+The storage and SQL words, such as page, B-tree and write ahead log, are in
+[the glossary](glossary.md).
 
 | Term | What it means |
 |---|---|
-| **Corpus** | The whole body of text being searched. Here: 186,781 pieces of text drawn from 39,366 documents, assembled from public sources by this repository so every measurement can be reproduced. |
-| **Document** | One page, message, issue or file, as the source system sees it. |
-| **Chunk** | A document cut into a searchable piece, roughly a paragraph or a section. Long pages become many chunks so a search can point at the relevant part rather than the whole page. Chunks are what searches actually return. |
-| **Embedding** (also **vector**) | A list of 768 numbers that stands for the meaning of a chunk. Produced by a trained model. The useful property: two chunks about similar topics get similar lists of numbers, even when they share no words. |
-| **Dimension** | One position in that list of 768 numbers. "768 dimensional" just means the list is 768 long. |
-| **Embedding model** | The trained program that turns text into an embedding. inillucent uses `nomic-embed-text-v1.5`. inillucent does not train it, and does not modify it. |
-| **Cosine similarity** | A way of measuring how alike two embeddings are, giving 1.0 for identical direction and 0.0 for unrelated. It compares direction only and ignores overall size, which is what you want when comparing meanings. |
-| **Cosine distance** | `1 minus cosine similarity`. Small means alike. Used because searching means finding the *smallest* distance. |
-| **Semantic search** | Finding chunks whose embedding is near the query's embedding. This is the kind that matches meaning rather than words. |
-| **Lexical search** | Finding chunks that contain the query's actual words. This is the kind that matches words rather than meaning. |
-| **Nearest neighbour search** | Given a query embedding, find the chunks whose embeddings are closest to it. This is the core operation of semantic search. |
-| **Exhaustive search** | Compare the query against every single chunk. Always gives the exactly correct answer. Slow when there are many chunks. |
-| **Approximate nearest neighbour search** | Compare the query against a clever subset instead of everything. Much faster, occasionally misses a correct answer. |
-| **Recall** | The fraction of the genuinely correct answers that a search actually returned. If exhaustive search says the ten best chunks are A through J, and an approximate search returns eight of them, its recall is 0.8. This is how approximation quality is measured. |
-| **HNSW** | Hierarchical Navigable Small World, the specific method inillucent uses for approximate nearest neighbour search. Section 5 explains it. |
-| **Inverted index** | A lookup table from each word to the list of chunks containing it. The thing that makes lexical search fast. |
-| **BM25** | A formula for scoring how well a chunk matches a set of query words. Section 6 explains it. |
-| **Stemming** | Reducing words to a common root so that `deployment`, `deploying` and `deployed` all become `deploy` and therefore match each other. |
-| **Stopword** | A word so common it carries no signal, such as `the`, `of`, `and`. Dropped before indexing. |
-| **Filter** | A restriction on which chunks a search may return, for example "only chat messages" or "only updated since June". |
-| **Predicate** | Another word for the condition inside a filter. "Source equals chat messages" is a predicate. |
-| **Selectivity** | How much a filter lets through. "Only chat messages" allows 17,641 of 186,781 chunks, so it is fairly selective. |
-| **Fusion** | Combining the semantic result list and the lexical result list into one ranked list. |
-| **Quantisation** | Storing each number less precisely to use less memory. Section 8 explains it. |
-| **pgvector** | An add on for the PostgreSQL database that gives it the ability to store embeddings and search them. PostgreSQL with pgvector is the alternative inillucent is measured against. |
-| **PostgreSQL** | A general purpose database. Combined with pgvector it is the usual way to hold chunks and their embeddings, and it is the baseline here. |
-| **Embedding server** | A separate program that runs the embedding model and answers requests over a network connection. `llama.cpp` serving the model over HTTP is the usual arrangement, and it is what the baseline here uses. inillucent runs the model inside its own process instead. |
+| **Embedding** | A list of numbers that stands for the meaning of a piece of text. A trained model produces it. Two texts about the same topic get similar lists, even when they share no words. |
+| **Vector** | The list of numbers itself. In SQL it is a `VECTOR(N)` value or the `vector` column of an `inillucent_search` table. An embedding is one kind of vector. |
+| **Dimension** | One position in a vector. A 768 dimension vector is a list of 768 numbers. |
+| **Cosine similarity** | How alike two vectors are by direction. 1 means the same direction. 0 means unrelated. |
+| **Cosine distance** | 1 minus the cosine similarity. A smaller distance means more alike. |
+| **Nearest neighbor search** | Given a query vector, find the stored vectors with the smallest distance to it. |
+| **Exact search** | Nearest neighbor search that compares the query with every stored vector. The answer is always correct. The cost grows with the number of rows. |
+| **HNSW** | Hierarchical Navigable Small World. A graph that links each vector to a few nearby vectors, so a search can walk toward the answer and compare only a small part of the data. The answer can miss a true neighbor. |
+| **`ef_search`** | How many candidates an HNSW walk keeps at once. A larger value finds more of the true neighbors and takes longer. |
+| **Recall** | The share of the true nearest neighbors that a search returned. If exact search says the best ten rows are A to J and a search returned eight of them, its recall is 0.8. |
+| **BM25** | A formula that scores how well a text matches the words of a query. Rare words count for more than common words. |
+| **Stemming** | Reducing a word to its root, so `deploying` and `deployed` both become `deploy` and match each other. |
+| **Stopword** | A word so common that it is left out of the index, such as `the` or `and`. |
+| **Hybrid ranking** | Combining the vector result list and the keyword result list into one ordered list. |
+| **Confidence** | A number from 0 to 1 that each result row gets. It says how well the row matches the query on a fixed scale that is the same for every query. |
+| **Abstention** | Returning no rows because no row is good enough. A query abstains by keeping only rows whose confidence reaches a threshold. |
+| **Facet** | A column of an `inillucent_search` table that a search can filter on. Its value is stored, but it is not indexed as text. |
 
-## 3. What this replaces
+## 1. What the retrieval engine does
 
-The usual way to build this needs two separate programs running alongside the application. PostgreSQL with pgvector holds the chunks and their embeddings, and `llama.cpp` serves the embedding model over HTTP:
+Keyword search matches words. A page that says "shipping a new version" does not match the query
+"release process", because the two share no words. Vector search matches meaning, so it finds that
+page. Vector search is weak at exact strings: a query for the ticket key `PROJ-1932` should find that
+ticket and not tickets that are about similar things. Keyword search finds it.
 
-```mermaid
-flowchart LR
-    App["Application"] -->|"network request"| PG[("PostgreSQL<br/>+ pgvector<br/>holds chunks<br/>and embeddings")]
-    App -->|"network request"| LS["embedding server<br/>runs the<br/>embedding model"]
+The retrieval engine runs both kinds of search and combines the two result lists. Here is one query
+that does all of it, run with the release build of inillucent 1.0.29:
+
+```sql
+CREATE VIRTUAL TABLE notes USING inillucent_search(body, dims = 3);
+
+INSERT INTO notes(rowid, body, vector) VALUES
+  (1, 'how to ship a new release of the app',   '[0.9, 0.1, 0.0]'),
+  (2, 'the cafeteria menu for friday',          '[0.0, 0.2, 0.9]'),
+  (3, 'release checklist: tag, build, publish', '[0.8, 0.3, 0.1]');
+
+SELECT rowid, body, score(notes) AS score, confidence(notes) AS confidence, origin(notes) AS origin
+FROM   notes
+WHERE  notes MATCH 'release process' AND vector = '[0.85, 0.2, 0.05]' AND k = 3
+ORDER  BY rank;
 ```
 
-inillucent is a library, meaning code that runs inside the application rather than as its own program. There is no separate process, no network connection, and no port to configure:
-
-```mermaid
-flowchart LR
-    subgraph One["One process"]
-        App["Application"] --> RDB["inillucent<br/>chunks, embeddings,<br/>word index, ranking"]
-        RDB --> ONNX["embedding model<br/>run in place"]
-    end
+```text
+rowid  body                                    score               confidence            origin
+-----  --------------------------------------  ------------------  --------------------  ------
+1      how to ship a new release of the app    1.0                 0.5928666591644287    both
+3      release checklist: tag, build, publish  0.3350878357887268  0.5645571947097778    both
+2      the cafeteria menu for friday           0.0                 0.030927207320928574  vector
 ```
 
-Both arrangements use the same embedding model, so nothing about the meaning of the embeddings differs. What differs is where the work happens, and how a filter is applied. Section 7 covers the filter, which is the difference that changes results rather than only latency.
+Real embeddings have hundreds of dimensions. Three dimensions keep the example short.
 
-## 4. How the parts fit together
+- `notes MATCH 'release process'` runs the keyword search. `vector = ...` runs the vector search. A
+  query can name either one or both.
+- `k` is how many rows the search returns. It defaults to 10.
+- `score(notes)` orders the rows. `ORDER BY rank` sorts by the same number, because `rank` is the
+  score negated, so the best row sorts first.
+- `confidence(notes)` is the number a query compares with a threshold. Section 8 explains it.
+- `origin(notes)` says which search found the row: `vector`, `lexical` or `both`.
 
-A search runs through five stages.
+The code lives in three crates:
 
-```mermaid
-flowchart TD
-    Q["Query text:<br/>'how does the release process work'"]
-    Q --> E["1. Turn the query into an embedding"]
-    Q --> T["2. Reduce the query to word roots<br/>offer, elig, work"]
-    E --> V["3a. Semantic search<br/>find chunks with nearby embeddings"]
-    T --> L["3b. Lexical search<br/>find chunks containing those roots"]
-    V --> F["4. Fusion<br/>merge the two ranked lists"]
-    L --> F
-    F --> C["5. Limit to two chunks per document,<br/>keep the top ten"]
-    C --> R["Results"]
-```
-
-Both kinds of search run against the same chunks, and both obey the same filter. Stage 4 exists because the two kinds of search fail in different situations, so combining them is more reliable than either one alone.
-
-The code is organised to match:
-
-| File | Responsibility |
+| Crate | What it holds |
 |---|---|
-| `store.rs` | The chunks, the documents, and the attributes filters test against |
-| `vectors.rs` | The embeddings, held as one long continuous block of numbers |
-| `distance.rs` | Measuring how alike two embeddings are |
-| `flat.rs` | Exhaustive search, the exactly correct answer |
-| `hnsw.rs` | Approximate search, the fast answer |
-| `quantize.rs` | Storing embeddings in less memory |
-| `tokenize.rs` | Turning text into word roots |
-| `bm25.rs` | The word index and its scoring |
-| `rank.rs` | Fusion, and the limit of two chunks per document |
-| `filter.rs` | Turning a filter into something cheap to test |
-| `index.rs` | The public entry point that ties the above together |
-| `embed.rs`, `embed_onnx.rs` | Running the embedding model |
-| `persist.rs` | Saving an index to disk and opening it again |
+| `inillucent-core` | The retrieval engine: the HNSW graph, exact search, the BM25 index, the tokenizer, the ranking and the confidence |
+| `inillucent-search` | The `inillucent_search` table: its options, its storage in the database file, and how a SQL query reaches `inillucent-core` |
+| `inillucent-ext` | The virtual table interface that `inillucent_search` plugs into, and the shadow tables it stores its data in |
 
-## 5. Semantic search, and the idea that makes it fast
+`CREATE INDEX ... USING inillucent_hnsw (v)` on a `VECTOR(N)` column builds an `inillucent_search`
+table with a vector width and no text. Everything on this page about the vector side applies to that
+index too.
 
-### The slow correct way
-
-You have 186,829 embeddings. A query arrives as an embedding. Compare it against all of them, keep the ten closest. This is exhaustive search. It is exactly correct, and on this corpus it takes a few milliseconds.
-
-inillucent keeps exhaustive search as a real feature rather than only a test, for two reasons. It defines the correct answer that every faster method is graded against. And when a filter is narrow enough, it is genuinely the faster choice, as section 7 explains.
-
-### The fast approximate way
-
-At larger sizes, comparing against everything stops being reasonable. HNSW instead builds a network of connections between chunks, where each chunk is linked to a handful of others that are near it.
-
-Searching then means walking the network. Start anywhere, look at the current chunk's neighbours, step to whichever is closer to the query, and repeat until no neighbour is an improvement. You reach a good answer having examined a few hundred chunks rather than all 186,829.
-
-Walking a single flat network can get stuck in a distant corner, so HNSW stacks several layers. Upper layers have few chunks and long connections, useful for covering ground quickly. Lower layers have every chunk and short connections, useful for precision. A search descends from the top:
+## 2. How a search runs
 
 ```mermaid
 flowchart TD
-    subgraph L2["Layer 2 — few chunks, long hops"]
-        A2(( )) --- B2(( ))
-    end
-    subgraph L1["Layer 1 — more chunks, medium hops"]
-        A1(( )) --- B1(( )) --- C1(( )) --- D1(( ))
-    end
-    subgraph L0["Layer 0 — every chunk, short hops"]
-        A0(( )) --- B0(( )) --- C0(( )) --- D0(( )) --- E0(( )) --- F0(( ))
-    end
-    L2 -->|"drop down<br/>near the answer"| L1
-    L1 -->|"drop down again"| L0
+    Q["A query with text, a vector, or both"] --> F["Apply the facet filter, if the query names one"]
+    F --> L["Keyword search with BM25"]
+    F --> V["Vector search: exact, or a walk of the HNSW graph"]
+    L --> C["Combine the two lists into one ranking"]
+    V --> C
+    C --> K["Keep the best k rows"]
+    K --> R["Each row has a score, a confidence and an origin"]
 ```
 
-On this corpus the network came out with 4 layers and 6,177,312 connections.
+The keyword search and the vector search can run at the same time on two threads. Each one returns
+up to 50 candidates, or `k` candidates when `k` is larger than 50. Both obey the same filter.
 
-**`ef_search`** is the one setting a caller adjusts. It controls how many candidates the walk keeps in mind at once. Larger means more of the network examined, so better recall and more time. Measured on this corpus:
+## 3. Vector search with HNSW
 
-| `ef_search` | Recall (fraction of correct answers found) | Time per search |
+### Exact search is the default
+
+An `inillucent_search` table is created with `mode = 'exact'` unless the `CREATE` statement says
+otherwise. Exact search compares the query with every stored vector and keeps the closest ones. The
+answer is correct by construction. On a large table it is the slower choice.
+
+`mode = 'approximate'` makes the table use its HNSW graph. The graph is built in both modes.
+
+```sql
+CREATE VIRTUAL TABLE docs USING inillucent_search(
+    body,
+    dims = 768,
+    mode = 'approximate',
+    m = 16,
+    ef_construction = 64,
+    ef_search = 128
+);
+```
+
+### How the walk works
+
+HNSW links every vector to a few vectors that are near it. It builds several layers. The top layer
+has few vectors and long links. Layer 0 has every vector and short links. A search starts at the top
+and walks down:
+
+```mermaid
+flowchart TD
+    A["Start at the entry point on the top layer"] --> B["Look at the neighbors of the current vector"]
+    B --> C{"Is a neighbor closer to the query?"}
+    C -->|yes| D["Move to that neighbor"]
+    D --> B
+    C -->|no| E{"Is this layer 0?"}
+    E -->|no| G["Go down one layer, from the same vector"]
+    G --> B
+    E -->|yes| H["Keep the ef_search best candidates and expand each one"]
+    H --> I["Return the k closest candidates"]
+```
+
+The upper layers cover distance quickly. Layer 0 gives precision. The walk compares the query with a
+few hundred or a few thousand vectors, not every vector in the table.
+
+### The settings
+
+| Setting | Default | What it does |
 |---|---|---|
-| 64 | 0.850 | 0.43 ms |
-| 128 | 0.907 | 0.65 ms |
-| 256 | 0.938 | 1.17 ms |
-| 512 | 0.973 | 2.10 ms |
+| `m` | 16 | How many links a vector keeps on each layer above layer 0. Layer 0 keeps `2 * m`, so 32. |
+| `ef_construction` | 64 | How many candidates the build considers when it links a new vector. Larger builds a better graph more slowly. |
+| `ef_search` | 64 | How many candidates a search keeps. Set it in the `CREATE` statement. There is no session setting for it. |
+| `metric` | `cosine` | The distance the graph is built for. `l2` is the other choice. Any other name is refused. |
+| `mode` | `exact` | `exact` compares every row. `approximate` walks the graph. |
 
-## 6. Lexical search, and why BM25
+The build uses every processor core. With `metric = 'cosine'`, each vector is scaled to length 1 as
+it is stored, so cosine similarity and the dot product give the same order.
 
-Semantic search cannot reliably find an exact string. If you search for the issue key `PROJ-1932`, you do not want chunks about vaguely similar tickets, you want that ticket. Word matching handles this, so inillucent does both.
+### Trading recall for time
+
+The score card run of 20 September 2026 (commit `cd53317`, 185,078 chunks at 768 dimensions)
+measured `ef_search` against exact search, with no filter:
+
+| `ef_search` | recall of the best 10 | median time per vector search |
+|---|---|---|
+| 64 | 0.8775 | 0.6076 ms |
+| 128 | 0.9525 | 1.077 ms |
+| 256 | 0.9575 | 1.938 ms |
+| 512 | 0.9875 | 3.273 ms |
+
+The same run built a graph with 4 layers and 6,116,033 links in 16.8 seconds.
+
+A query can also ask for a recall target with the `recall` column:
+
+```sql
+SELECT rowid FROM docs WHERE vector = ?1 AND k = 10 AND recall = 0.9 ORDER BY rank;
+```
+
+The engine turns the target into a wider walk. The width is `k / (1 - recall)`, never less than `k`
+and never more than 64 times `k`. So `k = 10` and `recall = 0.9` walk with a width of 100.
+`recall = 1` makes the search exact. The target is a setting for how wide the walk is. The engine
+does not measure the recall it reached. On an exact table `recall` changes nothing.
+
+## 4. Filters are applied during the walk
+
+A search table can declare facet columns. A facet constraint in the `WHERE` clause is applied inside
+the search:
+
+```sql
+CREATE VIRTUAL TABLE docs USING inillucent_search(body, source FACET, dims = 768);
+
+SELECT rowid, body
+FROM   docs
+WHERE  docs MATCH 'release process' AND vector = ?1 AND k = 10 AND source = 'chat'
+ORDER  BY rank;
+```
+
+A graph walk visits a small part of the table, and it cannot know in advance where the rows that
+pass the filter are. The engine follows two rules:
+
+- The walk may step through any vector, whether or not its row passes the filter. A row that fails
+  the filter can be the path to a row that passes.
+- Only rows that pass the filter are kept as results.
+
+The walk stops when it has collected enough rows that pass. A narrow filter makes the walk longer. It
+does not make the result shorter. A walk has a limit of `ef_search` times 64 visits, and never fewer
+than 4,096, so a filter that almost nothing passes cannot walk the whole graph.
+
+### When the engine skips the graph
+
+When a filter passes few rows, exact search over those rows is cheaper than a walk. The engine counts
+the rows that pass and chooses exact search when:
+
+```text
+rows that pass  <  square root of (ef_search × 2 × m × rows in the table)
+```
+
+A filter that passes 1,000 rows or fewer always uses exact search. The formula moves when the table
+grows or when `ef_search` changes. For example, with `ef_search` 64, `m` 16 and 185,078 rows, the
+limit is about 19,500 rows.
+
+In the score card run of 20 September 2026, the engine returned every row each filter allowed, for
+every source. Recall of the best 10 inside the filter was 1.000 for jira, 1.000 for github and 1.000
+for slack. The configured pgvector baseline reached 0.3280, 0.3320 and 0.6120.
+[Retrieval quality](retrieval-quality.md) has every source and the latency.
+
+A `WHERE` condition on a column that is not a facet runs after the search has chosen its rows. That
+can return fewer than `k` rows. [Vector search](vector-search.md) has the rules for facets and for
+filters on a `VECTOR(N)` column.
+
+## 5. Keyword search with BM25
 
 ### Preparing the text
 
-Each chunk's text is lowercased, split apart, stripped of stopwords, and reduced to word roots by stemming. The result goes into an inverted index, which is a table from each root to the chunks containing it:
-
-```
-elig    -> chunk 41, chunk 902, chunk 1755, ...
-offer   -> chunk 7,  chunk 41,  chunk 88,   ...
-redeem  -> chunk 88, chunk 1102, ...
-```
-
-A query is prepared identically, so `eligibility` in a query finds `eligible` in a chunk. inillucent deliberately uses the same stemming algorithm PostgreSQL uses, which was verified against the live database: both turn `eligibility` and `eligible` into `elig`, and `offers` and `offering` into `offer`. Matching PostgreSQL on this step is what makes the comparison of the *scoring* meaningful.
-
-**One deliberate difference.** PostgreSQL breaks `PROJ-1932` into `proj` and `-1932`, so the issue identifier stops existing as a searchable term. This corpus is full of issue keys, function names and file paths, so inillucent additionally keeps the whole identifier as its own term when a word looks like a name rather than prose. `PROJ-1932`, `author_id`, `v1.5.2` and `src/search/vector` are kept whole as well as split apart. Ordinary hyphenated English such as `well-known` is not, because that would fill the table with terms nobody searches for. Measured effect: finding a rare identifier improved from 0.156 to 0.233. Measured cost: the term table grew from 179,234 entries to 411,698.
-
-### Scoring with BM25
-
-Once you know which chunks contain the query's words, you have to rank them. BM25 scores each chunk on three ideas:
-
-1. **A rare word counts for more than a common word.** A chunk containing `tirzepatide` tells you much more than one containing `system`.
-2. **Repetition helps, with diminishing returns.** A chunk mentioning `offer` ten times is more relevant than one mentioning it once, but not ten times more.
-3. **Length is accounted for.** A long chunk naturally contains more words, so it should not outrank a short precise chunk merely by being long. This matters here because design file chunks average 2,222 characters while issue thread chunks average 509.
-
-PostgreSQL full text search handles the first idea only. It ranks with `ts_rank_cd`, a coverage density score that does not account for how rare a term is across the corpus or for how long the chunk is. It also joins query terms with AND by default, through `to_tsquery`, so a chunk has to contain every word of the query. That is why long natural questions often return nothing there: requiring all of "how does the release process work" matches a tiny fraction of the chunks that contain `release` or `process`. Joining the terms with OR instead returns more rows, and that variant has not been measured. inillucent scores any matching word and relies on rare words counting for more to keep the results focused.
-
-## 7. Filters, and why they are the hard part
-
-Almost every real search is restricted. An AI application with a search tool per source filters by source on every call: one tool searches only chat messages, another only issue threads. So the filtered search is the common case, not a corner case.
-
-### Why filtering is hard for a graph index
-
-An approximate search works by walking a graph towards the query. The walk visits a small fraction of the corpus, which is what makes it fast, and that is also what makes a filter awkward: the walk cannot know in advance which regions of the graph hold chunks that pass the filter.
-
-pgvector's plain scan resolves this by applying the filter *after* the search. It collects `hnsw.ef_search` candidates, 40 by default, and then discards the ones that do not qualify. When two sources hold three quarters of the chunks, the 40 chunks nearest to any query almost always belong to one of them, so narrowing those 40 to a minority source can leave nothing. Measured on the corpus this repository builds, asking for 50 results from the chat message source that way returned **0.68 results on average, at a recall of 0.060**.
-
-pgvector's own answer to this is `hnsw.iterative_scan`, which keeps restarting the scan with a wider candidate list until enough rows pass the filter. It works: with it enabled, and with `hnsw.scan_mem_multiplier` raised so the scan does not exhaust its memory budget and stop early, a filtered search returns its full 50 rows. What it costs is time. Filling the result set that way took **45 milliseconds** against 1.6 for an unfiltered search, because the work is repeated rather than avoided.
-
-### What inillucent does instead
-
-The filter is applied *during* the walk, with two rules:
-
-- **Any chunk may be walked through**, whether or not it passes the filter. A wiki page chunk can be a step on the route to a chat message chunk, and refusing to step through it cuts the network into disconnected pieces.
-- **Only chunks that pass the filter are collected as results.**
-
-Because the stopping condition counts collected results rather than chunks examined, a narrow filter naturally makes the walk continue further instead of returning a short list. The technique comes from a research paper called ACORN.
-
-```mermaid
-flowchart LR
-    subgraph Old["Filter after the search — a plain pgvector scan"]
-        S1["scan collects the<br/>40 nearest overall"] --> F1["then keep only<br/>chat messages"] --> R1["usually nothing"]
-    end
-    subgraph New["Filter during the walk — inillucent"]
-        S2["walk continues until it has<br/>collected 50 chat message chunks,<br/>stepping through others freely"] --> R2["50 chat message chunks,<br/>the right ones"]
-    end
-```
-
-### Choosing between walking and checking everything
-
-When a filter is narrow, walking the network stops being worthwhile: if only 11,160 chunks qualify, comparing the query against all 11,160 is both exactly correct and quick.
-
-inillucent decides with a calculation rather than a fixed cutoff. Exhaustive search costs one comparison per qualifying chunk. A filtered walk has to examine roughly `ef_search divided by selectivity` chunks before it collects enough that qualify. Setting those two costs equal gives the crossover point:
+The tokenizer is named `porter` in the table's configuration. It lowercases the text, splits it into
+words, drops English stopwords, and reduces each word to its root with the Snowball English stemmer.
+The stopword list is PostgreSQL's English list. The result goes into an inverted index: a table from
+each root to the rows that contain it.
 
 ```text
-check everything when   qualifying chunks < square root of (ef_search × 32 × total chunks)
+releas   -> row 1, row 3
+checklist -> row 3
+menu     -> row 2
 ```
 
-A fixed cutoff would be wrong for a corpus ten times this size, and wrong again whenever a caller raises `ef_search`. Both appear in the calculation, so the crossover moves with them. On this corpus at `ef_search` 128 it falls near 27,700 chunks, which sends four of the six sources down the exact path:
+A query goes through the same steps, so `releasing` in a query finds `release` in a row.
 
-| Source | Qualifying chunks | Route chosen | Recall achieved |
-|---|---|---|---|
-| wiki pages | 93,617 | walk the network | 0.980 |
-| source files | 47,533 | walk the network | 0.924 |
-| chat messages | 17,675 | check everything | 1.000 |
-| issue threads | 11,160 | check everything | 1.000 |
-| design files | 9,149 | check everything | 1.000 |
-| boards | 7,397 | check everything | 1.000 |
+The tokenizer also keeps identifiers whole. A word with a letter and a digit, more than one
+separator, or an underscore is kept as one term and also split into its parts. `PROJ-1932`,
+`author_id` and `v1.5.2` are kept this way. Plain English with one hyphen, such as `well-known`, is
+not. An email address is kept whole and is not stemmed.
 
-Counting the qualifying chunks therefore happens on every search, so it cannot be done by inspecting all 186,829 chunks. The store keeps a running count per source, and any filter that restricts at most the source reads its answer from that count directly.
+### Scoring
 
-## 8. Using less memory
+A row scores for any query word it contains. It does not need every word. BM25 gives each row a
+score from three ideas:
 
-An embedding of 768 numbers, each taking 4 bytes, is 3,072 bytes. Multiplied across 186,829 chunks that is 574 megabytes. Two independent methods reduce it.
+1. **A rare word counts for more than a common word.** The weight of a word is
+   `ln(1 + (N - n + 0.5) / (n + 0.5))`, where N is the number of rows and n is the number of rows that
+   contain the word.
+2. **Repeating a word helps less each time.** The constant `k1` is 1.2.
+3. **Long rows do not win because they are long.** The constant `b` is 0.75.
 
-**Quantisation** stores each number in 1 byte instead of 4, by recording the largest value in each embedding and expressing the rest as fractions of it. Some precision is lost. inillucent uses the compressed form for the walk and then rechecks the finalists against the full precision embeddings, which recovers the accuracy. Measured on this corpus: **no detectable accuracy loss at a quarter of the memory.**
+inillucent then adjusts the BM25 score in three ways. Each one was measured on the graded corpus
+before it was turned on:
 
-**Truncation** keeps only the first part of each embedding. This model was trained so that a prefix of an embedding is itself a usable embedding. It is not free here:
-
-| Configuration | Bytes per embedding | Recall against the exact answer |
+| Setting | Default | What it does |
 |---|---|---|
-| 768 numbers, 4 bytes each | 3,072 | 0.995 |
-| 768 numbers, 1 byte each | 772 | 0.995 |
-| 512 numbers, 1 byte each | 516 | 0.770 |
-| 256 numbers, 1 byte each | 260 | 0.635 |
-| 64 numbers, 1 byte each | 68 | 0.345 |
+| coverage | 3.0 | Multiplies the score by the share of the query's word weight that the row holds, raised to this power. A row with five words of a six word question ranks above a row with one. |
+| proximity | 1.0 | Raises the score of a row where the matched words sit close together. |
+| phrase | 0.75 | Raises the score of a row where the matched words appear in the query's order. |
+| prefix matching | off | Lets a query word match longer words that start with it. |
+| tiers | off | Ranks by how many query words a row holds first, and by score second. |
 
-Reading down that table: compression to 1 byte costs nothing, and shortening the embedding costs a great deal. So inillucent compresses and does not shorten.
+These are settings of the `inillucent-core` library. An `inillucent_search` table uses the defaults
+and has no option to change them.
 
-## 9. Fusion: combining the two result lists
+## 6. Combining the two lists
 
-Semantic search and lexical search each produce a ranked list of 50 chunks. They have to become one list of 10.
+The vector list and the keyword list use different scales. A cosine similarity of 0.83 and a BM25
+score of 14.2 cannot be added. So the engine scales each list before it adds them:
 
-The scores cannot be added, because they are not the same kind of number: a cosine similarity of 0.83 and a BM25 score of 14.2 have no common scale. inillucent's default rescales each list onto its own range and takes a weighted sum: the vector side is given a weight of 0.35 and the lexical side the rest. A chunk both methods rank highly beats a chunk only one of them found. The weight is then adapted per query from four signals the search has already computed, within a floor of 0.05 and a ceiling of 0.95, so a question full of identifiers leans on the lexical side and a paraphrased question leans on the vector side.
+1. **Scale each list to its own range.** The best row in the list becomes 1 and the worst becomes 0.
+   The vector list is scaled by cosine similarity. The keyword list is scaled by BM25 score.
+2. **Choose the weight for this query.** The vector list starts with a weight of 0.35. The keyword
+   list gets the rest, 0.65.
+3. **Add.** `score = weight × vector part + (1 - weight) × keyword part`. A row found by only one
+   search gets 0 for the other part. A row both searches found usually beats a row only one found.
 
-inillucent also implements Reciprocal Rank Fusion, which ignores the scores and gives each chunk `1 divided by (60 plus its position)` from each list. It is available and it is graded. It is not the default: on the 18,685 chunk corpus the weighted normalised score beat it on every hybrid metric, nDCG 0.751 against 0.434 on natural language queries and 0.981 against 0.933 on document identity.
+### How the weight moves
 
-The baseline is given whichever of the two the run is configured with, and the graded run configures both engines with the same one, so the comparison measures retrieval rather than a change of ranking policy.
+The weight moves for each query, based on four signals the search has already computed. Each signal
+moves the weight by 0.10 times its value:
 
-Finally, at most two chunks from any one document are kept, so a single long page cannot fill the results.
+| Signal | Effect on the vector weight |
+|---|---|
+| Share of query words that look like identifiers | Lowers it, because only keyword search matches an identifier exactly |
+| Share of query words that no row contains | Raises it, because keyword search cannot find anything through them |
+| Share of the query's word weight that the best keyword row holds | Lowers it, because a row that holds the whole question needs no help |
+| How far the best vector row stands above the rest of its list, minus the same for the keyword list | Raises it when the vector list has a clear leader |
+
+The weight always stays between 0.05 and 0.95, so neither search is ever ignored.
+
+### Why this method
+
+The library also has reciprocal rank fusion, which ignores the scores and adds `1 / (60 + position)`
+from each list. The score card run of 20 September 2026 compared the two on queries that use a
+document's title. Scaling each list to its range reached 0.9819 nDCG at 10. Reciprocal rank fusion
+reached 0.9172. The scaled sum is the method `inillucent_search` uses.
+
+The library also limits a result to two chunks from one document, so one long document cannot fill
+the list. In an `inillucent_search` table each row is its own document, so the limit has no effect
+there.
+
+## 7. Confidence
+
+The score has a problem as a measure of quality. Step 1 above makes the best row in every list worth
+1, whether the list is good or useless. A query that nothing in the table answers still gets a top
+row with a high score. So the score says where a row stood among the candidates. It does not say how
+well the row matched.
+
+Every row therefore gets a second number, its **confidence**. It uses the same weight as the score.
+Each part is divided by a fixed ceiling that does not depend on the results:
+
+- **The vector part** is the cosine similarity. Its ceiling is 1. A negative similarity counts as 0.
+- **The keyword part** is the BM25 score divided by the highest BM25 score this query could reach.
+  That ceiling is the sum, over the query words that appear in the index, of each word's weight times
+  2.2 (which is `k1 + 1`). The engine computes it from the query alone. A query with no word in the
+  index has a ceiling of 0, and its keyword part is 0.
+
+```text
+confidence = weight × vector part + (1 - weight) × keyword part
+```
+
+The confidence is always between 0 and 1. The same number means the same thing for every query, so
+one threshold works for all of them.
+
+A search that runs only one branch gets 0 from the other branch. Its confidence stays at or below
+that branch's weight. A query with only a vector, for example, has no query words, so its weight
+stays at 0.35 and its confidence is at most 0.35. Set a threshold for the kind of query you run.
+
+On a cosine table, pass a query vector of length 1. The stored vectors are scaled to length 1, and
+the query vector is used as given. A query vector of length 0.5 halves the vector part of the
+confidence. The order of the rows does not change. `nomic-embed-text-v1.5` returns vectors of length
+1, so `embed()` output needs no change.
+
+## 8. Abstention: returning nothing
+
+A query abstains by keeping only the rows whose confidence reaches a threshold:
+
+```sql
+SELECT rowid, body, confidence(notes) AS confidence
+FROM   notes
+WHERE  notes MATCH 'quarterly tax filing' AND vector = '[0.1, 0.9, 0.1]' AND k = 3
+  AND  confidence(notes) >= 0.35
+ORDER  BY rank;
+```
+
+```text
+rowid  body  confidence
+-----  ----  ----------
+```
+
+Without the last condition, this query returns all three rows of the table from section 1. The best
+of them has a confidence of 0.2056. With the condition, it returns nothing. The query from section 1
+keeps rows 1 and 3 under the same condition, with confidences of 0.5929 and 0.5646.
+
+```mermaid
+flowchart TD
+    Q["Query text and query vector"] --> L["Keyword search: up to 50 candidates"]
+    Q --> V["Vector search: up to 50 candidates"]
+    L --> W["Choose the vector weight: 0.35, moved by four signals, kept between 0.05 and 0.95"]
+    V --> W
+    W --> S["Score: each list scaled to its own range, then the weighted sum"]
+    W --> C["Confidence: each list divided by a fixed ceiling, then the same weighted sum"]
+    S --> K["Order the rows by score and keep k"]
+    C --> K
+    K --> T{"Is confidence at or above the threshold?"}
+    T -->|yes| Y["Return the row"]
+    T -->|no| N["Drop the row. If every row is dropped, the query returns nothing"]
+```
+
+The engine has no built in threshold. The query sets it. A good threshold depends on the embedding
+model and on the data, so measure it on your own data. The score card does it this way: run
+questions that have an answer, take the confidence of the top row of each, and use the fifth
+percentile as the threshold. On the score card corpus that threshold was 0.3474.
+
+The score card run of 20 September 2026 then asked 200 questions that nothing in the corpus answers.
+inillucent returned a top row above its threshold for 0.0050 of them, which is one question. pgvector,
+in both configurations, did so for 1.000 of them, which is all 200.
+[Retrieval quality](retrieval-quality.md) has the full comparison.
+
+## 9. Using less memory
+
+These settings belong to the `inillucent-core` library. An `inillucent_search` table stores full
+precision vectors and does not use them.
+
+A vector of 768 numbers at 4 bytes each takes 3,072 bytes. The library can also store each number in
+1 byte. It walks the graph with the 1 byte form, takes three times as many candidates as it needs,
+and then compares those candidates again with the full precision vectors.
+
+The library can also shorten a vector and keep only its first numbers, because the embedding model
+`nomic-embed-text-v1.5` was trained so that the start of a vector is a usable vector. The score card
+run measured both on a sample of 25,000 chunks, against exact search with full precision vectors:
+
+| Configuration | Bytes per vector | Recall of the best 10 |
+|---|---|---|
+| 768 numbers, 4 bytes each | 3,072 | 0.9300 |
+| 768 numbers, 1 byte each | 772 | 0.9450 |
+| 512 numbers, 1 byte each | 516 | 0.6900 |
+| 256 numbers, 1 byte each | 260 | 0.5500 |
+| 64 numbers, 1 byte each | 68 | 0.3100 |
+
+Storing 1 byte per number kept recall and used a quarter of the memory. Shortening the vector lost
+recall at every length measured.
+
+By default the library reads the full precision vectors from the index file as it needs them.
+[Where the vectors live](vector-residency.md) compares that with holding them in memory.
 
 ## 10. Where the embeddings come from
 
-inillucent does not train an embedding model, and the model is not part of the engine. The engine takes embeddings and stores them. That is what lets both engines in the comparison be loaded with byte identical vectors, so a difference in scores can only come from indexing and ranking rather than from the embedding model.
-
-In use inillucent runs `nomic-embed-text-v1.5` itself, in the same process, so no embedding server is needed. The model expects text to be labelled by purpose, so a stored chunk is prefixed with `search_document: ` and a query with `search_query: `, which is the labelling the model was trained with.
-
-The model outputs one embedding per *word piece* rather than one per chunk, so inillucent averages them, ignoring padding, and then scales the result to a standard length.
-
-**Whether running the model in the same process is a faithful replacement for a server was measured, not assumed.** 400 chunks were embedded both ways, by `llama.cpp` over HTTP and by inillucent in its own process, giving an average cosine similarity of **0.9860** with none below 0.95. The remaining difference is expected, because `llama.cpp` was serving the model quantized to Q5_K_M while inillucent runs it at full precision.
-
-That measurement was taken when the engine was first graded, against the private corpus whose stored vectors `llama.cpp` had produced. It cannot be rerun from this repository, because the corpus here is embedded in process to begin with and there is no second embedder to disagree with. What this repository checks instead is that the vectors in its cache were produced from the text in its cache, by re-embedding a sample and comparing: agreement is 1.000000 at the minimum over 200 chunks, and the check fails below 0.9995.
-
-These two measurements were taken when the engine was first built, against a corpus that is no longer distributed, because they need both embedders running over the same text and this repository no longer ships a server. They are reported as what they are: the measurement that justified dropping the server, not something this repository can re-run. What it can check is that the vectors in its embedding cache were produced from the text in that cache, which the `embed-check` subcommand does.
-
-The number that decides whether the replacement is safe is not the similarity but the retrieval quality. Running 120 queries through the same index, once with each embedder's vectors:
-
-| Measure | `llama.cpp` over HTTP | inillucent running the model |
-|---|---|---|
-| Correct answer ranked first | 0.8250 | **0.8250** |
-| Correct answer in the top ten | 0.8917 | **0.8917** |
-| Average rank quality | 0.8509 | 0.8487 |
-
-Identical on the first two and within 0.002 on the third. The two disagree about which chunk to show first for 12% of queries, but they are equally often right, so the disagreement is reshuffling among equally good answers rather than a loss of quality.
+The retrieval engine stores vectors and searches them. It does not train a model. In a build that
+includes the model, the `embed()` SQL function runs `nomic-embed-text-v1.5` inside the same process.
+The model was trained with a label in front of each text. `embed()` embeds the text exactly as
+given, so write the label yourself: `embed('search_document: ' || body)` for stored text and
+`embed('search_query: ' || ?1)` for a query. The library's `embed_documents` and `embed_query` add
+the labels for you. [Embeddings](embeddings.md) covers the model files, the runtime, and how to
+check that stored vectors match their text.
 
 ## 11. Saving and reopening
 
-An index is a directory of four files. Each begins with a marker and a format number, so a file written by a different version is refused rather than misread.
+### Inside a database
 
-| File | Contents | Size on this corpus |
-|---|---|---|
-| `vectors.bin` | The embeddings, as raw numbers | 573.9 MB |
-| `store.bin` | The chunk text and the document attributes | 217.3 MB |
-| `graph.bin` | The network of connections | 27.9 MB |
-| `config.bin` | The settings the index was built with | 223 bytes |
+An `inillucent_search` table keeps all of its data in five shadow tables in the `.rdb` file:
 
-The word index and the compressed embeddings are not stored, because both can be recomputed exactly from the two files above, and recomputing them is cheaper than the disk they would occupy. The network of connections is stored, because rebuilding that takes three minutes.
+| Shadow table | What it holds |
+|---|---|
+| `<name>_config` | The table's definition: columns, `dims`, `metric`, `mode`, the tokenizer, the format number and the release that wrote it |
+| `<name>_content` | Every row: its text columns and its vector. The index can be rebuilt from this table alone |
+| `<name>_delta` | The changes since the last stored segment, one row per change |
+| `<name>_gen` | The stored segments: the built graph and keyword index, cut into rows |
+| `<name>_state` | Which segments are current, how far they reach, and the live row count |
 
-Measured: saving takes 0.3 seconds, and reopening a saved index takes **5.3 seconds** against 175 seconds to rebuild from scratch.
+These are ordinary rows, so an `INSERT` into the search table commits and rolls back with the rest of
+the transaction. A commit that finds 1,024 or more pending changes builds a new segment from those
+changes alone. A query combines the live segments and the pending changes into one index before it
+searches, so every BM25 score uses word counts from the whole table. The combined index is cached
+until the data changes. `INSERT INTO docs(docs) VALUES('compact')` rebuilds everything as one
+segment.
 
-### Inside a database, and what a newer build's index does to an older one
+The `format` row in `<name>_config` is 1 for a table with no facet column and 2 for a table with a
+facet column. A build that meets a format it cannot read refuses that table on every read and every
+write, with the status `unsupported`. The message names the format and the release that wrote it.
+The command line exits with code 3. The rest of the database still opens, so the table can be
+dropped. The test `crates/inillucent-compat/tests/release_format_history.rs` runs every published
+release against a table written by the current build, and checks that each one gives the same
+answers.
 
-An `inillucent_search` table is not that directory. It lives in five shadow tables in the `.rdb`
-itself - `%_config`, `%_content`, `%_delta`, `%_gen` and `%_state` - and it carries its own format
-number in the `format` row of `%_config`, beside a `writer` row naming the release that wrote it.
+### The library's index directory
 
-A build that meets a format it does not read **refuses the table by name**, on every read and every
-write, with the status `unsupported`: `the table is in format N, written by inillucent X.Y.Z, and
-this build reads format 1`. The command line exits 3 and a driver reports `unsupported`, which is
-the same answer every other "this engine has not built that" gives. It refuses the table rather than
-the database, because a database has to open before the table in it can be dropped.
+The `inillucent-core` library can also save an index to a directory. Each save writes a new
+numbered folder with five files: `store.bin` (the text and attributes), `vectors.bin` (the vectors),
+`config.bin` (the settings), `graph.bin` (the HNSW links) and `lexical.bin` (the keyword index).
+A file called `current` names the newest folder, and it is replaced last, so a crash during a save
+leaves the previous folder in use. Each file starts with a marker and a format number, and a file in
+a format the build does not know is refused. The 1 byte vectors are not saved. They are computed
+again from `vectors.bin` when the index opens.
 
-**Refusing is the requirement, not a nicety.** A retrieval engine that cannot read its index and
-answers an empty result set has told the application the documents do not exist, and an empty result
-is a legitimate answer to a search - so there is nothing for the application to tell the two apart
-by. That is exactly what happened to the full-text half between 0.1.1 and 0.1.2;
-`docs/relational-architecture.md` §5a records it and states the promise for every layout in the
-file.
+On the score card corpus of 185,078 chunks, the full precision vectors take 568.6 MB and the 1 byte
+form takes 142.9 MB. [Retrieval quality](retrieval-quality.md) reports the index at 952 MB on disk,
+and a saved index opening in 0.8 seconds.
 
-`crates/inillucent-compat/tests/release_format_history.rs` is what holds it. It writes a database
-with the current build, builds an `inillucent_search` table over twelve vectors and compacts it into
-a stored generation, and then runs every published release's own downloaded binary against that file
-- a term query, a ranked query and a nearest-neighbour query each time - and compares what each
-release answers with what this build answers on the same file. Every release from 0.1.1 on answers
-all three identically, so the retrieval format has not moved.
+## 12. How the numbers are measured
 
-## 12. How any of this is known to work
+Every measurement on this page comes from `inillucent-scorecard.md` in the repository root, the
+output of the run of 20 September 2026 at commit `cd53317`. The program `inillucent-bench` builds the
+index and runs the same queries against inillucent and against PostgreSQL with pgvector. Both
+engines read the same vectors, so the embedding model does not affect the comparison.
 
-Every number in this document was measured by a test suite built alongside the engine, in a second program called `inillucent-bench`. It drives inillucent and PostgreSQL through one shared interface, so no measurement can accidentally be taken of only one of them.
+The correct answers need no person to judge them:
 
-Correct answers come from three sources, none of which requires a person to judge results:
+- **Exact search** gives the correct answer for vector search.
+- **Direct database queries** give the rows a filter should allow and the rows that contain a word.
+- **Document titles** give the correct answer for the whole pipeline. A document's title is the
+  query, and any chunk of that document counts as correct.
 
-- **Exhaustive search** defines the correct answer for semantic search, because it compares against everything and cannot be wrong.
-- **Direct database queries** define which chunks a filter should allow and which chunks contain a given string.
-- **Document identity** defines the correct answer end to end: take a document, use its own title as the query, and any chunk of that document counts as correct. People write titles to describe their own content, so titles behave like real queries. Titles shared by two documents are skipped, because then "correct" would be ambiguous.
-
-### The baseline
-
-Beating a badly configured PostgreSQL would prove nothing, so the baseline is a correctly configured one. It runs the same SQL shape against the same schema, builds its HNSW index with the same parameters, `m = 16` and `ef_construction = 64`, fuses its two result lists with the same method and the same weight as inillucent - the harness hands both engines one fusion setting, and the published run used the normalised score fusion at a vector weight of 0.35 - and is loaded with byte identical vectors.
-
-Its scan settings are these, each chosen from a measured sweep against an exhaustive comparison rather than by feel:
-
-| setting | filtered search | unfiltered search | why this value |
-|---|---|---|---|
-| `hnsw.iterative_scan` | `relaxed_order` | `off` | Without it a filtered search returns almost nothing. Turning it on for an unfiltered search changes nothing worth having: recall at 50 was identical with it off and on at every `hnsw.ef_search` tried, and latency moved from 5.85 ms to 5.98 ms, because the only clause left excludes 298 chunks of 186,827. It is off there because it buys nothing, not because it costs much. |
-| `hnsw.ef_search` | 400 | 100 | A scan cannot return more rows than it collected, so this has to be at least the number of rows requested. Raising it further raises recall inside a filter. |
-| `hnsw.max_scan_tuples` | 40,000 | not applicable | Measured against 200,000, mean recall was 0.788 either way, so the larger value only costs latency. |
-| `hnsw.scan_mem_multiplier` | 4 | not applicable | At the pgvector default of 1 the iterative scan exhausts its memory budget and stops early, returning as few as 30 rows of 50 and holding mean recall to 0.788. At 4 the short results stop and mean recall reaches 0.856. At 8 nothing changes. |
-| ordering | `relaxed_order` rather than `strict_order` | not applicable | 0.856 against 0.727 mean recall at the same cost. Nothing downstream depends on the within scan ordering, because the fusion recomputes the ranking. Those figures come from the private corpus this engine was first graded on, measured against a different database. They are the reason the setting has the value it has, not a result this repository reproduces. |
-
-`hnsw.scan_mem_multiplier` is the one most easily missed. Missing it produces a baseline that looks tuned and is not, which is why the settings are written down here.
-
-When the iterative scan is off, `hnsw.max_scan_tuples` and `hnsw.scan_mem_multiplier` are reset rather than left set, so an unfiltered query on the same connection cannot inherit a filtered query's scan budget.
-
-A second PostgreSQL configuration is graded alongside it, running pgvector's extension defaults with no iterative scan. It is reported to show what the extension does before it is configured, and no comparison is scored against it.
-
-**Which run these numbers come from.** The PostgreSQL figures on this page are from the first full
-graded run, whose baseline had `hnsw.ef_search` at 100 on filtered searches rather than 400,
-`hnsw.max_scan_tuples` at 200,000, iterative scan left on for unfiltered searches, and
-`hnsw.scan_mem_multiplier` never set. Each of those makes the baseline weaker than the settings in
-the table above, so the PostgreSQL figures quoted here understate a correctly configured one, most of
-all on filtered recall.
-
-**[Retrieval quality](retrieval-quality.md) carries the corrected run**, against the settings in that
-table, and it is the page to read for any comparison against pgvector. This page keeps the earlier
-figures because they are what the explanations above were written against, and the form of every
-finding is unchanged. inillucent's own measurements — latency, memory, disk, the quantisation ladder,
-the `ef_search` sweep and the correctness gates — do not depend on the baseline at all.
-
-The engine has 118 tests of its own and the measurement program has 62. Nine of the engine's tests
-cover the embedding model running in process, so they need the `onnx` feature;
-`cargo test -p inillucent-core` alone runs the other 109. [Repository](repository.md) covers the rest
-of the assurance program.
+[Retrieval quality](retrieval-quality.md) explains the baseline's settings, the statistics behind
+each verdict, and every family of queries.
 
 ## Where to go next
 
-- [Vector search](vector-search.md) — using this engine, from SQL and from the library
-- [Retrieval quality](retrieval-quality.md) — the graded comparison against pgvector
-- [Embeddings](embeddings.md) — where the vectors come from
-- [Where the vectors live](vector-residency.md) — held in memory or read from the file
-- [SQL support](sql.md) and [Performance](performance.md) — the other engine
+- [Vector search](vector-search.md): the SQL for vector columns, HNSW indexes, facets and hybrid
+  search
+- [Retrieval quality](retrieval-quality.md): the graded comparison with pgvector
+- [Embeddings](embeddings.md): where the vectors come from
+- [Where the vectors live](vector-residency.md): vectors in memory or read from the file
+- [Relational architecture](relational-architecture.md): the SQL engine

@@ -1,120 +1,147 @@
 # Glossary
 
-Every word this documentation uses that a general programmer would not already know, in one table,
-with one sentence each. Both halves of the engine: the relational one and the retrieval one.
+This page explains the specialist words the inillucent documentation uses. Each entry is one or two
+plain sentences. The terms are grouped by topic, and each group is in alphabetical order.
 
-It is here because half the documentation defined its words and half did not.
-[Architecture](architecture.md) opens with a 26-term table that explains HNSW, quantisation and
-cosine distance before it uses them; [Relational architecture](relational-architecture.md),
-[SQL support](sql.md) and [Feature comparison](feature-comparison.md) used B-tree, WAL, page,
-pragma, rowid and collation with no definition anywhere in the repository.
+If a word on another page is not here and should be, add it.
 
-The retrieval terms below are short entries pointing at
-[Architecture's own table](architecture.md#2-words-to-know), which explains each of them properly
-and with diagrams. Nothing is duplicated.
+| Group | What it covers |
+|---|---|
+| [Storage](#storage) | how a database file is laid out and read |
+| [Transactions and the log](#transactions-and-the-log) | what happens when data is written, and after a crash |
+| [SQL](#sql) | what happens to a statement, and the SQLite rules the engine follows |
+| [Search](#search) | searching by meaning and by keyword |
+| [Programs, testing and measurement](#programs-testing-and-measurement) | the words the project pages use |
 
----
-
-## Storage: what is on disk
+## Storage
 
 | Term | What it means |
 |---|---|
-| **Page** | The fixed-size block a database file is divided into, and the unit every read and write moves. 32 KiB here by default; SQLite's default is 4 KiB. A file is a whole number of pages and nothing is ever read or written in smaller pieces. |
-| **Page size** | How many bytes one page is. Chosen when the file is created and unchangeable afterwards, because every offset in the file is computed from it. |
-| **Buffer pool** (also **page cache**) | The pages held in memory so a read does not go to the disk. One per open file. In this repository "the pool" always means this and never a connection pool, of which there is none. |
-| **Frame** | One slot in the buffer pool, holding one page. `--frames 4096` at a 32 KiB page size is a 128 MiB pool. |
-| **Pin** | Holding a frame in memory while something reads it, so the pool cannot evict the page out from under the reader. A value read out of a pinned page borrows the page's own bytes rather than copying them. |
-| **Eviction** | Removing a page from the pool to make room for another. A page that was written has to be written out first. |
-| **B-tree** | The structure an index or a table is stored in: a shallow tree whose leaves hold the rows in key order, so a lookup costs a few page reads whatever the size of the table. |
-| **B+tree** | A B-tree whose rows live only in the leaves, the interior pages holding nothing but keys and pointers. This engine's trees are B+trees; SQLite's tables are too. |
-| **Leaf** | A B-tree page holding rows. |
-| **Interior page** | A B-tree page holding separator keys and pointers to pages below it. Its contents are addresses, which is why a damaged one is worse than a damaged leaf: a descent through it lands somewhere else in the file. |
-| **Descent** | Walking from the root of a B-tree down to the leaf that could hold a key. Three page reads on a large table, which is the whole point of the structure. |
-| **PAX leaf** | This engine's leaf layout: the rows' values are grouped by *column* inside the page rather than laid out row by row. A scan that reads one column of a wide table then touches one region of the page instead of stepping over every other column. |
-| **Delta area** | A small unsorted region at the end of a leaf where a new row is written without rewriting the sorted region. Compaction folds it in later. |
-| **Cell** | One row's bytes inside a page, in SQLite's own layout. |
-| **Overflow page** | Where the tail of a value too long for one page is kept, chained page by page. This engine calls the same idea a **blob extent**. |
-| **Free map** | The record of which pages in the file are not in use, so a new page can be taken from the file rather than added to the end of it. SQLite calls its version the **freelist**. |
-| **Meta page** | The first page of the file, holding the page size, the catalog's root page and the free map's head. It says how to read every other page, so a file whose meta page is damaged is refused rather than believed. Written in two copies. |
-| **Rowid** | The 64-bit integer that identifies a row in a table that has one. A table declared `WITHOUT ROWID` is keyed by its primary key instead. |
-| **Catalog** | The engine's record of what tables, indexes, views and triggers exist and what their columns are. SQLite keeps the same thing in the `sqlite_schema` table. |
-| **Schema cookie** | A counter that changes whenever the catalog does, so a statement compiled against an older schema recompiles itself rather than running against a plan that no longer matches. |
+| **B-tree** | The structure a table or an index is stored in. It is a shallow tree of pages with the rows in key order, so finding one key takes a few page reads however large the table is. |
+| **B+tree** | A B-tree that keeps rows only in its leaves. The pages above the leaves hold only keys and page numbers. inillucent's tables and indexes are B+trees, and so are SQLite's tables. |
+| **Blob extent** | Where the end of a value too long for one page is stored, as a chain of pages. SQLite calls the same idea an **overflow page**. |
+| **Buffer pool** | The pages the engine holds in memory so a read does not have to go to the disk. Each open database file has one. It is also called the **page cache**. The default is 128 MiB, set by `PRAGMA cache_size`. |
+| **Catalog** | The engine's record of which tables, indexes, views and triggers exist and what their columns are. SQLite keeps the same record in the `sqlite_schema` table. |
+| **Cell** | The bytes of one row inside a page. |
+| **Delta area** | A small unsorted region at the end of a leaf. A new row is written there first, so the sorted part of the leaf does not have to be rewritten on every insert. A later compaction sorts the delta area into the leaf. |
+| **Descent** | Walking a B-tree from its root page down to the leaf that holds a key. On a large table this is about three page reads. |
+| **Eviction** | Removing a page from the buffer pool to make room for another page. A page that was changed is written out before it is evicted. |
+| **Frame** | One slot in the buffer pool. A frame holds one page. |
+| **Free map** | The record of which pages in the file are unused. A new page is taken from the free map before the file is made longer. SQLite calls its version the **freelist**. |
+| **Interior page** | A B-tree page above the leaves. It holds keys and the page numbers of the pages below it. |
+| **Leaf** | A B-tree page at the bottom of the tree. Leaves hold the rows. |
+| **Meta page** | The first page of an inillucent file. It holds the page size, the page number of the catalog and the start of the free map, and it is written in two copies. The engine refuses to open a file whose meta page cannot be read. |
+| **Page** | The fixed size block a database file is divided into. Every read and every write moves whole pages. inillucent's default page size is 32 KiB. SQLite's default is 4 KiB. |
+| **Page size** | The number of bytes in one page. It is chosen when the file is created and cannot change afterwards. |
+| **PAX leaf** | inillucent's leaf layout. The values in a leaf are grouped by column, so a query that reads one column of a wide table reads one region of each page. |
+| **Pin** | Holding a page in its frame while code reads it, so the buffer pool cannot evict the page during the read. Reading from a pinned page uses the page's bytes where they are, without copying them. |
+| **Rowid** | The 64 bit integer that identifies a row in an ordinary table. A table declared `WITHOUT ROWID` has no rowid and is keyed by its primary key. |
+| **Schema cookie** | A number that changes every time the catalog changes. A prepared statement compiled against an older catalog sees the new number and compiles itself again. |
+| **Shadow table** | An ordinary table that a virtual table stores its data in. An `inillucent_search` table keeps its index in five shadow tables, such as `docs_content` and `docs_gen`. |
+| **Torn page** | A page that a crash left half written, with some old bytes and some new bytes. The checksum in each page header detects a torn page. |
 
-## Transactions: what happens when something is written
-
-| Term | What it means |
-|---|---|
-| **Transaction** | A group of statements that all happen or none do. `BEGIN` opens one; `COMMIT` keeps its work and `ROLLBACK` discards it. In the Rust API a [`Transaction`](../drivers/README.md) is a value, and dropping it rolls back. |
-| **Write-ahead log** (**WAL**) | A file the engine appends a record to *before* it changes the database file, so a crash part way through a write can be recovered from the log. The rule that makes it work - the log record reaches the disk before the page does - is the write-ahead rule. |
-| **Journal** | The older shape of the same idea: the *original* copy of a page is written aside before the page is changed, so a crash can undo. This engine writes a log; `journal_mode` selects between them and `journal_mode = off` writes neither. |
-| **Log record** | One entry in the log: a page image, a row change, a commit, a checkpoint. Recovery reads them in order. |
-| **LSN** (log sequence number) | The position of a record in the log, and the number stamped on a page to say which record last changed it. Recovery applies a record to a page only when the page is older than the record. |
-| **Checkpoint** | Writing the log's changes into the database file and then retiring that part of the log, so the log does not grow forever and the next open has less to replay. |
-| **Recovery** | What an open does to a file a crash left behind: read the log from the last checkpoint and apply what the database file has not got yet. |
-| **Redo** | Applying a log record's change to a page during recovery. **Physical redo** writes a whole page image and needs no catalog; **logical redo** applies a row change and needs to know the table's shape. |
-| **Undo** | Putting back what an abandoned transaction wrote. |
-| **Savepoint** | A named point inside a transaction that `ROLLBACK TO` returns to, without ending the transaction. |
-| **Torn page** | A page a crash left half written: some of its bytes are the old page and some are the new one. The checksum in the page header is what detects it. |
-| **MVCC** (multi-version concurrency control) | Keeping more than one version of a row so a reader can read the version that was current when it started while a writer writes a newer one, and neither waits for the other. |
-| **Commit timestamp** (**cts**) | The number a transaction is given when it commits, which is what decides which version of a row a reader sees. |
-| **Durability** | The property that what a commit reported as written survives the process, the operating system or the machine stopping immediately afterwards. |
-| **fsync** | The system call that makes a write reach the disk rather than sitting in the operating system's own cache. The expensive part of a commit, and the reason `synchronous` is a setting. |
-
-## SQL: what happens to a statement
+## Transactions and the log
 
 | Term | What it means |
 |---|---|
-| **Parser** | Turns SQL text into a syntax tree. It decides what the statement *says*. |
-| **Binder** | Resolves the names in that tree against the catalog: which table, which column, which type. It decides what the statement *means*, and it is where a missing table is reported. |
-| **Planner** | Decides *how* to answer: which index to use, which order to join in, whether a sort is needed. |
-| **Executor** | Runs the plan and produces the rows. This engine's executor is batch-at-a-time and has no bytecode. |
-| **Plan** | The planner's choice, as a tree of operators. `EXPLAIN QUERY PLAN` prints it. |
-| **Operator** | One step of a plan: a scan, a filter, a projection, a join, a sort. |
-| **Scan** | Reading every row of a table or index in order. |
-| **Seek** | Descending an index to one key rather than scanning. |
-| **Covering index** | An index that holds every column a query needs, so the query is answered from the index and never touches the table. |
-| **Cardinality** | How many rows something produces. The planner's estimates of it decide the plan. |
-| **Selectivity** | What fraction of rows a condition lets through. A highly selective condition is worth an index; an unselective one is not. |
-| **Affinity** | SQLite's rule for what a column's declared type does to a value written into it: a `TEXT` column stores `1` as `'1'`, an `INTEGER` column stores `'1'` as `1`. It is a preference rather than a constraint, which is the thing that surprises people arriving from PostgreSQL. |
-| **Collation** | The rule for comparing two text values: `BINARY` compares bytes, `NOCASE` folds ASCII case. It decides both sort order and whether two values are equal. |
-| **Storage class** | What a value actually is on disk, independent of the column's declared type: NULL, INTEGER, REAL, TEXT or BLOB. |
-| **Pragma** | A statement that reads or changes a setting rather than data: `PRAGMA journal_mode`, `PRAGMA integrity_check`. [The pragma table](pragmas.md) lists every one this engine recognises. |
-| **Virtual table** | A table whose rows come from a module rather than from a B-tree - an FTS5 index, an R-tree, `generate_series`. It is read and written with ordinary SQL. |
-| **Shadow table** | An ordinary table a virtual table's module keeps its own storage in. |
+| **Busy** | The error a statement gets when another connection holds the lock it needs and `PRAGMA busy_timeout` has run out. Its status name is `busy`. |
+| **`busy_timeout`** | The pragma that sets how long a connection waits for a lock before it fails with `busy`. The default is 5000 milliseconds. |
+| **Checkpoint** | Copying the changes recorded in the write ahead log into the database file, and then deleting the part of the log that is no longer needed. After a checkpoint, recovery has less log to read. The `inillucent checkpoint` command runs one. |
+| **Commit timestamp** | The number a transaction receives when it commits. It decides which version of a row a snapshot sees. |
+| **Durability** | The promise that a committed transaction survives a crash of the process, the operating system or the machine. |
+| **fsync** | The operating system call that makes written bytes reach the disk. It is the slow part of a commit. `PRAGMA synchronous` controls how often the engine calls it. |
+| **Group commit** | Writing the log records of several commits with one fsync, so each commit pays less for the disk write. |
+| **Journal** | A file that holds a copy of a page from before a change, so a crash can put the old page back. inillucent accepts SQLite's six `PRAGMA journal_mode` values, and `delete` is the default. In inillucent the journal mode decides how a checkpoint is protected, and the write ahead log records every change in every mode. |
+| **`locking_mode`** | The pragma that decides whether a connection keeps its file lock. The default, `normal`, releases the lock between statements, so other processes can use the file. `exclusive` keeps the lock until the connection closes. |
+| **Log record** | One entry in the write ahead log: a page image, a row change, a commit or a checkpoint. |
+| **LSN** | Log sequence number: the position of a record in the write ahead log. Every page stores the LSN of the last record that changed it, so recovery can skip records the page already has. |
+| **MVCC** | Multiversion concurrency control: keeping several versions of a row so a reader can read an old version while a writer writes a new one. |
+| **Recovery** | What the engine does when it opens a file after a crash. It reads the write ahead log from the last checkpoint and applies the records the database file does not have yet. |
+| **Redo** | Applying a log record to a page during recovery. |
+| **Savepoint** | A named point inside a transaction. `ROLLBACK TO` a savepoint undoes the work done after it without ending the transaction. |
+| **Snapshot** | The state of the database at one moment. A reader that uses a snapshot sees the same data for the whole of its transaction. |
+| **`synchronous`** | The pragma that decides how often a commit calls fsync. `FULL` waits for the disk on every commit, and `OFF` never waits. |
+| **Transaction** | A group of statements that all take effect or none do. `BEGIN` starts one, `COMMIT` keeps its changes and `ROLLBACK` discards them. In the Rust driver a [`Transaction`](../drivers/README.md) is a value, and dropping it rolls the transaction back. |
+| **Undo** | Putting back the old contents of what a transaction changed, when the transaction rolls back. |
+| **WAL** | Write ahead log. A file the engine appends a record to before it changes the database file. The record reaches the disk before the page does, so a crash can always be repaired from the log. inillucent's log files sit beside the database and are named `<database>-wal.NNNNNNNNNN`. |
+
+## SQL
+
+| Term | What it means |
+|---|---|
+| **Affinity** | SQLite's rule for how a column's declared type changes a value written into it. A `TEXT` column stores `1` as `'1'`, and an `INTEGER` column stores `'1'` as `1`. Affinity converts a value when it can and stores the value unchanged when it cannot. |
+| **`ATTACH`** | The statement that opens a second database file on the same connection, so one query can read tables from both files. |
+| **Binder** | The step that looks up every name in a statement in the catalog: which table, which column, which type. A missing table is reported by the binder. |
+| **Bound parameter** | A placeholder such as `?1` in a statement, filled with a value when the statement runs. Binding values keeps them out of the SQL text, which prevents SQL injection. |
+| **Collation** | The rule for comparing two text values. `BINARY` compares bytes and `NOCASE` ignores the case of ASCII letters. The collation decides sort order and whether two values are equal. |
+| **Covering index** | An index that holds every column a query needs, so the query never reads the table. |
+| **Executor** | The part of the engine that runs a plan and produces rows. inillucent's executor works on batches of rows. |
+| **FTS5** | SQLite's full text search module. It is a virtual table that indexes words, and inillucent answers the same SQL for it. |
+| **Parser** | The step that turns SQL text into a syntax tree. A statement that is not valid SQL fails in the parser. |
+| **Plan** | The steps the planner chose to answer a query. `EXPLAIN QUERY PLAN` prints it. |
+| **Planner** | The step that decides how to answer a query: which index to use, which order to join tables in, and whether a sort is needed. |
+| **Pragma** | A statement that reads or changes a setting of the engine, such as `PRAGMA busy_timeout` or `PRAGMA integrity_check`. [Pragmas](pragmas.md) lists every pragma inillucent recognises. |
+| **Prepared statement** | A statement compiled once and run many times with different bound values. |
+| **R-Tree** | SQLite's module for indexing rectangles, used to find shapes that overlap an area. It is a virtual table. |
+| **Scan** | Reading every row of a table or an index in order. |
+| **Seek** | Going straight to one key in an index with a descent, without a scan. |
+| **Storage class** | The type a value actually has when it is stored: NULL, INTEGER, REAL, TEXT or BLOB. It can differ from the column's declared type. |
+| **`STRICT`** | A table option that makes the engine refuse a value whose storage class does not match the column's declared type. |
 | **Trigger** | A statement the engine runs by itself when a row is inserted, updated or deleted. |
-| **Prepared statement** | A statement compiled once and run many times with different bound values, so the parse, the bind and the plan are paid once. |
-| **Bound parameter** | A `?1` in a statement, filled in with a value at run time rather than pasted into the text. The thing that makes SQL injection impossible. |
-| **VFS** (virtual file system) | The layer between the engine and the operating system's files: open, read, write, sync, lock. Swapping it is how the fault-injecting test file system and the in-memory one work. |
-| **Lever** | A named optimisation this engine can be told to switch off, so its effect can be measured rather than asserted. [`Levers`](repository.md) lists them. |
+| **Virtual table** | A table whose rows come from a module instead of from a B-tree. FTS5, the R-Tree, `generate_series` and `inillucent_search` are virtual tables. They are read and written with ordinary SQL. |
+| **VFS** | Virtual file system: the layer between the engine and the operating system's files. It opens, reads, writes, syncs and locks. The tests swap in a VFS that injects faults. |
+| **`WITHOUT ROWID`** | A table option that stores rows keyed by the primary key, with no rowid. |
 
-## Retrieval: searching by meaning
-
-Short entries. [Architecture's own table](architecture.md#2-words-to-know) explains each of these
-properly, with the diagrams.
+## Search
 
 | Term | What it means |
 |---|---|
-| **Embedding** (also **vector**) | A list of 768 numbers that stands for the meaning of a piece of text, produced by a trained model. Two texts about similar things get similar lists even when they share no words. |
-| **Chunk** | A document cut into a searchable piece, roughly a paragraph. Chunks are what a search returns. |
-| **Semantic search** | Finding chunks whose embedding is near the query's embedding: matching meaning. |
-| **Lexical search** | Finding chunks that contain the query's actual words: matching words. |
-| **Hybrid search** | Both at once, with the two ranked lists combined. |
-| **HNSW** | Hierarchical Navigable Small World, the structure that makes semantic search fast by comparing the query against a clever subset instead of every chunk. |
-| **Recall** | The fraction of the genuinely nearest chunks an approximate search actually returned. How approximation quality is measured. |
-| **BM25** | The formula that scores how well a chunk matches a set of query words. |
-| **Inverted index** | A lookup table from each word to the chunks containing it. What makes lexical search fast. |
-| **Quantisation** | Storing each number of an embedding less precisely, to use less memory. |
-| **Generation** | One published, immutable version of a retrieval index. A new one is built and swapped in rather than the live one being edited. |
+| **Abstention** | Returning no result when nothing in the data answers the query. inillucent decides to abstain by comparing each hit's confidence with a threshold. |
+| **Approximate search** | Finding nearest neighbors by checking only part of the data, through an index such as HNSW. It is much faster than exact search and can miss a correct answer. |
+| **BM25** | The standard formula for scoring how well a piece of text matches a set of query words. It rewards rare words and words that appear often in a short text. |
+| **Chunk** | A piece of a document, about a paragraph long, that is indexed and returned as one search result. |
+| **Confidence** | A number that each search hit carries beside its score. The score decides the order of the hits. The confidence says how likely the hit is to answer the query, and it is the number a search compares with its abstention threshold. |
+| **Cosine distance** | A measure of how far apart two vectors point, ignoring their length. 0 means the same direction. `vector_distance_cos` computes it. |
+| **Embedding** | A vector that a trained model produces from a piece of text. Texts with similar meaning get vectors that are close together, even when they share no words. inillucent's default model produces 768 numbers per text. |
+| **Exact search** | Finding nearest neighbors by comparing the query with every vector. It is always correct, and it is slow on large tables. |
+| **Facet** | A column of an `inillucent_search` table declared `FACET`. A search can filter on a facet while it runs, and the facet's value is not indexed as text. |
+| **Generation** | One published version of a built search index, stored in the `%_gen` shadow table. A new generation is written beside the old one, and the old one is never edited. |
+| **HNSW** | Hierarchical navigable small world: a graph index for vectors. Each vector is linked to a few near neighbors, and a search walks the links toward the query instead of comparing it with every vector. |
+| **Hybrid search** | A search that runs a keyword search and a vector search and combines the two ranked lists into one. |
+| **Inverted index** | A lookup from each word to the chunks that contain it. It is what makes keyword search fast. |
+| **Keyword search** | Finding the chunks that contain the query's words. Also called **lexical search**. |
+| **MCP** | Model Context Protocol: a standard way for an AI agent to call tools. `inillucent-mcp` serves inillucent's commands as MCP tools over standard input and output. |
+| **Nearest neighbor** | The stored vector closest to a query vector. A vector search returns the k nearest neighbors. |
+| **Posting** | One entry in an inverted index: a chunk that contains a word, and where the word appears in it. |
+| **Quantization** | Storing each number of a vector with fewer bits to save memory. inillucent stores one byte per number (int8) and checks the top candidates again against the full vectors. |
+| **Recall** | The share of the true nearest neighbors that an approximate search returned. A recall of 1.0 means it found all of them. |
+| **Reciprocal rank fusion** | A way to combine two ranked lists by adding one divided by each hit's rank in each list. inillucent offers it as an option. The default fusion adds the two scores after scaling each list to the same range. |
+| **Semantic search** | Finding the chunks whose embeddings are close to the query's embedding, which matches meaning instead of words. Also called **vector search**. |
+| **Vector** | A list of numbers. In a `VECTOR(N)` column every value is a list of N 32 bit floats. |
 
----
+## Programs, testing and measurement
+
+| Term | What it means |
+|---|---|
+| **C ABI** | The plain C interface of `inillucent-driver-capi`. Every language binding (Python, Node, Go, PHP) calls the engine through it. |
+| **Capability** | One row of what `inillucent capabilities` prints: a feature name and `yes`, `partial` or `no`. A test runs each row against the engine. |
+| **Crate** | A Rust package. The inillucent repository is a workspace of 29 crates, such as `inillucent-sql` and `inillucent-cli`. |
+| **Differential probe** | A test that runs the same SQL through inillucent and through SQLite and compares the output byte for byte. [Feature comparison](feature-comparison.md) reports its 416 cases. |
+| **Fixture** | A prepared database file that a test or a benchmark reads, such as the `medium` fixture the performance gate uses. |
+| **Geometric mean** | The average of several ratios found by multiplying them and taking the root. It is used to combine the speed ratios of many workloads into one number. |
+| **Lower bound** | The low end of a 95% confidence interval. A performance gate passes a result only when its lower bound is past the target. |
+| **Oracle** | The program whose answers a test treats as correct. inillucent's tests use a pinned build of SQLite 3.53.4 as the oracle for SQL results. |
+| **p50, p95** | The median and the 95th percentile of a set of timings. |
+| **Resident set** | The memory a process actually holds in RAM. [Performance](performance.md) reports the peak. |
+| **Unsupported** | The status an inillucent command returns for SQL the engine has not built yet. The command line exits with code 3. |
 
 ## Where to read more
 
-| you want | page |
+| You want | Page |
 |---|---|
-| how the retrieval half works | [Architecture](architecture.md) |
-| how the SQL half works | [Relational architecture](relational-architecture.md) |
-| both at once, in one diagram | [Architecture overview](architecture-overview.md) |
+| both engines in one diagram | [Architecture in one page](architecture-overview.md) |
+| how the SQL engine works | [Relational architecture](relational-architecture.md) |
+| how the search engine works | [Architecture](architecture.md) |
 | which SQL runs | [SQL support](sql.md) |
 | every pragma | [Pragmas](pragmas.md) |
-| the crates and the contracts | [Repository](repository.md) |
+| the crates and the rules they follow | [Repository](repository.md) |

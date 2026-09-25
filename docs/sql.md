@@ -1,264 +1,353 @@
 # SQL support
 
-inillucent speaks SQLite's SQL dialect on its own storage. This page says which SQL runs and which
-cases out of 416 do not produce SQLite's exact bytes.
+inillucent reads and runs SQLite's dialect of SQL on its own storage. This page lists the SQL that
+runs, the places where the answer differs from SQLite's, and the statements inillucent refuses by
+name.
 
-**Nothing is refused.** Twelve cases are not byte for byte: six answer differently, and six are
-vector search features SQLite has no equivalent for. None of the twelve is silent. Each answers,
-and each reports something a caller can read. [Feature comparison](feature-comparison.md) is the same
-material in full, table by table.
+The comparison is against a pinned build of SQLite 3.53.4. [Feature comparison](feature-comparison.md)
+has every probed case, table by table. [Pragmas](pragmas.md) lists every pragma.
 
-Words used here and not explained here - pragma, collation, affinity, rowid, storage class - are
-in [the glossary](glossary.md), one sentence each. Every pragma is in [Pragmas](pragmas.md).
+## Terms used on this page
 
-## How this was measured
+| Term | Meaning |
+|---|---|
+| [pragma](glossary.md) | a SQLite statement that reads or changes a setting of the database, such as `PRAGMA page_size` |
+| [collation](glossary.md) | a rule for comparing and sorting text, such as `NOCASE` |
+| [affinity](glossary.md) | the type a column prefers, applied to a value when it is written |
+| [rowid](glossary.md) | the integer key of a row in an ordinary table |
+| [storage class](glossary.md) | the type a single stored value has: `NULL`, `INTEGER`, `REAL`, `TEXT` or `BLOB` |
+| [WAL](glossary.md) | write ahead log: changes are written to a log first and copied into the file later |
+| [HNSW](glossary.md) | the graph index inillucent uses for nearest neighbor vector search |
+| probe | a script of SQL run through `inillucent-shell` and through the pinned `sqlite3`, with the two outputs compared byte by byte |
+| exit code 3 | the code the command line returns for a construct the engine has not built. Over a binding or MCP the status is `unsupported` |
 
-416 SQL scripts were run through `inillucent-shell` and through a pinned `sqlite3` 3.53.4, each over
-its own fresh database, and every byte of both output streams was compared.
+## How much matches SQLite
 
-- **402 of 416 produce SQLite's exact bytes** - 96.6% of the total, and 98.5% of the 408 cases that
-  have a SQLite answer to compare against.
-- **0 are refused here that SQLite answers**, and 2 are accepted here that the pinned SQLite build
-  rejects: `DELETE` and `UPDATE` with `ORDER BY ... LIMIT`, which need a compile option that build
-  does not have and many others do. Window
-  functions were the last twelve cases to close: all eleven window-only functions, every frame unit,
-  every bound and every `EXCLUDE` clause now match the pinned SQLite exactly.
-- **6 answer differently, and 6 are vector search features SQLite has no equivalent for**, so there
-  is no SQLite output for them to match.
+The feature probe runs 416 SQL scripts through `inillucent-shell` and through the pinned `sqlite3`.
+Each script gets its own fresh database. The probe compares every byte of standard output and
+standard error.
 
-208 of those cases are also a checked in test, `crates/inillucent-compat/tests/semantics.rs`, so a
-construct that changes its answer in either direction fails a build rather than waiting for somebody
-to audit it. The probe harness is `tools/feature-probe/`.
+```mermaid
+pie showData
+    title The 416 probed cases
+    "Same bytes as SQLite" : 402
+    "A different answer" : 6
+    "Vector search, no SQLite answer" : 6
+    "Accepted here, refused by the pinned SQLite" : 2
+```
 
-Counted against SQLite's own enumerations rather than against a case list: **172 of the 177 function
-names the pinned SQLite library answers**, **67 pragmas of 67**, **63 dot commands of 65**, **5
-collations of 5**. [The function register](#the-function-register) says where 177 comes from and names
-the five.
+| Result | Cases | What it means |
+|---|---|---|
+| Same bytes as SQLite | 402 | 402 of 416 probed cases produce SQLite's exact output. That is 96.6% of all cases and 98.5% of the 408 cases SQLite can answer |
+| A different answer | 6 | both engines answer, and the output differs. Each one is listed [below](#the-fourteen-cases-that-differ) |
+| Only inillucent answers | 6 | vector search. SQLite has no vector search, so there is no SQLite output to compare |
+| Accepted here, refused by the pinned SQLite | 2 | `DELETE` and `UPDATE` with `ORDER BY ... LIMIT` |
+| Refused here, answered by SQLite | 0 | no probed case |
 
-**Two pragma counts, and they are different questions.** 67 is what SQLite's own `pragma_list`
-reports, and this engine answers every one of them.
-The register holds the **68 pragmas this engine recognises**, the extra being `defensive`, which
-SQLite exposes through `sqlite3_db_config` rather than as a pragma. [Pragmas](pragmas.md) is the whole table, generated from the register, and
-`tools/doc-facts/check.mjs` fails when a document names a different number.
+The probe is `tools/feature-probe/`. Many of its cases are also checked in as tests in
+`crates/inillucent-compat/tests/semantics.rs`. A change to one of those answers, in either
+direction, fails the build.
 
-### The function register
+The 416 cases are a list somebody wrote. Some constructs are outside that list, and inillucent
+refuses 19 of them by name. They are listed in [What is refused](#what-is-refused).
 
-`PRAGMA function_list` in SQLite's own shell reports **218** names, and 41 of those are extensions the
-shell itself defines rather than functions the library answers: `readfile`, `writefile`, `sha3`,
-`zipfile`, `ieee754`, the `decimal` family, the `shell_*` helpers and the rest. They are not part of
-SQLite, so they are not a gap here. That leaves **177 library names**.
+### Counted against SQLite's own lists
 
-inillucent answers **172** of the 177. The five it does not are `fts3_tokenizer`, `fts5`,
-`fts5_get_locale`, `fts5_insttoken` and `fts5_locale`: the first two hand out a C pointer to a
-tokenizer and to the FTS5 API, and the other three are FTS5's locale machinery, which this build does
-not carry.
+A second tool, `node tools/feature-probe/registers.js`, asks SQLite for its own lists of functions,
+pragmas, modules, collations and dot commands, and asks inillucent for the same lists.
 
-Its own register holds **190** names: those 172, plus 18 vector functions SQLite has no equivalent
-for. `inillucent functions` prints 213 rows because it prints one row per name and argument count.
+| List | SQLite 3.53.4 | inillucent | What is missing here |
+|---|---|---|---|
+| Pragmas in `pragma_list` | 67 | 67 | none |
+| Function names in the library | 177 | 172 of the 177, plus 18 vector functions | `fts3_tokenizer`, `fts5`, `fts5_get_locale`, `fts5_insttoken`, `fts5_locale` |
+| Modules for `CREATE VIRTUAL TABLE` | 19 | 16 of the 19, plus 4 of its own | `fts3tokenize`, `fts4aux`, `pragma_module_list` |
+| Collations | 5 | 5 | none |
+| Shell dot commands | 65 | 63 | `.expert`, `.session` |
 
-It also names what the connection itself has registered - anything an application defined through
-`create_scalar_function` or `create_aggregate_function`, and `embed(TEXT)` in a build carrying the
-`embed` feature, where the count is 214. Those rows carry `builtin = 0`. Until this was fixed, the
-register read the static built-in list alone, so `embed` answered `SELECT length(embed('hello'))` with 3072
-and `inillucent functions embed` printed nothing.
+The register holds the 68 pragmas this engine recognises. That is SQLite's 67 plus `defensive`.
+SQLite sets `defensive` through `sqlite3_db_config`, and inillucent also answers it as a pragma.
+`tools/doc-facts/check.mjs` fails when a page names a different count.
 
-**Where a registered function may be called from is decided by its flags.** A registration is
-`direct_only` unless it says otherwise, and a `direct_only` function may be named by a statement and
-not by the schema: not by a `DEFAULT`, a `CHECK`, a generated column, an index expression, a
-partial-index predicate, a view or a trigger. A function that is neither `direct_only` nor
-`innocuous` may be named by the schema only while `PRAGMA trusted_schema` is on, which it is by
-default. A schema that names one it may not is refused with `<name> may only be used from top-level
-SQL`, when the statement that reads it is bound - and at `CREATE INDEX` for an index expression,
-because that is the one form this engine binds while it builds it. `embed(TEXT)` is `direct_only`:
-it loads a 275 MB model, and a `CHECK` that named it would load that model on every insert.
+### Where the function counts come from
+
+`PRAGMA function_list` in SQLite's own shell reports 218 names. 41 of them are extensions the
+`sqlite3` shell program adds, such as `readfile`, `writefile`, `sha3`, `zipfile`, `ieee754`, the
+`decimal` functions and the `shell_*` helpers. An application that links the SQLite library does
+not get them. That leaves 177 library names.
+
+inillucent answers 172 of those 177. The five it does not have are FTS5 and FTS3 internals:
+
+- `fts5` and `fts3_tokenizer` hand a C pointer to the caller.
+- `fts5_locale`, `fts5_get_locale` and `fts5_insttoken` belong to FTS5's locale support, which
+  inillucent does not have.
+
+inillucent's register holds 190 built in function names: the 172, plus 18 vector functions SQLite
+does not have. `inillucent functions` prints 213 rows, because it prints one row for each name and
+argument count.
 
 ```sh
-inillucent functions --output json --limit 0
-node tools/feature-probe/registers.js    # both registers, compared name by name
+inillucent functions --output json
+node tools/feature-probe/registers.js    # compares both registers name by name
 ```
+
+`inillucent functions` also lists what the connection registered: functions an application added
+through `create_scalar_function` or `create_aggregate_function`, and `embed(TEXT)` in a build with
+the `embed` feature. Those rows have `builtin = 0`. The release build checked for this page has no
+`embed` feature, so `embed('hello')` returns exit code 3.
+
+### Where a registered function may be called
+
+A function an application registers carries two flags, `direct_only` and `innocuous`. The flags
+decide whether the schema may call the function. The schema means a `DEFAULT`, a `CHECK`, a
+generated column, an index expression, the `WHERE` of a partial index, a view or a trigger.
+
+| Flags on the function | Called from a statement | Called from the schema |
+|---|---|---|
+| `direct_only` (the default for an application's function) | yes | refused with `may only be used from top-level SQL` |
+| `innocuous` | yes | yes |
+| neither | yes | only while `PRAGMA trusted_schema` is on |
+| a built in function | yes | yes |
+
+`PRAGMA trusted_schema` is off by default in this build, as it is in the pinned SQLite. The refusal
+comes when the statement that reads the schema is bound. For an index expression the refusal comes
+at `CREATE INDEX`, because that is when inillucent evaluates the expression.
+
+`embed(TEXT)` is `direct_only`. `embed(TEXT)` loads a 275 MB model, so a `CHECK` that named it would
+load the model on every insert.
 
 ## What runs
 
-**Queries.** `SELECT` with inner, cross and outer joins, planned as a hash join, an index nested loop
-or a scan. `GROUP BY`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`. A `HAVING` needs no `GROUP BY`
-before it: a query with an aggregate among its result columns is one group over the whole table, and
-`SELECT count(*) AS n FROM t HAVING n > 0` filters that one group. A `HAVING` on a query with no
-`GROUP BY` and no aggregate among its result columns is refused, in SQLite's words -
-`HAVING clause on a non-aggregate query` - because SQLite refuses it too. Compound selects
-(`UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT`). Common table expressions, including recursive ones.
-Derived tables in `FROM`. Subqueries in `WHERE`, in `IN`, in `EXISTS` and as values, including
-correlated ones. A correlated `IN` is answered by rewriting it as `EXISTS`, which keeps SQLite's NULL
-rules: an empty list is false even for a NULL on the left, a NULL on the left over a list with rows
-is NULL, and a list holding a NULL turns a non-match into NULL. The one shape that is refused is a
-correlated `IN` whose block groups, limits or is itself a compound query, because the rewrite puts
-the equality in the block's `WHERE` and a `WHERE` runs before either.
+Every row in this table ran through the probe with the same output as SQLite, unless the row says
+otherwise.
 
-**Writes.** `INSERT`, `UPDATE` and `DELETE`, with `RETURNING`, with `ON CONFLICT DO UPDATE` and
-`DO NOTHING`, and with `UPDATE ... FROM`. `WITH` on all three. Row values in every comparison and in
-their `IN` form.
+| Area | What runs |
+|---|---|
+| Queries | `SELECT` with `WHERE`, `GROUP BY`, `HAVING`, `DISTINCT`, `ORDER BY` with `NULLS FIRST` and `NULLS LAST`, `LIMIT` and `OFFSET`. `VALUES` as a statement and in `FROM` |
+| Joins | inner, `LEFT`, `RIGHT` and `FULL OUTER`, `CROSS`, `NATURAL`, `USING`, self joins. The planner picks a hash join, an index nested loop or a scan |
+| Compound queries | `UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT` |
+| Subqueries | in `WHERE`, `IN`, `EXISTS`, as a value, and as a table in `FROM`, correlated or not. Row values in comparisons and in `IN` with a value list |
+| Common table expressions | `WITH`, `WITH RECURSIVE`, `MATERIALIZED` and `NOT MATERIALIZED`, and `WITH` on `INSERT`, `UPDATE` and `DELETE` |
+| Window functions | all eleven window functions, `PARTITION BY`, `ROWS`, `RANGE` and `GROUPS` frames, every `EXCLUDE` clause, `FILTER`, and named `WINDOW` clauses |
+| Writes | `INSERT`, `UPDATE`, `DELETE` and `REPLACE`, every `OR` conflict clause, `RETURNING`, `UPDATE ... FROM`, and `ON CONFLICT ... DO UPDATE` and `DO NOTHING` |
+| Tables | `CREATE TABLE`, `CREATE TABLE ... AS SELECT`, `WITHOUT ROWID`, `STRICT`, `VIRTUAL` and `STORED` generated columns, `AUTOINCREMENT` |
+| Indexes | unique, descending, partial, on an expression, with `COLLATE`, on a `WITHOUT ROWID` table. `REINDEX`, `INDEXED BY`, and `ANALYZE`, which writes `sqlite_stat1` |
+| Views and triggers | `CREATE VIEW`. `CREATE TRIGGER` with `BEFORE`, `AFTER` and `INSTEAD OF`, `UPDATE OF`, `WHEN`, `RAISE`, and recursive triggers |
+| `ALTER TABLE` | `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` and `DROP COLUMN` |
+| Constraints | `NOT NULL`, `UNIQUE`, `PRIMARY KEY`, `CHECK`, `DEFAULT`, and foreign keys with all five actions, immediate or deferred, and `PRAGMA foreign_key_check` |
+| Values | type affinity on write, `CAST`, the `BINARY`, `NOCASE` and `RTRIM` collations, `LIKE`, `GLOB`, values larger than a page |
+| Functions | 190 built in function names, including 30 JSON functions, the maths functions and the date and time functions. Functions, aggregates and collations an application defines |
+| Transactions | `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`. A `ROLLBACK` also undoes `CREATE` and `DROP TABLE` |
+| Several databases | `ATTACH` and `DETACH`, joins across files, and one transaction that commits to two files or to neither. Temporary tables, views and triggers |
+| Schema and maintenance | `sqlite_schema` and `sqlite_master`, `VACUUM`, `VACUUM INTO`, `integrity_check` and `quick_check` |
+| Plans | `EXPLAIN QUERY PLAN` in SQLite's format. Plain `EXPLAIN` runs and prints a different program, see [below](#five-follow-from-how-inillucent-is-built) |
+| Table valued functions | `generate_series`, `json_each`, `json_tree`, the `pragma_*` functions such as `pragma_table_info('t')`, and any module an application registers |
 
-**Schema.** `CREATE TABLE`, including `WITHOUT ROWID` and `STRICT`, and `CREATE TABLE ... AS SELECT`.
-`CREATE INDEX` through a bottom up bulk builder, including partial indexes, indexes on expressions,
-and indexes on a `WITHOUT ROWID` table. `CREATE VIEW`. `CREATE VIRTUAL TABLE`. `CREATE TRIGGER` with
-`BEFORE`, `AFTER` and `INSTEAD OF`, `FOR EACH ROW`, `WHEN` and `RAISE`. All four `ALTER TABLE` forms.
-`DROP`. `ANALYZE`, which writes `sqlite_stat1`. `REINDEX`. `VACUUM` and `VACUUM INTO`.
+### Rules a reader asks about
 
-**Constraints.** `NOT NULL`, `UNIQUE`, `PRIMARY KEY`, `CHECK`, `DEFAULT`, and foreign keys with all
-five referential actions, immediate and deferred, plus `PRAGMA foreign_key_check`. Foreign keys
-compile to triggers, so one mechanism serves `PRAGMA foreign_keys`,
-`DEFERRABLE INITIALLY DEFERRED`, `ON DELETE CASCADE`, `SET NULL`, `SET DEFAULT` and `RESTRICT`.
+**`HAVING` with no `GROUP BY`.** A query that has an aggregate in its result columns is one group
+over the whole table. `SELECT count(*) AS n FROM t HAVING n > 0` filters that one group. A query
+with no `GROUP BY` and no aggregate is refused with `HAVING clause on a non-aggregate query`, which
+is SQLite's message.
 
-**Values.** Type affinity applied on write. `CAST`. `COLLATE` with `BINARY`, `NOCASE` and `RTRIM`.
-`LIKE` and `GLOB`. 190 built in function names, including 30 JSON functions, 29 maths functions and
-7 date and time functions. User defined scalar functions, aggregates and collations.
+**A correlated `IN` subquery.** inillucent answers `a IN (SELECT ...)` with a correlated subquery by
+rewriting it as `EXISTS`. The rewrite keeps SQLite's `NULL` rules:
 
-**Transactions.** `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE` and `ROLLBACK TO`. `ATTACH`
-and `DETACH`, and temporary objects, with a super journal deciding a commit that spans two files.
+| Left side | Subquery rows | Result |
+|---|---|---|
+| any value, including `NULL` | none | false |
+| `NULL` | one or more | `NULL` |
+| a value with no match | a list that holds a `NULL` | `NULL` |
 
-**Introspection.** `EXPLAIN QUERY PLAN` in SQLite's idiom, plain `EXPLAIN`, `sqlite_schema` and
-`sqlite_master`, `table_info`, `table_xinfo`, `table_list`, `index_list`, `index_xinfo`,
-`database_list`, `integrity_check`, `quick_check`, and the table valued pragma forms such as
-`FROM pragma_table_info('t')`.
-
-**Table valued functions.** `generate_series`, `json_each`, `json_tree`, the `pragma_*` family, and
-any eponymous module a caller registers.
+A correlated `IN` subquery that uses `GROUP BY`, `LIMIT` or a compound query is refused with exit
+code 3. The rewrite moves the equality into the subquery's `WHERE`, and a `WHERE` runs before
+grouping and before a limit, so the answer would be wrong.
 
 ## Extensions
 
-| extension | state |
+| Extension | What is there |
 |---|---|
-| **JSON** | over a binary form, with all 30 function names, `json_*` and `jsonb_*` alike |
-| **FTS5** | including `bm25()` and `fts5vocab` |
-| **R-Tree** | the module and its queries |
-| **`inillucent_search`** | this engine's own hybrid vector and keyword index. [Vector search](vector-search.md) covers it |
+| JSON | a binary storage form, and all 30 function names, `json_*` and `jsonb_*` |
+| FTS5 | full text search with `MATCH`, `bm25()`, `highlight()`, `snippet()`, external content and contentless tables, and `fts5vocab`. The tokenizers are `ascii`, `unicode61` and `porter` |
+| FTS3 and FTS4 | the `fts3` and `fts4` modules with `matchinfo()` and `offsets()`. `fts4aux` and `fts3tokenize` are missing |
+| R-Tree | `rtree`, `rtree_i32` and `geopoly` |
+| Others | `dbstat`, `sqlite_dbpage`, `bytecode`, `tables_used`, `completion`, `zipfile`, `fsdir` |
+| `inillucent_search` | inillucent's own table that combines vector and keyword search. [Vector search](vector-search.md) covers it |
 
-Every extension's shadow tables are ordinary trees in the same file, so they commit and roll back
-with the transaction that wrote them.
+The internal tables of every extension are stored in the same file as ordinary tables. They commit
+and roll back with the transaction that wrote them.
 
-## The twelve cases that are not byte for byte
+## The fourteen cases that differ
 
-### Six are vector search, which SQLite does not have
+14 of the 416 probed cases do not produce SQLite's bytes.
 
-The `vec0` table, the distance functions and the operator spellings `<->`, `<#>`, `<=>`, `<+>`, `<~>`
-and `<%>`. All six work. There is no SQLite output for them to be equal to, so they cannot count as
-agreement however well they behave. This can never be closed, and closing it is not wanted.
+| Case | What inillucent does | What SQLite 3.53.4 does | Why |
+|---|---|---|---|
+| `VECTOR(n)` column with `vector_distance_cos` | answers | has no vector type | vector search |
+| `vector_distance_l2` and `vector_dot` | answers | has no such functions | vector search |
+| `CREATE INDEX ... USING inillucent_hnsw` | builds an HNSW index | has no vector index | vector search |
+| a vector `ORDER BY` with a `WHERE` filter | answers through the index | has no vector index | vector search |
+| `CREATE VIRTUAL TABLE ... USING inillucent_search` | creates the table | has no such module | vector search |
+| the operators `<->`, `<#>`, `<=>`, `<+>`, `<~>`, `<%>` | answers, with pgvector's meanings | has no such operators | vector search |
+| `DELETE ... ORDER BY ... LIMIT` | deletes the rows | the pinned build refuses it | accepted |
+| `UPDATE ... ORDER BY ... LIMIT` | updates the rows | the pinned build refuses it | accepted |
+| `PRAGMA page_size`, `page_count` | `32768`, and 5 pages | `4096`, and 2 pages | page size |
+| `.recover` | one line of 17 differs: `PRAGMA page_size = '32768'` | `PRAGMA page_size = '4096'` | page size |
+| `EXPLAIN SELECT 1` | inillucent's operator list in SQLite's columns | SQLite's bytecode program | no bytecode |
+| `.vfslist` | two file systems, `win32` and `memdb` | four file systems | no SQLite library |
+| `.stats on` | inillucent's page cache counters | SQLite's memory allocator counters | no SQLite library |
+| `.limit` | `trigger_depth 1000` | `trigger_depth 100` | the reference build |
 
-### Three describe SQLite's own C structures
+### Six are vector search
 
-`EXPLAIN`'s bytecode program, `.vfslist`'s `szOsFile`, and `.stats`' lookaside counters. Each prints
-the same report, in the same shape, over the facts this engine has.
+SQLite has no vector search. The six vector cases all answer in inillucent. There is no SQLite
+output for them to match, so they never count as the same. [Vector search](vector-search.md)
+describes the features.
 
-`EXPLAIN` lays out SQLite's eight columns under SQLite's own header and column widths, so a listing
-lines up under the same `addr opcode p1 p2 p3 p4 p5 comment` rule. What the rows hold is this
-engine's operator chain, because SQLite lists the opcodes of a bytecode program and this engine
-compiles none. `bytecode('...')` reads the same rows.
+### Two are accepted here and refused by the pinned SQLite
 
-`.vfslist` prints four lines per file system in the reference's format, over the two this build has.
-`szOsFile` is the size of a C struct in a library that is not linked into this program.
+SQLite answers `DELETE` and `UPDATE` with `ORDER BY ... LIMIT` only when the library is compiled
+with `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`. The pinned build is compiled without that option and
+refuses both with a syntax error. Many other SQLite builds have the option. inillucent always
+accepts both. inillucent refuses an `ORDER BY` with no `LIMIT` on a `DELETE` or `UPDATE`, as SQLite
+does.
 
-`.stats` prints the same two column shape over the counters this engine keeps: page cache fetches,
-hits, misses and rewarms, frames cooled and evicted, pages read and written. Lookaside slots and
-pcache overflow bytes are facts about SQLite's allocator.
+### Five follow from how inillucent is built
 
-Printing SQLite's numbers in these three would mean printing facts about a library that is not here.
-That is a fabrication rather than compatibility, so none of the three will ever be closed.
+**`PRAGMA page_size` reports 32768.** inillucent writes 32 KiB pages. SQLite's default is 4096.
+`PRAGMA page_count` differs for the same reason. `.recover` prints the page size in one of its 17
+lines, so `.recover` differs on that one line. `PRAGMA page_size = 4096` on a new file does not
+change the page size in this build.
 
-### Two follow from a decision this engine made, and it was measured
+**`EXPLAIN` prints inillucent's operators.** SQLite compiles a statement into a bytecode program,
+and `EXPLAIN` lists that program. inillucent does not compile bytecode. Its `EXPLAIN` uses SQLite's
+eight columns, header and widths (`addr opcode p1 p2 p3 p4 p5 comment`), and the rows are
+inillucent's own chain of operators. The `bytecode('...')` table function reads the same rows.
 
-The experiment below was run against the earlier 3.83x weighted headline and has not been taken
-again. What it measures is the *difference* between two settings, and that difference is what is
-quoted here.
+**`.vfslist` lists the two file systems this build has.** The output uses the reference's format,
+four lines per file system. `szOsFile` is the size of a C structure inside the SQLite library, and
+that library is not part of inillucent, so the numbers differ.
 
-**`PRAGMA page_size` reports 32768** where SQLite reports 4096. Both were measured on the same gate:
-32768 gave 3.83x weighted with the `schema` family at 1.15x; 4096 with a matched cache budget gave
-3.44x with `schema` at **6% slower than SQLite**, under the floor the performance contract requires.
-The pragma reports what the file is, which is its job.
+**`.stats` prints inillucent's own counters.** The output uses the same two columns. The counters
+are page cache bytes, fetches, hits, misses and rewarms, frames cooled and evicted, and pages read
+and written. SQLite's lookaside slots and page cache overflow bytes describe SQLite's memory
+allocator, which inillucent does not have.
 
-**`PRAGMA locking_mode` used to be a third row here and is not any more.** It reports `normal`, where
-SQLite also reports `normal`. It is the default because `exclusive` never releases the file between
-statements, so a second process either waits out the whole life of the first or reads state from
-before it. `exclusive` is still a real switch, and a program that never opens a second connection
-can take it for the throughput: releasing the file between statements means reading the meta record
-and the log's tail again before each one.
+Printing SQLite's numbers in these cases would report facts about a library that is not in the
+program. None of these five will change.
 
-What multi-process access means here is one writer at a time. A second writer waits up to
-`PRAGMA busy_timeout` and is then refused with `busy`, naming what the holder has the file for.
-Rows in the file equal commits acknowledged, which
-`crates/inillucent-compat/tests/process_concurrency.rs` asserts against two real writer processes.
+### One is two reference builds that disagree
 
-**`.recover`** differs on one line of nineteen, and it is the line that names the page size.
+`.limit` reports `trigger_depth 1000` here. The downloaded `sqlite3.exe` reports 100, because it
+was compiled with `SQLITE_MAX_TRIGGER_DEPTH=100`, as its own `PRAGMA compile_options` shows. The
+pinned SQLite source defaults to 1000, and a reference built locally from that source reports 1000.
+The other twelve lines of `.limit` agree. No value can match both references.
 
-Adopting SQLite's 4,096 byte page would close both `PRAGMA page_size` and `.recover`, and take the
-byte for byte number from 402 to 404, at the measured cost to the `schema` family above.
+## What is refused
 
-### One is the two pinned reference artifacts disagreeing with each other
+A construct inillucent has not built fails with exit code 3 and the status `unsupported`. A real
+error, such as a missing table, fails with exit code 1. A script can tell the two apart without
+reading the message. `inillucent capabilities` lists each refused construct as a row with the value
+`no`.
 
-`.limit` reports `trigger_depth 1000`. The downloaded `sqlite3.exe` says 100, because it was built
-with `SQLITE_MAX_TRIGGER_DEPTH=100`, which its own `PRAGMA compile_options` confirms. The pinned
-amalgamation's default is 1000, and the locally built oracle reports 1000. Twelve of the thirteen
-lines agree. No value closes this row: whichever of the two references is agreed with, the other one
-disagrees.
+### SQL that SQLite 3.53.4 answers and inillucent refuses
 
-## What is refused, by name
+Each row was run against the release build and against the pinned `sqlite3`. Each fails here with
+exit code 3.
 
-**No SQL statement is refused.** What remains on this list is a shell command, five function names,
-two modules and three properties of the engine. Each says what it is, and a construct that is not
-built returns exit code `3` rather than `1`, so a caller can tell "not built" from "your SQL is
-wrong".
+| Construct | Example | What to write instead |
+|---|---|---|
+| `DISTINCT` inside a function that is not an aggregate | `SELECT abs(DISTINCT a) FROM t` | `SELECT DISTINCT abs(a) FROM t` |
+| `ATTACH ... KEY` | `ATTACH 'x.db' AS k KEY 'secret'` | `ATTACH` without `KEY`. inillucent has no encryption |
+| a row value `IN` a subquery | `(a, b) IN (SELECT x, y FROM s)` | `EXISTS (SELECT 1 FROM s WHERE x = a AND y = b)` |
+| an expression in `LIMIT` or `OFFSET` | `LIMIT 1 + 1` | a constant or a bound parameter |
+| a window function inside a table subquery in `FROM` | `SELECT * FROM (SELECT row_number() OVER () FROM t)` | the same query as a common table expression |
+| `INSERT ... SELECT` into a virtual table | `INSERT INTO docs(body) SELECT body FROM t` | one `INSERT ... VALUES` per row |
+| a partial index as an `ON CONFLICT` target | `ON CONFLICT(b) WHERE b > 0` | a full unique index |
+| an expression as an `ON CONFLICT` target | `ON CONFLICT(lower(a))` | a stored column with a unique index |
+| a correlated `IN` subquery with `GROUP BY`, `LIMIT` or a compound query | `a IN (SELECT a FROM t i WHERE i.id = o.id LIMIT 1)` | `EXISTS` with the condition written out |
+| an FTS5 tokenizer inillucent does not have | `tokenize='trigram'` | `ascii`, `unicode61` or `porter` |
+| FTS5 `detail='none'` or `detail='column'` | `fts5(body, detail='none')` | leave `detail` out. The index stores full positions |
+| FTS5 `columnsize=0` | `fts5(body, columnsize=0)` | leave `columnsize` out |
 
-| construct | why |
+### Refused by both engines
+
+These rows are listed in `inillucent capabilities` as `no`. The pinned `sqlite3` refuses each of
+them too.
+
+| Construct | inillucent's message |
 |---|---|
-| `.expert` and `.session` | the two of `sqlite3`'s 65 dot commands this shell has not got |
-| `fts5(...)`, `fts5_locale()`, `fts5_get_locale()`, `fts5_insttoken()` | four function names that hand out C pointers or belong to FTS5's locale machinery. A stub would be a wrong answer rather than a missing one |
-| `fts3_tokenizer()` | the same, and absent from the pinned SQLite library too, so it is a difference against the shell rather than against the library an application links |
-| modules `fts4aux` and `fts3tokenize` | also absent from the pinned library, so also a difference against the shell. The FTS5 equivalent `fts5vocab` is here |
-| a second writer | one writer at a time. A reader is refused with `busy` while a writer holds the file, after `PRAGMA busy_timeout`; there is no shared-memory log index, so there is no snapshot for a reader to read from while a writer is working. `docs/roadmap.md` has the protocol that would change that |
-| threads inside one process | the engine is single threaded by construction. Several *processes* on one file are supported under `PRAGMA locking_mode = normal` |
-| SQLite's file format | this engine writes its own format. A SQLite file is imported with [`inillucent migrate`](migrating.md), not opened in place |
+| a compound query ordered by an expression | `ORDER BY term does not match any column in the result set` |
+| `INSERT`, `UPDATE` or `DELETE` on a view | `unsupported: writing to a view`. An `INSTEAD OF` trigger writes through a view |
+| `EXPLAIN EXPLAIN` | `unsupported: nested EXPLAIN` |
+| `RETURNING` inside a trigger | `unsupported: RETURNING is not available in triggers` |
+| `UPDATE` or `DELETE` of a `sqlite_schema` row | `only an INSERT into sqlite_schema is built, not an UPDATE or a DELETE` |
 
-## Where this differs in behaviour rather than in output
+### Refused for other reasons
 
-| | inillucent | SQLite 3.53.4 |
+| Construct | Why |
+|---|---|
+| `load_extension()` | inillucent has no C extension interface. FTS5, R-Tree and vector search are built in |
+| `CREATE INDEX ... USING inillucent_hnsw (a, b)` | a vector index covers one column. SQLite has no vector index |
+| `.expert` and `.session` | the two of `sqlite3`'s 65 dot commands the shell does not have |
+| `fts5()`, `fts5_locale()`, `fts5_get_locale()`, `fts5_insttoken()` | a call fails with `unable to use function ... in the requested context` |
+| `fts3_tokenizer()` | a call fails with `no such function` |
+| the modules `fts4aux` and `fts3tokenize` | `CREATE VIRTUAL TABLE` fails with `no such module`. `fts5vocab` is the FTS5 equivalent and is present |
+| opening a SQLite file | inillucent writes its own file format. Import a SQLite file with [`inillucent migrate`](migrating.md) |
+
+## How inillucent behaves differently from SQLite
+
+These differences change how an application runs, and they do not show up in a probe's output.
+
+| Topic | inillucent | SQLite 3.53.4 |
 |---|---|---|
-| file format | `.rdb`, with its own redo log segments | SQLite's |
-| page size | 32 KiB by default, 8 to 64 KiB allowed | 4 KiB by default |
-| page cache | a pool of frames, 4,096 frames at 128 MiB by default, set when the file is opened. A frame's page is allocated the first time that frame is claimed, so the budget is a ceiling rather than an amount taken at open | `cache_size`, 2 MiB by default, also grown into |
-| journal modes | all six, and `delete` is the default as it is in SQLite. `PRAGMA journal_mode = wal` selects the redo log, and a database left in WAL reopens in WAL. What the mode selects here is how a **checkpoint** is protected: an application's `ROLLBACK` is undone from the log under every mode, including `off`, so `memory` and `off` are one choice rather than two | six |
-| writers | one at a time; a reader waits for a writer, and is refused with `busy` after `PRAGMA busy_timeout` | one at a time; readers block in rollback mode, not in WAL |
-| processes on one file | many, under `PRAGMA locking_mode = normal` | many, over byte range locks |
-| threads | one | serialised or multi thread |
-| rollback | an undo buffer of before images, for rows and for schema | rollback journal or WAL |
-| a transaction larger than the page pool | must fit. The pool does not evict a dirty page before its commit | spills to the journal |
-| a `SELECT` result | produced when the first row is stepped; later steps walk rows already produced | streamed one row per step |
+| File format | `.rdb`, with its own log segments | SQLite's format |
+| Page size | 32 KiB | 4 KiB by default |
+| Page cache | 4,096 frames of 32 KiB, 128 MiB, fixed when the file is opened. `PRAGMA cache_size` reports `-131072`. A frame's memory is allocated the first time the frame is used | `cache_size`, 2 MiB by default |
+| Journal modes | all six. `delete` is the default. `PRAGMA journal_mode = wal` selects the write ahead log, and the file reopens in WAL mode | all six, `delete` by default |
+| Writers | one at a time. A second writer waits up to `PRAGMA busy_timeout` (5000 ms by default) and then fails with `busy` | one at a time |
+| Readers during a write | a reader waits for the writer, and fails with `busy` after `PRAGMA busy_timeout` | in WAL mode, a reader does not wait |
+| Processes on one file | several, with `PRAGMA locking_mode = normal`, the default | several |
+| Threads | one. The engine is single threaded | serialised or multithreaded |
+| A transaction larger than the page cache | allowed under `delete`, `truncate` and `persist`. Under `wal`, `memory` and `off`, the transaction fails when it changes more pages than the cache holds | spills to the journal |
+| A `SELECT` result | computed when the first row is stepped. Later steps return rows already computed | computed one row per step |
 
-Two of those are limits worth planning around. A transaction that writes more pages than the pool
-holds needs a larger pool, set when the file is opened. And a `DROP TABLE` cannot be undone inside a
-transaction: attempting it leaves the connection unable to read that table.
+**Multiple processes.** Two processes can write the same file, one at a time. The number of rows in
+the file equals the number of commits acknowledged. `crates/inillucent-compat/tests/process_concurrency.rs`
+checks this with two real writer processes. [Roadmap](roadmap.md) describes the change that would let a
+reader run while a writer works.
 
-### Four smaller differences, each with a test that holds it still
+**`PRAGMA locking_mode = exclusive`.** `normal` is the default, as in SQLite. With `exclusive`, the
+engine keeps the file locked between statements, so a second process waits for the first to close.
+A program that never opens a second connection can use `exclusive` to save work: under `normal`, the
+engine reads the file header and the end of the log again before each statement.
 
-A correctness audit measured these and they are not fixed. Each one has a test asserting
-the behaviour as it is, so a change to any of them is a change somebody made on purpose.
+**A large transaction.** Under `wal`, `memory` and `off`, a changed page cannot be written to the
+file before its commit, and it cannot be dropped from memory either. The transaction fails with an
+error that names how many pages it changed. A larger page cache, or the `delete` journal mode, lifts
+the limit.
 
-| | inillucent | SQLite 3.53.4 |
+### Smaller differences
+
+| Topic | inillucent | SQLite 3.53.4 |
 |---|---|---|
-| `pragma_foreign_keys` as a table-valued function | not offered. The table-valued forms are the pragmas that answer rows; `foreign_keys` is a setting and is reachable as `PRAGMA foreign_keys` | offered, one row holding the flag |
-| an index on a `VIRTUAL` generated column | refused. `CREATE INDEX` needs a stored value to key on, and a `VIRTUAL` column has none in the row | allowed; the index stores the computed value |
-| `vector-search`'s result columns | the primary key appears twice: once as the table's own column and once as the column the search names | no equivalent; SQLite has no vector search |
-| a JSON-text vector handed to the `inillucent_search` hybrid table | refused as `syntax`, which does not say that the argument was the wrong shape | no equivalent |
+| `SELECT * FROM pragma_foreign_keys` | fails with `no such table: pragma_foreign_keys`. Use `PRAGMA foreign_keys` | returns one row with the setting |
+| an index on a `VIRTUAL` generated column | refused with `an index on a column the tree does not carry`. A `STORED` generated column can be indexed | allowed. The index stores the computed value |
+| `inillucent vector-search` result columns | the primary key appears twice: once as the table's column, and once as the column the search adds | no vector search |
+| an `inillucent_search` insert with a vector of the wrong length | fails with status `syntax` and the message `SQL logic error`, which does not name the vector | no vector search |
 
-The first two are also absent from `inillucent capabilities`, which is why they are written down
-here: the capability table is checked against the running engine in both directions, and a row that
-does not exist is the one thing it cannot check.
+A vector written to an `inillucent_search` table as JSON text, such as `'[1,0,0,0]'`, is accepted
+and stored as a blob.
 
 ## Reproducing the probe
 
 ```sh
-cargo build --release
-pwsh tools/sqlite-reference.ps1      # the pinned SQLite 3.53.4 oracle, on Windows
-bash tools/sqlite-reference.sh       # on Linux
-cargo run -p inillucent-compat --bin inillucent-manifest -- check
-cargo run -p inillucent-compat --bin inillucent-manifest -- report
+cargo build --release --bin inillucent-shell
+pwsh tools/sqlite-reference.ps1          # the pinned SQLite 3.53.4, on Windows
+bash tools/sqlite-reference.sh           # the same, on Linux
+node tools/feature-probe/run.js          # all 416 cases
+node tools/feature-probe/registers.js    # SQLite's own lists against inillucent's
 ```
 
-[Repository](repository.md) covers the test runner and the rest of the assurance program.
+The results are written to `_agent_output/feature-probe/results.json`. The file holds each script,
+both outputs and the verdict. [Repository](repository.md) covers the test runner and the other
+checks.

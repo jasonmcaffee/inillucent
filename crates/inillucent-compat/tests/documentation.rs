@@ -1376,3 +1376,744 @@ fn between<'a>(text: &'a str, opens: &str, closes: &str) -> &'a str {
         .unwrap_or_else(|| panic!("the document has no {closes} after {opens}"));
     rest.get(..end).unwrap_or_default()
 }
+
+/// Reads one of the list files in `tools/doc-style/`: one entry per line, with
+/// blank lines and `#` comments left out.
+///
+/// @param name - the file name inside `tools/doc-style/`
+fn style_list(name: &str) -> Vec<String> {
+    let path = workspace_root().join("tools/doc-style").join(name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("{} is missing", path.display()))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Returns every Markdown file `tools/doc-style/scope.txt` names.
+fn style_scope() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    for entry in style_list("scope.txt") {
+        let path = root.join(&entry);
+        if path.is_dir() {
+            walk(&path, &mut found);
+        } else if path.is_file() {
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Words joined by a hyphen that prose may use, because somebody else chose
+/// the name. `tools/doc-style/check.mjs` holds the same list.
+const ALLOWED_HYPHENATED: [&str; 7] = [
+    "b-tree", "b-trees", "r-tree", "r-trees", "mach-o", "p-value", "p-values",
+];
+
+/// File name endings that mark a word as a file name. `check.mjs` holds the
+/// same list.
+const FILE_EXTENSIONS: [&str; 30] = [
+    "md", "rs", "toml", "json", "mjs", "js", "ts", "tsx", "ps1", "sh", "rdb", "db", "txt", "yml",
+    "yaml", "py", "go", "php", "h", "c", "exe", "dll", "so", "dylib", "pkg", "deb", "rpm", "zip",
+    "gz", "onnx",
+];
+
+/// Turns one Markdown file into prose lines, one per line of the file.
+///
+/// A line in a fenced block becomes an empty string. A line between
+/// `<!-- doc-style: off -->` and `<!-- doc-style: on -->` becomes `None`, so
+/// it is not checked at all. This is `proseLines` in `check.mjs`.
+///
+/// @param text - the whole file
+fn prose_lines(text: &str) -> Vec<Option<String>> {
+    let mut out = Vec::new();
+    let mut fence: Option<&str> = None;
+    let mut comment = false;
+    let mut off = false;
+    for line in text.lines() {
+        if line.contains("<!-- doc-style: off -->") {
+            off = true;
+        }
+        if line.contains("<!-- doc-style: on -->") {
+            off = false;
+            out.push(None);
+            continue;
+        }
+        if off {
+            out.push(None);
+            continue;
+        }
+        let trimmed = line.trim_start();
+        let marker = if trimmed.starts_with("```") {
+            Some("```")
+        } else if trimmed.starts_with("~~~") {
+            Some("~~~")
+        } else {
+            None
+        };
+        if let Some(open) = fence {
+            if marker == Some(open) {
+                fence = None;
+            }
+            out.push(Some(String::new()));
+            continue;
+        }
+        if marker.is_some() {
+            fence = marker;
+            out.push(Some(String::new()));
+            continue;
+        }
+        let mut prose = line.to_string();
+        if comment {
+            match prose.find("-->") {
+                None => {
+                    out.push(Some(String::new()));
+                    continue;
+                }
+                Some(end) => {
+                    prose = prose.get(end + 3..).unwrap_or_default().to_string();
+                    comment = false;
+                }
+            }
+        }
+        while let Some(open) = prose.find("<!--") {
+            let after = prose.get(open + 4..).unwrap_or_default();
+            match after.find("-->") {
+                None => {
+                    prose.truncate(open);
+                    comment = true;
+                    break;
+                }
+                Some(close) => {
+                    let rest = after.get(close + 3..).unwrap_or_default().to_string();
+                    prose = format!("{} {rest}", prose.get(..open).unwrap_or_default());
+                }
+            }
+        }
+        out.push(Some(strip_inline(&prose)));
+    }
+    out
+}
+
+/// Removes inline code: a run of backticks up to the next run of the same
+/// length.
+///
+/// @param line - one line of Markdown
+fn without_inline_code(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut at = 0;
+    while at < chars.len() {
+        if chars.get(at) != Some(&'`') {
+            out.extend(chars.get(at));
+            at += 1;
+            continue;
+        }
+        let mut run = 0;
+        while chars.get(at + run) == Some(&'`') {
+            run += 1;
+        }
+        let mut close = None;
+        let mut look = at + run;
+        while look + run <= chars.len() {
+            let is_run = (look..look + run).all(|index| chars.get(index) == Some(&'`'));
+            if is_run && chars.get(look + run) != Some(&'`') {
+                close = Some(look);
+                break;
+            }
+            look += 1;
+        }
+        match close {
+            None => {
+                out.extend(chars.get(at..).unwrap_or_default());
+                break;
+            }
+            Some(end) => {
+                out.push_str(" CODE ");
+                at = end + run;
+            }
+        }
+    }
+    out
+}
+
+/// Removes everything from `open` to the next `close`, both included, and
+/// leaves `replacement` in its place.
+///
+/// @param line - the text
+/// @param open - where a removed part starts
+/// @param close - where it ends
+/// @param replacement - what is left behind
+fn without_between(line: &str, open: &str, close: &str, replacement: &str) -> String {
+    let mut out = line.to_string();
+    let mut from = 0;
+    while let Some(found) = out.get(from..).and_then(|rest| rest.find(open)) {
+        let at = from + found;
+        let Some(end) = out.get(at + open.len()..).and_then(|rest| rest.find(close)) else {
+            break;
+        };
+        let end = at + open.len() + end + close.len();
+        out = format!(
+            "{}{replacement}{}",
+            out.get(..at).unwrap_or_default(),
+            out.get(end..).unwrap_or_default()
+        );
+        from = at + replacement.len();
+    }
+    out
+}
+
+/// Removes the punctuation around a word.
+///
+/// @param word - one whitespace separated word
+fn trim_word(word: &str) -> &str {
+    word.trim_start_matches(|ch: char| "([{\"'*_".contains(ch))
+        .trim_end_matches(|ch: char| ")]}\"'*_,.;:!?".contains(ch))
+}
+
+/// Reports whether one word names a path, a URL or a file.
+///
+/// @param word - one whitespace separated word
+fn is_path_or_file(word: &str) -> bool {
+    if word.contains('/') || word.contains('\\') {
+        return true;
+    }
+    let bare = trim_word(word);
+    match bare.rfind('.') {
+        Some(dot) if dot > 0 => {
+            let ending = bare.get(dot + 1..).unwrap_or_default().to_lowercase();
+            FILE_EXTENSIONS.contains(&ending.as_str())
+        }
+        _ => false,
+    }
+}
+
+/// Removes what is not prose from one line and joins the rest with single
+/// spaces. This is `stripInline` in `check.mjs`.
+///
+/// @param line - one line, already outside any fenced block
+fn strip_inline(line: &str) -> String {
+    let prose = without_inline_code(line);
+    let trimmed = prose.trim_start();
+    if trimmed.starts_with('[') {
+        if let Some(close) = trimmed.find("]:") {
+            let label = trimmed.get(1..close).unwrap_or_default();
+            let next = trimmed
+                .get(close + 2..)
+                .and_then(|rest| rest.chars().next());
+            if !label.is_empty() && !label.contains(']') && next.is_some_and(char::is_whitespace) {
+                return String::new();
+            }
+        }
+    }
+    let prose = without_between(&prose, "](", ")", "] ");
+    let prose = without_between(&prose, "<", ">", " ");
+    prose
+        .split_whitespace()
+        .map(|word| if is_path_or_file(word) { "PATH" } else { word })
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
+
+/// Reports whether a word is words joined by hyphens that the rules do not
+/// allow.
+///
+/// @param word - one whitespace separated word
+fn is_hyphenated(word: &str) -> bool {
+    let bare = trim_word(word);
+    let parts: Vec<&str> = bare.split('-').collect();
+    if parts.len() < 2
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_alphabetic()))
+    {
+        return false;
+    }
+    let lower = bare.to_lowercase();
+    if ALLOWED_HYPHENATED.contains(&lower.as_str()) || bare == bare.to_uppercase() {
+        return false;
+    }
+    !lower.starts_with("inillucent-")
+}
+
+/// Finds `phrase` in `text` where it stands as whole words.
+///
+/// @param text - lower cased prose
+/// @param phrase - a lower cased phrase from `rules.txt`
+fn contains_phrase(text: &str, phrase: &str) -> bool {
+    let word_char = |ch: Option<char>| {
+        ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    };
+    let mut from = 0;
+    while let Some(found) = text.get(from..).and_then(|rest| rest.find(phrase)) {
+        let at = from + found;
+        let before = text.get(..at).and_then(|head| head.chars().next_back());
+        let after = text
+            .get(at + phrase.len()..)
+            .and_then(|rest| rest.chars().next());
+        if !word_char(before) && !word_char(after) {
+            return true;
+        }
+        from = at + 1;
+        while !text.is_char_boundary(from) {
+            from += 1;
+        }
+    }
+    false
+}
+
+/// Returns every writing rule one line breaks. This is `problemsIn` in
+/// `check.mjs`.
+///
+/// @param prose - the line with code, links and paths removed
+/// @param raw - the line as written; an em dash is refused even in code
+/// @param rules - the lower cased phrases from `rules.txt`
+fn style_problems(prose: &str, raw: &str, rules: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    if raw.contains('\u{2014}') {
+        found.push("em dash".to_string());
+    }
+    if prose.contains('\u{2013}') {
+        found.push("en dash".to_string());
+    }
+    let words: Vec<&str> = prose.split(' ').filter(|word| !word.is_empty()).collect();
+    let mut first = 0;
+    if words.first() == Some(&">") {
+        first += 1;
+    }
+    if let Some(marker) = words.get(first) {
+        let numbered = marker.len() > 1
+            && marker.ends_with(['.', ')'])
+            && marker
+                .get(..marker.len() - 1)
+                .is_some_and(|digits| digits.chars().all(|ch| ch.is_ascii_digit()));
+        if ["-", "*", "+"].contains(marker) || numbered {
+            first += 1;
+        }
+    }
+    let body = words.get(first..).unwrap_or_default();
+    for index in 1..body.len().saturating_sub(1) {
+        let word = body.get(index).copied().unwrap_or_default();
+        let before = body.get(index - 1).copied().unwrap_or_default();
+        let after = body.get(index + 1).copied().unwrap_or_default();
+        if (word == "-" || word == "--") && before != "|" && after != "|" {
+            found.push("a spaced hyphen used as a dash".to_string());
+            break;
+        }
+    }
+    for word in body {
+        if is_hyphenated(word) {
+            found.push(format!("hyphenated word \"{}\"", trim_word(word)));
+        }
+    }
+    let lower = body.join(" ").to_lowercase();
+    for phrase in rules {
+        if contains_phrase(&lower, phrase) {
+            found.push(format!("banned \"{phrase}\""));
+        }
+    }
+    found
+}
+
+/// No page breaks the writing rules in `docs/writing-style.md`.
+///
+/// **The documentation was rewritten because it had drifted into the same
+/// writing habits on every page (task-2123).** A scan before the rewrite found
+/// 1,857 problems in 53 files: em dashes, spaced hyphens used as dashes,
+/// hyphenated compounds, and phrases such as "rather than" used for contrast.
+/// A style guide alone does not stop them coming back, so the rules are a
+/// test. The rules and the list of files are read from `tools/doc-style/`,
+/// the same files `node tools/doc-style/check.mjs` reads, and that script
+/// prints the same problems in a second while a page is being written.
+#[test]
+fn no_page_breaks_the_writing_rules() {
+    let root = workspace_root();
+    let rules: Vec<String> = style_list("rules.txt")
+        .iter()
+        .map(|phrase| phrase.to_lowercase())
+        .collect();
+    assert!(
+        rules.len() > 50,
+        "tools/doc-style/rules.txt holds {} phrases, which looks like a file that failed to read",
+        rules.len()
+    );
+    let files = style_scope();
+    assert!(
+        files.len() > 40,
+        "tools/doc-style/scope.txt names {} Markdown files, which looks like a scope that failed to read",
+        files.len()
+    );
+    let mut problems = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(file).expect("the page reads");
+        let raw: Vec<&str> = text.lines().collect();
+        for (index, prose) in prose_lines(&text).iter().enumerate() {
+            let Some(prose) = prose else {
+                continue;
+            };
+            let line = raw.get(index).copied().unwrap_or_default();
+            for problem in style_problems(prose, line, &rules) {
+                let relative = file.strip_prefix(&root).unwrap_or(file);
+                problems.push(format!("{}:{}: {problem}", relative.display(), index + 1));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} line(s) break the rules in docs/writing-style.md. `node tools/doc-style/check.mjs` \
+         prints the same list with each line's text:\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// The writing rules find what they are meant to find.
+///
+/// A check that passes because it matches nothing would pass on every page, so
+/// each rule is shown one line it refuses and one it accepts.
+#[test]
+fn the_writing_rules_refuse_what_they_name() {
+    let rules = vec!["rather than".to_string()];
+    let check = |line: &str| style_problems(&strip_inline(line), line, &rules);
+    assert_eq!(
+        check("A read-only file."),
+        vec!["hyphenated word \"read-only\""]
+    );
+    assert!(check("A read only file, a B-tree, `read-only` and docs/read-only.md.").is_empty());
+    assert_eq!(check("Fast \u{2014} and small."), vec!["em dash"]);
+    assert_eq!(
+        check("Fast - and small."),
+        vec!["a spaced hyphen used as a dash"]
+    );
+    assert!(check("- a list item").is_empty());
+    assert!(check("| a | - | b |").is_empty());
+    assert_eq!(
+        check("Use this rather than that."),
+        vec!["banned \"rather than\""]
+    );
+    assert!(check("Use this instead of that; a rather thankless job.").is_empty());
+    assert!(check("See [the rather than page](rather-than.md).").len() == 1);
+    let lines = prose_lines("text\n```\nrather than\n```\n<!-- doc-style: off -->\nrather than\n<!-- doc-style: on -->\n");
+    assert_eq!(lines.iter().filter(|line| line.is_none()).count(), 3);
+    assert_eq!(lines.get(2), Some(&Some(String::new())));
+}
+
+/// Reads the list of directories `Repair-StagedLink` turns links into plain
+/// text for, and its table of exact rewrites.
+///
+/// Both are parsed out of `packaging/stage-layout.ps1`, so this test cannot
+/// disagree with the script it stands in for.
+fn staging_rules() -> (Vec<String>, Vec<(String, String, String)>) {
+    let script = std::fs::read_to_string(workspace_root().join("packaging/stage-layout.ps1"))
+        .expect("packaging/stage-layout.ps1 reads");
+    let quoted = |text: &str, key: &str| -> Option<String> {
+        let start = text.find(key)? + key.len();
+        let rest = text.get(start..)?;
+        Some(rest.get(..rest.find('\'')?)?.to_string())
+    };
+    let never_line = script
+        .lines()
+        .find(|line| line.trim_start().starts_with("$neverStaged = @("))
+        .expect("stage-layout.ps1 declares $neverStaged");
+    let never: Vec<String> = never_line
+        .split('\'')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect();
+    let mut rewrites = Vec::new();
+    for line in script.lines() {
+        let line = line.trim_start();
+        if !line.starts_with("@{ File = '") {
+            continue;
+        }
+        if let (Some(file), Some(from), Some(to)) = (
+            quoted(line, "File = '"),
+            quoted(line, "From = '"),
+            quoted(line, "To = '"),
+        ) {
+            rewrites.push((file, from, to));
+        }
+    }
+    assert!(
+        never.len() >= 5 && rewrites.len() >= 5,
+        "could not read the staging rules out of stage-layout.ps1 ({} directories, {} rewrites)",
+        never.len(),
+        rewrites.len()
+    );
+    (never, rewrites)
+}
+
+/// Resolves `href` against the directory of a staged page, or returns `None`
+/// when it climbs out of the archive.
+///
+/// @param page - the page's path inside the archive, with `/` separators
+/// @param href - the link target, without its `#fragment`
+fn resolve_in_archive(page: &str, href: &str) -> Option<String> {
+    let mut parts: Vec<&str> = page.split('/').collect();
+    parts.pop();
+    for piece in href.split('/') {
+        match piece {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Every relative link in the documents a release archive carries resolves
+/// inside that archive.
+///
+/// **A dead link in a staged document stops a release, and nothing noticed it
+/// until somebody cut one (task-2123).** `packaging/stage-layout.ps1` copies
+/// `README.md`, `AGENTS.md`, `docs/`, `agent-skills/`, two pages under `tests/`
+/// and `drivers/README.md` (as `DRIVER.md`) into the archive, rewrites a few
+/// links by exact text, turns links into directories the archive never carries
+/// into plain text, and then throws on any link left that does not resolve. It
+/// happened three times before this test existed, each time from a
+/// reasonable link added by a documentation change. This applies the same
+/// three steps to the repository's copies of those pages.
+#[test]
+fn every_link_in_the_release_archive_resolves() {
+    let root = workspace_root();
+    let (never, rewrites) = staging_rules();
+    let mut staged: Vec<(String, PathBuf)> = vec![
+        ("README.md".to_string(), root.join("README.md")),
+        ("AGENTS.md".to_string(), root.join("AGENTS.md")),
+        ("DRIVER.md".to_string(), root.join("drivers/README.md")),
+        (
+            "tests/synthetic-corpus.md".to_string(),
+            root.join("tests/synthetic-corpus.md"),
+        ),
+        (
+            "tests/inillucent-testing-tdd.md".to_string(),
+            root.join("tests/inillucent-testing-tdd.md"),
+        ),
+    ];
+    let mut members: BTreeSet<String> = staged.iter().map(|(at, _)| at.clone()).collect();
+    for directory in ["docs", "agent-skills"] {
+        let mut files = Vec::new();
+        collect_files(&root.join(directory), &mut files);
+        for file in files {
+            let relative = file
+                .strip_prefix(&root)
+                .expect("under the root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relative.ends_with(".md") {
+                staged.push((relative.clone(), file.clone()));
+            }
+            members.insert(relative);
+        }
+    }
+    for extra in [
+        "LICENSE",
+        "VERSION",
+        "include/inillucent_driver.h",
+        "docs",
+        "agent-skills",
+        "tests",
+        "include",
+        "bin",
+        "lib",
+    ] {
+        members.insert(extra.to_string());
+    }
+
+    let mut dead = Vec::new();
+    for (at, source) in &staged {
+        let mut text = std::fs::read_to_string(source).expect("a staged page reads");
+        for (file, from, to) in &rewrites {
+            if file == at {
+                text = text.replace(from.as_str(), to);
+            }
+        }
+        for href in links(&text) {
+            let bare = href.split('#').next().unwrap_or_default();
+            if bare.is_empty() {
+                continue;
+            }
+            let climbs = bare.trim_start_matches("../");
+            if never
+                .iter()
+                .any(|directory| climbs.starts_with(&format!("{directory}/")))
+            {
+                continue;
+            }
+            let target = resolve_in_archive(at, bare);
+            let found = target
+                .as_ref()
+                .is_some_and(|target| members.contains(target.trim_end_matches('/')));
+            if !found {
+                dead.push(format!("{at} -> {href}"));
+            }
+        }
+    }
+    assert!(
+        dead.is_empty(),
+        "these links would stop a release, because the archive does not carry what they point \
+         at. Link to a page that is copied into the archive, or write the name in backticks:\n{}",
+        dead.join("\n")
+    );
+}
+
+/// Collects every file under a directory.
+///
+/// @param directory - where to look
+/// @param into - the list to extend
+fn collect_files(directory: &Path, into: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, into);
+        } else {
+            into.push(path);
+        }
+    }
+}
+
+/// Returns the anchor GitHub gives a heading.
+///
+/// Lower case, with every character that is not a letter, a digit, a space,
+/// a hyphen or an underscore removed, and each space turned into a hyphen.
+/// Backticks and asterisks go with the other punctuation.
+///
+/// @param heading - the heading text after the `#` marks
+fn heading_anchor(heading: &str) -> String {
+    heading
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || *ch == ' ' || *ch == '-' || *ch == '_')
+        .map(|ch| if ch == ' ' { '-' } else { ch })
+        .collect()
+}
+
+/// Returns every anchor a page defines: one per heading, numbered the way
+/// GitHub numbers a repeated heading, and every `<a id="...">`.
+///
+/// @param text - the page's markdown
+fn anchors_defined(text: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let hashes = line.chars().take_while(|ch| *ch == '#').count();
+        if (1..=6).contains(&hashes) && line.chars().nth(hashes) == Some(' ') {
+            let base = heading_anchor(line.get(hashes + 1..).unwrap_or_default());
+            let count = seen.entry(base.clone()).or_insert(0);
+            found.insert(if *count == 0 {
+                base.clone()
+            } else {
+                format!("{base}-{count}")
+            });
+            *count += 1;
+        }
+        let mut rest = line;
+        while let Some(at) = rest.find("<a id=\"") {
+            let after = rest.get(at + 7..).unwrap_or_default();
+            if let Some(end) = after.find('"') {
+                found.insert(after.get(..end).unwrap_or_default().to_string());
+            }
+            rest = after;
+        }
+    }
+    found
+}
+
+/// Every `page.md#anchor` link in a page names an anchor the target page has.
+///
+/// **The rewrite renamed headings, and a renamed heading leaves every link to
+/// it pointing nowhere (task-2123).** GitHub opens the page at its top when
+/// the anchor is missing, so nothing looks broken to the person who wrote the
+/// link. Six such links were found while the documentation was rewritten.
+/// The pages covered are the ones `tools/doc-style/scope.txt` names.
+#[test]
+fn every_anchor_a_page_links_to_exists() {
+    let root = workspace_root();
+    let mut broken = Vec::new();
+    let mut checked = 0usize;
+    for page in style_scope() {
+        let text = std::fs::read_to_string(&page).expect("the page reads");
+        let directory = page.parent().map(Path::to_path_buf).unwrap_or_default();
+        let mut at = 0usize;
+        while let Some(found) = text.get(at..).and_then(|rest| rest.find("](")) {
+            let start = at + found + 2;
+            let Some(end) = text.get(start..).and_then(|rest| rest.find(')')) else {
+                break;
+            };
+            let href = text.get(start..start + end).unwrap_or_default();
+            at = start + end;
+            let Some((target, anchor)) = href.split_once('#') else {
+                continue;
+            };
+            if href.starts_with("http") || anchor.is_empty() || href.contains(' ') {
+                continue;
+            }
+            let destination = if target.is_empty() {
+                page.clone()
+            } else {
+                directory.join(target)
+            };
+            if !target.is_empty() && !target.ends_with(".md") {
+                continue;
+            }
+            let Ok(destination_text) = std::fs::read_to_string(&destination) else {
+                continue;
+            };
+            checked += 1;
+            if !anchors_defined(&destination_text).contains(anchor) {
+                let relative = page.strip_prefix(&root).unwrap_or(&page);
+                broken.push(format!("{} -> {href}", relative.display()));
+            }
+        }
+    }
+    assert!(
+        checked > 20,
+        "only {checked} anchor links were read, which looks like a check that found nothing to check"
+    );
+    assert!(
+        broken.is_empty(),
+        "these links name an anchor the target page does not have. Link to the heading's current \
+         anchor, or put `<a id=\"old-anchor\"></a>` above the renamed heading:\n{}",
+        broken.join("\n")
+    );
+}
+
+/// The anchor rule matches GitHub's for the headings these pages use.
+#[test]
+fn heading_anchors_follow_githubs_rule() {
+    assert_eq!(
+        heading_anchor("5. The log, and what a crash costs"),
+        "5-the-log-and-what-a-crash-costs"
+    );
+    assert_eq!(
+        heading_anchor("Hybrid search: the `inillucent_search` table"),
+        "hybrid-search-the-inillucent_search-table"
+    );
+    assert_eq!(
+        heading_anchor("What a file's format version promises"),
+        "what-a-files-format-version-promises"
+    );
+    let defined =
+        anchors_defined("## Notes\n\n## Notes\n<a id=\"old\"></a>\n```\n## not a heading\n```\n");
+    assert!(defined.contains("notes") && defined.contains("notes-1") && defined.contains("old"));
+    assert!(!defined.contains("not-a-heading"));
+}

@@ -109,31 +109,28 @@ pub fn pragma_page() -> String {
 
     let mut out = String::new();
     out.push_str("# Pragmas\n\n");
-    out.push_str("Every `PRAGMA` this engine recognises. **Generated** from\n");
-    out.push_str("`inillucent_sql::pragma_register::REGISTER` by\n");
-    out.push_str("`cargo run -p inillucent-compat --bin inillucent-obligations`, and checked by\n");
+    out.push_str("A pragma is a statement that reads or changes a setting of the database, such\n");
+    out.push_str("as `PRAGMA page_size` or `PRAGMA busy_timeout = 2000`. This page lists every\n");
+    out.push_str("pragma the engine recognises.\n\n");
     out.push_str(
-        "`cargo test -p inillucent-compat --test harness`, which fails when this page and\n",
+        "This page is generated. `cargo run -p inillucent-compat --bin inillucent-obligations`\n",
     );
-    out.push_str("the register disagree. Do not edit it by hand.\n\n");
+    out.push_str("writes it from `inillucent_sql::pragma_register::REGISTER`, and\n");
+    out.push_str("`cargo test -p inillucent-compat --test harness` fails when the page and the\n");
+    out.push_str("register differ. Do not edit it by hand.\n\n");
     out.push_str(&format!(
-        "**{} pragmas**, {} of which take an argument in parentheses.\n\n",
+        "There are **{} pragmas**. {} of them take an argument in parentheses.\n\n",
         entries.len(),
         taking
     ));
     out.push_str(
-        "A pragma this table does not list is not recognised, and answers no rows rather\n",
+        "A pragma that is not in this table is not recognised. It returns no rows and no\n",
     );
-    out.push_str(
-        "than an error - which is SQLite's own behaviour, and is why asking for one is not\n",
-    );
-    out.push_str("a way to find out whether it exists. What each one *does* is\n");
-    out.push_str(
-        "[SQL support](sql.md); what is below is what a caller has to know before writing\n",
-    );
-    out.push_str(
-        "one: its name, the columns its answer has, and whether it takes an argument.\n\n",
-    );
+    out.push_str("error, which is also what SQLite does. So running a pragma does not tell you\n");
+    out.push_str("whether the engine knows it. Check this table instead.\n\n");
+    out.push_str("The table gives each pragma's name, whether it takes an argument, and the\n");
+    out.push_str("columns of the rows it returns. [SQL support](sql.md) describes what the\n");
+    out.push_str("pragmas do.\n\n");
     out.push_str("| pragma | takes an argument | columns of its answer |\n");
     out.push_str("|---|---|---|\n");
     for entry in entries {
@@ -154,32 +151,34 @@ pub fn pragma_page() -> String {
             columns
         ));
     }
-    out.push_str("\n## The two defaults that decide what a second process sees\n\n");
+    out.push_str("\n## Two defaults that matter when several processes share a file\n\n");
     out.push_str(
-        "`busy_timeout` starts at **5000** milliseconds. It is how long a statement waits\n",
+        "`busy_timeout` starts at **5000** milliseconds. When another process holds the\n",
+    );
+    out.push_str("file, a statement waits up to this long and then fails with `busy`. Set\n");
+    out.push_str(
+        "`busy_timeout` to 0 to make the statement fail at once. `busy_timeout` applies to\n",
+    );
+    out.push_str("waits between processes and to waits inside one process.\n\n");
+    out.push_str(
+        "`locking_mode` starts at **normal**, which is also SQLite's default. In normal\n",
     );
     out.push_str(
-        "for a file another process holds before it is refused with `busy`, and setting it\n",
-    );
-    out.push_str("to 0 makes a contended statement fail at once. It governs the wait between\n");
-    out.push_str("processes as well as the one inside a process; before this the cross-process\n");
-    out.push_str("wait was a constant this pragma could not reach.\n\n");
-    out.push_str(
-        "`locking_mode` starts at **normal**, which is SQLite's default too: the file lock\n",
-    );
-    out.push_str("is released between statements, so a second process can open the database.\n");
-    out.push_str(
-        "`exclusive` keeps the lock for the connection's whole life, which is faster for a\n",
+        "mode the file lock is released between statements, so a second process can open\n",
     );
     out.push_str(
-        "program that never opens a second connection and means a second process waits out\n",
+        "the database. In `exclusive` mode the connection keeps the lock until it closes.\n",
     );
     out.push_str(
-        "that connection or is refused. A value that is neither is an error rather than a\n",
+        "`exclusive` is faster for a program that only ever opens one connection. While\n",
     );
-    out.push_str("silently kept setting.\n");
-    out.push_str("\n`compat/api/pragmas.toml` is the same register in the form a program reads,\n");
-    out.push_str("and `docs/README.md` lists this page in its reading order.\n");
+    out.push_str(
+        "it holds the lock, a second process waits for `busy_timeout` and then fails. Any\n",
+    );
+    out.push_str("value other than `normal` or `exclusive` is an error.\n");
+    out.push_str(
+        "\n`compat/api/pragmas.toml` holds the same register in a form a program can read.\n",
+    );
     out
 }
 

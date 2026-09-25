@@ -1,8 +1,26 @@
 # A RAG example your agent can run
 
-A database of Greek philosophy that is **already built and already embedded**. Install the embedding
-model, point your coding agent at this directory, and ask it a question. There is no corpus to
-download, nothing to index, and no code to write.
+This directory holds `greek-philosophy.rdb`, a database of Greek and Roman philosophy. The database
+is already built, and every passage in it already has an embedding. Install the embedding model,
+start your coding agent in this directory, and ask it a question. You do not download a corpus,
+build an index or write code.
+
+RAG (retrieval augmented generation) means the agent searches a database first and writes its answer
+from the passages the search returns.
+
+## Terms used on this page
+
+| Term | Meaning |
+|---|---|
+| embedding | a list of numbers that stands for the meaning of a piece of text. Texts with similar meanings get similar lists |
+| cosine distance | how far apart two embeddings are. 0 is the same direction. Smaller means closer in meaning |
+| FTS5 | SQLite's full text search table. inillucent reads the same `CREATE VIRTUAL TABLE ... USING fts5` statement |
+| BM25 | the formula a full text search uses to rank passages that contain the search words |
+| HNSW | an index that finds the nearest embeddings without comparing against every row |
+
+The [glossary](../../docs/glossary.md) explains these and other terms in one sentence each.
+
+## What a run looks like
 
 ```
 you:    who was Seneca?
@@ -23,50 +41,61 @@ agent:  $ inillucent --db greek-philosophy.rdb query \
         Source: Seneca the Younger (https://en.wikipedia.org/wiki/Seneca_the_Younger)
 ```
 
-That is what a local Qwen answered the first time it was asked, through opencode, with nothing to go
-on but `AGENTS.md` and the question — screenshots below. It is reproduced as it ran, which is why the
-query has the question in a subquery: writing `embed` directly in the `ORDER BY` used to
-call the model once per row and take 105 seconds instead of one and a half. Both shapes still
-return the same five passages; the plain one is the one to write now.
+This is the first answer a local Qwen model gave through opencode. The agent had only `AGENTS.md` and
+the question. The agent put `embed` in a subquery. The shorter query in
+[Search by meaning](#by-meaning) returns the same five passages.
+
+```mermaid
+flowchart LR
+    A["You ask a question"] --> B["The agent reads AGENTS.md"]
+    B --> C["The agent runs inillucent query or inillucent search"]
+    C --> D["greek-philosophy.rdb returns five passages"]
+    D --> E["The agent answers and names the articles"]
+```
 
 ## Setup
 
-One command, and about 620 MB the first time.
+Install the embedding model. The download is about 620 MB the first time.
 
 ```sh
 inillucent setup-embeddings all
 ```
 
-That fetches ONNX Runtime and the `nomic-embed-text-v1.5` weights into a per-user directory, checks
-every byte against a digest pinned in the build, and leaves the engine able to answer `embed(TEXT)`.
-Nothing has to be exported afterwards — the engine looks where the command put things. Check it:
+`inillucent setup-embeddings all` downloads ONNX Runtime and the `nomic-embed-text-v1.5` model into a
+folder for your user. The command checks every file against a digest stored in the build. You do not
+set any environment variable afterwards. Check that `embed` answers:
 
 ```sh
 inillucent query "SELECT length(embed('hello'))"
-3072
 ```
 
-If that says `no such function: embed`, the binary you have was built without the embedding feature,
-which is what the published 0.1.1 archives are. The 0.1.2 archives carry it, because
-`packaging/release-all.ps1` passes `--features inillucent-cli/embed`, so upgrading fixes it. Building
-the command line from a checkout is the other way:
-`cargo build --release -p inillucent-cli --features inillucent-cli/embed`.
+The answer is `3072`: 768 numbers of 4 bytes each.
 
-Then start your agent with this directory as its working directory. `AGENTS.md` is here for it
-(`CLAUDE.md` imports the same file), and it carries the two commands and the one rule that is easy to
-get wrong.
+The published release archives are built with the `embed` feature. A build from a checkout needs the
+feature named:
 
-## An agent actually doing it
+```sh
+cargo build --release -p inillucent-cli --features inillucent-cli/embed
+```
 
-Both of these are opencode driving a local Qwen through llama.cpp, in this directory, with no
-instruction beyond the question. It read `AGENTS.md`, ran `inillucent`, and answered from what came
-back.
+A build without the `embed` feature answers `embed(TEXT): this build has no embedding support
+compiled in` and exits with code 3. A build with the feature and no model installed answers
+`embed: no embedding model is installed` and names `inillucent setup-embeddings`.
 
-![The agent answering "who was Seneca?" — the inillucent query it ran and the JSON it got back, then its answer citing the article](images/agent-who-was-seneca.png)
+Then start your agent with this directory as its working directory. `AGENTS.md` tells the agent the
+two commands and the rules for answering. `CLAUDE.md` imports `AGENTS.md`.
 
-Asked something the corpus only answers in pieces, it gathers the pieces and says where each came
-from — Chrysippus on the soul as fire, Marcus Aurelius on meeting death, the Stoicism and Substance
-theory articles for the frame:
+## The agent at work
+
+Both screenshots show opencode driving a local Qwen model through llama.cpp in this directory. The
+agent had no instruction beyond the question. The agent read `AGENTS.md`, ran `inillucent`, and
+answered from the rows it got back.
+
+![The agent answering "who was Seneca?": the inillucent query it ran, the JSON it got back, and its answer citing the article](images/agent-who-was-seneca.png)
+
+The corpus answers the next question in pieces. The agent collects the pieces and names the article
+each came from: Chrysippus on the soul as fire, Marcus Aurelius on meeting death, and the Stoicism
+and Substance theory articles for the general ideas.
 
 ![The agent answering "what did the Stoics believe about death?" with four passages, each attributed to its article](images/agent-stoics-on-death.png)
 
@@ -74,11 +103,11 @@ theory articles for the frame:
 
 | | |
 |---|---|
-| articles | 80 Wikipedia pages on Greek and Roman philosophy |
-| passages | 2,661, about 1,100 characters each |
-| embeddings | `nomic-embed-text-v1.5`, 768 dimensions, full precision |
-| indexes | an FTS5 table over the text. No vector index — see below |
-| size | 21 MB, committed |
+| articles | 80 Wikipedia articles on Greek and Roman philosophy |
+| passages | 2,661, 1,022 characters each on average |
+| embeddings | `nomic-embed-text-v1.5`, 768 dimensions, 32 bit floats |
+| indexes | an FTS5 table over the text. There is no vector index. [No HNSW index](#there-is-no-hnsw-index-on-this-table) says why |
+| size | 21 MB, committed to the repository |
 
 ```sql
 CREATE TABLE passage (
@@ -91,10 +120,10 @@ CREATE TABLE passage (
 CREATE VIRTUAL TABLE passage_fts USING fts5(id, title, body);
 ```
 
-The articles are the ancient tradition end to end — Thales to Proclus, with the Stoics, Epicureans,
-Cynics, Sceptics and Neoplatonists in between — and the concept pages the questions land on.
-`corpus/ATTRIBUTION.md` lists every one of them with a link, and `scripts/select-corpus.py` says why
-it is a list of titles rather than a rule.
+The articles cover the ancient tradition from Thales to Proclus. They include the Stoics, Epicureans,
+Cynics, Sceptics and Neoplatonists, and the concept pages that questions usually ask about.
+`corpus/ATTRIBUTION.md` lists every article with a link. `scripts/select-corpus.py` explains why the
+articles are chosen from a fixed list of titles instead of by Wikipedia category.
 
 ## The two searches
 
@@ -107,26 +136,25 @@ inillucent --db greek-philosophy.rdb query \
   --params '["what did the Stoics believe about death"]'
 ```
 
-Finds passages that are *about* the question. "you cannot step into the same river twice" returns
-Heraclitus without the word Heraclitus appearing in the question.
+A search by meaning finds passages about the question even when they share no words with it. "you
+cannot step into the same river twice" returns three Heraclitus passages first, and the question
+does not contain the word Heraclitus.
 
-**The `search_query: ` prefix is not decoration.** `nomic-embed-text-v1.5` is trained with
-`search_query: ` on questions and `search_document: ` on stored text, and the passages here were
-stored with the second one. Leaving the prefix off still returns rows. They are quietly worse, which
-is the kind of mistake that never announces itself.
+**Always add the `search_query: ` prefix.** `nomic-embed-text-v1.5` was trained with
+`search_query: ` in front of questions and `search_document: ` in front of stored text. The passages
+here were embedded with `search_document: `. A question without the prefix still returns rows, and
+the rows are worse matches. No error tells you so.
 
 ### There is no HNSW index on this table
 
-That is the other thing [vector search](../../docs/vector-search.md) tells you to build, and it is
-left off here on purpose: 2,661 passages is an exhaustive cosine over 8 MB of vectors, and that page
-already says to build the index when the search is slow rather than before it is.
+[Vector search](../../docs/vector-search.md) describes the HNSW index. This table has none. With
+2,661 passages, the query compares the question with every stored embedding, about 8 MB of vectors,
+and a search by meaning took 1.2 seconds, including loading the model, when this page was
+checked on 24 September 2026.
 
-Building one works. It used to not work, and the way it failed is the reason
-`scripts/verify-indexed.sh` exists: an index built over a table that already held rows reported those
-rows in the session that built it and held none the next time the file was opened, and an empty
-vector index answers zero rows rather than failing — so `CREATE INDEX` silently turned a working
-search into one that returned nothing. `scripts/verify-indexed.sh` asks the ten questions below
-through an index built over this same corpus, and requires the same articles.
+You can build an HNSW index on this table. `scripts/verify-indexed.sh` does that on a temporary copy
+of the database and asks the same ten questions as `scripts/verify.sh` through the index. Each
+question has to return the same article. The committed database is not changed.
 
 ### By word
 
@@ -134,16 +162,16 @@ through an index built over this same corpus, and requires the same articles.
 inillucent --db greek-philosophy.rdb search 'Metrodorus' --table passage_fts --k 5
 ```
 
-For an exact name or term. Semantic search is bad at rare tokens — a query for `Metrodorus` wants
-that name, not passages about vaguely similar ones — so there is a BM25 index beside the vectors.
+Use a keyword search for an exact name or term. A search by meaning is weak on rare names. A question
+about `Metrodorus` needs passages that contain that name, and the FTS5 table ranks them with BM25.
 
-## What it cannot do, and why the distance will not tell you
+## What the distance can and cannot tell you
 
-A nearest-neighbour search always returns the number of rows you asked for, however far away they
-are. Ask this corpus about Kant and five passages come back; they are the five least unrelated things
-in a database with no Kant in it.
+A nearest neighbor search always returns the number of rows you asked for, however far away they
+are. Ask this corpus about Kant and five passages come back. They are the five closest passages in
+a database that has no article on Kant.
 
-The obvious defence is the distance:
+You can read the distance of the closest passage:
 
 ```sh
 inillucent --db greek-philosophy.rdb query \
@@ -152,7 +180,8 @@ inillucent --db greek-philosophy.rdb query \
   --params '["who was Seneca"]'
 ```
 
-Measured on this corpus, it catches half of what you would want it to:
+These are the distances to the closest passage for eight questions, measured on this database on
+24 September 2026:
 
 | question | nearest |
 |---|---:|
@@ -165,47 +194,65 @@ Measured on this corpus, it catches half of what you would want it to:
 | who won the 1994 World Cup | 0.500 |
 | how do I configure a Kubernetes ingress controller | 0.533 |
 
-A question from another subject stands out. **A philosophy question this corpus cannot answer does
-not** — Kant scores as close as Seneca, because the corpus is philosophy and so is the question. So a
-large distance is worth acting on and a small one proves nothing, and the only thing that catches the
-Kant case is reading the passages. `AGENTS.md` says so to the agent, in those words.
+Questions about other subjects score 0.44 or more. The Kant question scores 0.189, between the
+questions the corpus answers. The Kant question is about philosophy and so is the corpus, so the
+embeddings are close. A large distance means the corpus does not cover the question. A small
+distance proves nothing. The only way to catch the Kant case is to read the passages. `AGENTS.md`
+tells the agent to do that.
 
-This is the same argument `docs/vector-search.md` makes with a different mechanism: a score
-normalised per result list maps the best hit of every list to 1.0, whether the list is good or
-hopeless, which is why the retrieval engine computes a separate confidence on absolute bounds. A
-plain `ORDER BY vector_distance_cos` has no such thing.
+A plain `ORDER BY vector_distance_cos` query gives you only the distance. The `inillucent_search`
+table computes a separate confidence value for each result. [Vector search](../../docs/vector-search.md)
+describes it.
 
-## Checking it still works
+## Checking the example still works
 
 ```sh
 scripts/verify.sh
 ```
 
-Ten questions, each with the article its answer has to come from, plus the keyword case and the
-vector width. Run it after an engine change — it is what catches the failure where a rebuilt corpus
-is paired with vectors made from the old one, which produces an index that looks entirely healthy
-and is entirely wrong.
+`scripts/verify.sh` asks ten questions. Each question names the article its answer has to come from.
+The script also checks that every passage has a 768 dimension vector, that a keyword search for
+`Metrodorus` finds an Epicurean article, and prints the distances for a question the corpus answers
+and questions it does not.
 
-## Rebuilding it
+Run `scripts/verify.sh` after an engine change. It catches a database where the corpus was rebuilt
+and the vectors were not. Such a database has the right number of rows and valid vectors, and every
+vector belongs to the wrong passage.
 
-Nobody needs to. The database is committed. This is here so it can be rebuilt after an engine change,
-and so the commands that made it are readable:
+Set `INILLUCENT` to use a binary that is not on your path:
+
+```sh
+INILLUCENT=/path/to/inillucent scripts/verify.sh
+```
+
+## Rebuilding the database
+
+The database is committed, so you do not need to rebuild it. Rebuild it after an engine change, or
+read the script to see how it was made:
 
 ```sh
 scripts/build-database.sh
 ```
 
-It chunks the committed corpus, loads it with `inillucent import`, embeds every passage in one
-`INSERT ... SELECT`, and builds the full-text table — using nothing but this command line. **8 minutes
-28 seconds** on the machine it was built on, of which about eight are the embedding.
+| Step | What it does |
+|---|---|
+| chunk | `scripts/chunk-corpus.py` splits `corpus/greek-philosophy.jsonl` into passages |
+| load | `inillucent import` loads the passages |
+| embed | one `INSERT ... SELECT` embeds every passage with the `search_document: ` prefix |
+| keyword index | `inillucent import` loads the text into the FTS5 table |
 
-`scripts/select-corpus.py` is the step above that: it picks the articles out of the Wikipedia
-extracts `scripts/fetch-public-corpus.sh` produces at the top of this repository. Those extracts are
-1.5 GB and are not committed, so that script is provenance rather than a step in the build.
+`scripts/build-database.sh` uses only the `inillucent` command line and Python. The build of the
+committed database took 8 minutes 28 seconds, and about eight of those minutes were the embedding
+(recorded in `tasks/task-1907-a-rag-example-an-agent-can-run-tdd.md`).
+
+`scripts/select-corpus.py` chose the articles. The script reads the Wikipedia extracts that
+`scripts/fetch-public-corpus.sh` at the top of this repository downloads. The extracts are 1.5 GB and
+are not committed, so `scripts/select-corpus.py` records how the list was made and is not part of the
+build. `scripts/write-attribution.py` writes `corpus/ATTRIBUTION.md`.
 
 ## Licence
 
 The passages are Wikipedia text under
-[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), redistributed here under that
-licence. `corpus/ATTRIBUTION.md` names every article and links to the page history its authors are
-in. Everything else in this directory is under the repository's own licence.
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), and this directory redistributes
+them under that licence. `corpus/ATTRIBUTION.md` names every article and links to the page history
+that lists its authors. Everything else in this directory is under the repository's own licence.

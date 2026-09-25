@@ -666,7 +666,9 @@ fn the_dependency_policy_covers_what_the_contract_allows() {
     let root = workspace_root();
     let policy =
         std::fs::read_to_string(root.join("docs/dependency-policy.md")).expect("the policy reads");
-    for named in ["libc", "windows-sys", "allow-list", "first-party"] {
+    // "allowed list" and "first party" are written without a hyphen because
+    // docs/writing-style.md does not allow hyphenated words in prose.
+    for named in ["libc", "windows-sys", "allowed list", "first party"] {
         assert!(
             policy.contains(named),
             "the policy does not mention `{named}`"

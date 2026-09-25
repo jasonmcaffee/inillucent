@@ -1,55 +1,53 @@
 ---
 name: A wrong answer or a crash
-about: The engine answered something it should not have, or stopped
+about: The engine returned a wrong answer, or stopped
 title: ''
 labels: ''
 assignees: ''
 ---
 
 <!--
-**Not for a security problem.** `SECURITY.md` says where those go, and a working
-exploit in a public issue puts users at risk to make a point.
+**Do not report a security problem here.** `SECURITY.md` says where to send it. A working exploit
+in a public issue puts users at risk.
 
-**Not for a missing feature.** Exit code 3, and the status `unsupported` over the
-driver and MCP, both mean "this engine has not built that" - deliberately a
-different code from 1 so a script can branch on it. `inillucent capabilities`
-enumerates what is built, and every row of it is checked against the running
-engine in both directions. If the answer is "not yet", that is a feature request
-rather than a bug.
+**Do not report a missing feature here.** Exit code 3, and the status `unsupported` from the driver
+and MCP, mean the engine has not built that feature yet. Exit code 1 means a real failure. The codes
+are separate so a script can tell them apart. `inillucent capabilities` lists what is built. If the
+feature is not built yet, open a feature request instead.
 -->
 
-## The statement, and what it answered
+## The statement, and what it returned
 
 <!--
-The smallest schema and statement that shows it. A schema and a statement, not a
-file from production - a database is somebody's data.
+The smallest schema and statement that shows the problem. Do not attach a production database,
+because it holds someone's data.
 -->
 
 ```sql
 
 ```
 
-**What it answered:**
+**What it returned:**
 
-**What it should have answered, and how you know:**
+**What it should have returned, and how you know:**
 
 <!--
-If the reference answers differently, say so and paste both. That is the
-strongest form this report takes, because the whole repository is built around
-comparing against a pinned SQLite 3.53.4.
+If SQLite 3.53.4 returns something different for the same statement, paste both answers. The
+project compares every answer against that version of SQLite, so this is the most useful kind of
+report.
 -->
 
 ## Version and platform
 
-<!-- `inillucent --version` prints the first three. -->
+<!-- `inillucent version` prints the engine, dialect and driver versions. -->
 
 - inillucent:
 - operating system:
-- installed from: <!-- the site installer, a release archive, a source build -->
+- installed from: <!-- the site installer, a release archive, a package manager, a source build -->
 
 ## Anything else
 
 <!--
-`inillucent diagnose` prints the limits, the page size and the VFS, and is often
-the thing that explains it.
+`inillucent stats` prints the page cache, the pool size and the page counts of the file, which
+often explains a slow query.
 -->

@@ -1,74 +1,78 @@
 # Fuzz targets
 
-These are `cargo-fuzz` targets. They need a nightly toolchain and are excluded
-from the workspace on purpose, so that `libfuzzer-sys` never appears in the
-graph the dependency-direction check walks.
+This folder holds sixteen `cargo-fuzz` targets. A fuzz target feeds a parser random input and
+reports any input that makes the parser crash. The targets need a nightly Rust toolchain.
+
+The `fuzz` folder is left out of the workspace. That keeps `libfuzzer-sys` out of the dependency
+graph that the layering check in `crates/inillucent-compat/tests/harness.rs` reads.
 
 ## Running them
 
 ```powershell
-pwsh tools/run-fuzz.ps1 -WhatIf          # the plan, and nothing written
-pwsh tools/run-fuzz.ps1 -Install         # install cargo-fuzz, then run
-pwsh tools/run-fuzz.ps1 -Seconds 600
+pwsh tools/run-fuzz.ps1 -WhatIf                              # print the plan and write nothing
+pwsh tools/run-fuzz.ps1 -Install                             # install cargo-fuzz, then run
+pwsh tools/run-fuzz.ps1 -Seconds 600                         # every target for 600 seconds
 pwsh tools/run-fuzz.ps1 -Only sql_text,fts5_query -Seconds 600
 ```
 
-It runs every target below for a bounded time and appends a row per target to
-`tests/fuzz-history.tsv`. **The row is the evidence**: a run that found nothing
-is worth recording, because "nothing" only means something beside how long it
-looked. A missing toolchain is a skip carrying the sentence that fixes it, and
-it is still recorded, so a history with nothing but `skipped` rows says exactly
-that rather than looking like a history of clean runs.
+`tools/run-fuzz.ps1` runs each target for `-Seconds` seconds (30 by default). It appends one row per
+target to `tests/fuzz-history.tsv`. The row is the record of the run. A run that found nothing is
+recorded too, with how long it ran.
 
-Running one by hand is the same thing without the record:
+When the nightly toolchain or `cargo-fuzz` is missing, `tools/run-fuzz.ps1` records the target as
+`skipped` with the command that fixes it. A history made only of `skipped` rows shows that no fuzzing
+happened.
+
+To run one target by hand, without a row in the history:
 
 ```bash
 cargo +nightly fuzz run sql_text
 ```
 
-## The sixteen targets, and the stable counterpart of each
+Nothing runs the fuzz targets on a schedule. Run them by hand.
 
-Every target has a deterministic counterpart that runs in the ordinary test
-suite on a stable toolchain, so a checkout with no nightly still gets the
-coverage - it just gets it from a seeded generator rather than from coverage
-feedback.
+## The sixteen targets and the stable test for each
 
-| target | stable counterpart |
+Every target has a stable test in the ordinary test suite. The stable test runs on the stable
+toolchain and uses a seeded random generator. A checkout without nightly still tests each parser
+this way. The stable test does not use coverage feedback, so it explores less than the fuzz target.
+
+| Target | Stable test |
 |---|---|
-| `varint` | `inillucent-base::varint::tests::arbitrary_bytes_never_panic` (200k seeded inputs) |
-| `bigendian` | `inillucent-base::bytes::tests::random_offsets_never_panic` (200k seeded offsets) |
+| `varint` | `inillucent-base::varint::tests::arbitrary_bytes_never_panic` (200,000 seeded inputs) |
+| `bigendian` | `inillucent-base::bytes::tests::random_offsets_never_panic` (200,000 seeded offsets) |
 | `page_header` | `inillucent-base::page::tests::page_sizes_follow_the_file_format_rules` |
-| `leaf_page` | `inillucent-tree::leaf::tests::no_single_byte_corruption_panics` and `inillucent-compat`'s `corrupt_pages_never_panic` |
-| `interior_page` | `inillucent-pool::interior::tests::corrupting_any_header_field_is_refused` and `inillucent-compat`'s `corrupt_pages_never_panic` |
+| `leaf_page` | `inillucent-tree::leaf::tests::no_single_byte_corruption_panics`, and `corrupt_pages_never_panic` in `inillucent-compat` |
+| `interior_page` | `inillucent-pool::interior::tests::corrupting_any_header_field_is_refused`, and `corrupt_pages_never_panic` in `inillucent-compat` |
 | `meta_page` | `inillucent-pool::meta::tests::corrupting_any_byte_is_detected` |
 | `memcmp_key` | `inillucent-tree::key::tests::encoded_order_matches_value_order_over_random_tuples` |
-| `wal_record` | `inillucent-wal`'s `fuzz_seeded` and `a_corrupt_log_never_panics` in its `recovery` suite |
-| `mysql` | `inillucent-remote`'s `protocol` suite |
-| `postgres` | `inillucent-remote`'s `protocol` suite |
-| `json` | `inillucent-compat`'s `json` suite, and `json_valid()`'s own cases |
-| `store` | `inillucent-compat`'s `search` and `vector` suites |
-| `sql_text` | `inillucent-compat`'s `syntax`, `hostile` and `differential_part8` suites |
-| `fts5_query` | `inillucent-compat`'s `fts5` and `fts5_parity` suites |
-| `sqlite_file` | `inillucent-compat`'s `corruption` and `migrate_sqlite` suites |
-| `segment_header` | `inillucent-compat`'s `search` suite, and the `u64::MAX` header case task-2066 section 4.1.12 added |
+| `wal_record` | the `fuzz_seeded` suite in `inillucent-wal`, and `a_corrupt_log_never_panics` in its `recovery` suite |
+| `mysql` | the `protocol` suite in `inillucent-remote` |
+| `postgres` | the `protocol` suite in `inillucent-remote` |
+| `json` | the `json` suite in `inillucent-compat`, and the cases for `json_valid()` |
+| `store` | the `search` and `vector` suites in `inillucent-compat` |
+| `sql_text` | the `syntax`, `hostile` and `differential_part8` suites in `inillucent-compat` |
+| `fts5_query` | the `fts5` and `fts5_parity` suites in `inillucent-compat` |
+| `sqlite_file` | the `corruption` and `migrate_sqlite` suites in `inillucent-compat` |
+| `segment_header` | the `search` suite in `inillucent-compat` |
 
-The last four were added by task-2066 section 4.4.7, and they are ranked in the
-order that section ranks them: `sql_text` is the largest untrusted input the
-product has, `fts5_query` is a second grammar read by a second parser,
-`sqlite_file` is the one input that arrives as a whole file, and
-`segment_header` is where section 4.1.12 found allocations sized from
-unvalidated integers on disk.
+The last four targets read the most exposed inputs:
+
+| Target | Why it matters |
+|---|---|
+| `sql_text` | SQL text is the largest untrusted input the product reads |
+| `fts5_query` | a full text search query is a second grammar, read by a second parser |
+| `sqlite_file` | a SQLite file is the one input that arrives as a whole file |
+| `segment_header` | the HNSW and BM25 segment readers once sized an allocation from a count read off disk without checking it |
 
 ## What to do with a crash
 
-A crash found by a target is reproduced by its input file, under
-`fuzz/artifacts/<target>/`. Keep the file, and **add the input as a regression
-case in the stable counterpart beside it**, so it is checked forever rather than
-only while somebody is fuzzing.
+A crash is reproduced by its input file, which `cargo-fuzz` saves under `fuzz/artifacts/<target>/`.
+Keep the file. **Add the input as a regression case in the stable test for that target.** The stable
+test then checks the input on every run of the suite.
 
 ## The corpus
 
-`fuzz/corpus/<target>/` holds the minimised inputs a run kept. It is checked in,
-so a later run starts from what earlier runs learned rather than from nothing -
-which is most of what makes the second hour of fuzzing better than the first.
-`cargo fuzz cmin <target>` is what shrinks it before it is committed.
+`fuzz/corpus/<target>/` holds the minimized inputs a run kept. The corpus is checked in, so a later
+run starts from the inputs earlier runs found. Shrink the corpus with `cargo fuzz cmin <target>`
+before you commit it.

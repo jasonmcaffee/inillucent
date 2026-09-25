@@ -2,84 +2,76 @@
 
 ## Reporting a vulnerability
 
-**Use GitHub's private vulnerability reporting** on this repository: the
-*Security* tab, then *Report a vulnerability*. That opens a private thread only
-the maintainers can read, which is what you want for anything that should not be
-in a public issue until there is a fix.
+**Use GitHub's private vulnerability reporting on this repository.** Open the *Security* tab, then
+choose *Report a vulnerability*. That opens a private thread that only the maintainers can read.
 
-If that is unavailable to you, open a public issue saying only that you have
-something to report and asking for a private channel. **Do not put the details
-in a public issue.**
+If private reporting is not available to you, open a public issue that says only that you have
+something to report and asks for a private channel. **Do not put the details in a public issue.**
 
-**What to expect.** A first reply within **five working days**, saying whether
-the report is understood and reproducible. After that, an assessment within
-**fifteen working days** — what the impact is, whether a fix is coming, and when.
-If a report goes quiet past those windows, it is an oversight rather than a
-decision; say so on the thread.
+**What to expect:**
 
-A fix ships in the next release, and the advisory is published when it does. You
-are credited by whatever name you ask for, or not at all if you prefer.
+| When | What you get |
+|---|---|
+| within **five working days** | a first reply that says whether the report is understood and can be reproduced |
+| within **fifteen working days** | an assessment: the impact, whether a fix is coming, and when |
+| the next release | the fix, and the published advisory |
+
+If a report gets no reply within those times, it was missed by mistake. Say so on the thread.
+
+You are credited under the name you ask for, or not credited if you prefer.
 
 ## What is in scope
 
-This program parses untrusted SQL and opens untrusted files, which is most of
-the attack surface:
+inillucent parses SQL and opens files that may come from someone you do not trust. Most security
+problems come from those two inputs.
 
-- **A crafted `.rdb` file** that makes the engine read out of bounds, allocate
-  without bound, loop forever, or return another file's bytes. Every path that
-  reads a page, a log frame or a network byte is written without `unwrap`,
-  `expect`, `panic!` or slice indexing, and all 29 crates deny all four —
-  so a panic reached from a file is a defect, not a hardening request.
-- **A crafted SQL statement** that does the same, or that escapes a limit the
-  connection set.
-- **Escaping `--root`.** The command line and the MCP server can be confined to
-  a directory; a path that reaches outside it is a vulnerability.
-  `crates/inillucent-compat/tests/confinement.rs` is what asserts they cannot.
-- **The migration tool's transport.** `inillucent migrate` speaks PostgreSQL and
-  MySQL over TLS. A downgrade the caller did not ask for, a certificate that is
-  not checked, or a password that reaches a log, a manifest, a report or an MCP
-  result is in scope.
-- **The C ABI.** A lifetime or ownership mistake reachable from correct use of
-  the published header.
+- **A crafted `.rdb` file** that makes the engine read out of bounds, allocate without limit, loop
+  forever, or return bytes from another file. Every code path that reads a page, a log frame or a
+  network byte avoids `unwrap`, `expect`, `panic!` and slice indexing. All 29 crates deny all four.
+  A panic caused by a file is a defect, and a report of one is in scope.
+- **A crafted SQL statement** that does any of the above, or that gets past a limit the connection
+  set.
+- **Escaping `--root`.** The command line and the MCP server can be confined to one directory with
+  `--root DIR`. A path that reaches a file outside `DIR` is a vulnerability.
+  `crates/inillucent-compat/tests/confinement.rs` tests that no command can do this.
+- **The migration transport.** `inillucent migrate` connects to PostgreSQL and MySQL over TLS. These
+  are in scope: a downgrade the caller did not ask for, a certificate that is not checked, and a
+  password that appears in a log, a manifest, a report or an MCP result.
+- **The C ABI.** A lifetime or ownership mistake that correct use of the published header can reach.
 
-## What is not
+## What is not in scope
 
-- **A denial of service from a query you wrote yourself.** An embedded database
-  runs in your process and does what you ask; a `CROSS JOIN` of three large
-  tables is slow because you asked for it. Use the connection's limits and the
-  budget.
-- **Anything requiring write access to the database file.** A caller who can
-  write the file can write anything into it, and no engine defends against that.
-- **`PRAGMA`s and commands that are documented as unsafe**, which the shell
-  refuses unless `.unsafe on` was typed.
-- **A missing feature.** Exit code 3 means "this engine has not built that", and
-  it is a different code from 1 on purpose.
+- **A slow query you wrote yourself.** An embedded database runs in your process and does what you
+  ask. A `CROSS JOIN` of three large tables is slow because the query asked for it. Use the
+  connection's limits and budget to cap the work.
+- **Anything that needs write access to the database file.** A caller who can write the file can
+  put anything in it. No engine defends against that.
+- **The dot commands that `inillucent-shell -safe` refuses**, such as `.shell`, `.system` and
+  `.load`. Without `-safe`, `inillucent-shell` runs them, the same as `sqlite3` does.
+- **A missing feature.** Exit code 3 means the engine has not built that feature. Exit code 1 means
+  a real failure. The two codes are separate so a caller can tell them apart.
 
-## What the repository already does about this
+## What the repository already tests
 
-Named here so a reporter knows what has been looked at rather than having to
-guess:
+This list shows a reporter what has already been checked.
 
-- **Fuzz targets** under `fuzz/`, over the file format, the SQL parser and the
-  record codec. They are run by hand -- `fuzz/README.md` has the commands --
-  and nothing runs them on a schedule since the GitHub
-  workflows were removed. What runs on every checkout instead is the deterministic
-  counterpart each target has in the ordinary suite, listed in that same
-  README: a seeded generator rather than coverage feedback, on the pinned
-  stable toolchain.
-- **Crash campaigns** that cut the power at every call a run makes to the file
-  system, and assert the database comes back as one of the two states it is
-  allowed to be in.
-- **A confinement suite** that tries to talk a confined server into opening a
-  file outside its root, through every command and every pragma that takes a
-  path.
-- **`cargo deny check`** in the gate, over advisories, licences and the resolved
-  dependency graph, with `deny.toml` at the root saying what is allowed and why.
-- **A dependency policy** that refuses another database engine, SQL parser,
-  storage engine, B-tree, transaction manager, log or query optimiser outright,
-  enforced by a test rather than by review.
+- **Sixteen fuzz targets** under `fuzz/`. They cover the file format, the log, the SQL parser, the
+  full text query parser, the record codec, JSON, and the PostgreSQL and MySQL protocols. Nothing
+  runs them on a schedule. `fuzz/README.md` has the commands to run them by hand. Each target also
+  has a stable test with a seeded random generator, listed in `fuzz/README.md`. The stable tests run
+  in the ordinary suite on every checkout.
+- **Crash campaigns** that cut the power at every file system call a run makes. Each campaign checks
+  that the database reopens in one of the two states it is allowed to be in: before the commit or
+  after it.
+- **A confinement suite** that tries to make a confined process open a file outside its root,
+  through every command and every pragma that takes a path.
+- **`cargo deny check`** in the gate (`tools/validate.ps1` and `tools/validate.sh`). It checks
+  security advisories, licences and the resolved dependency graph. `deny.toml` in the repository
+  root lists what is allowed and why.
+- **A dependency policy** that refuses another database engine, SQL parser, storage engine, B-tree,
+  transaction manager, log or query optimizer. `cargo test -p inillucent-compat --test policy`
+  enforces the dependency policy.
 
 ## Supported versions
 
-The latest release only. This is pre-1.0 software and there is no back-porting;
-a fix ships forward.
+Only the latest release gets security fixes. Fixes are not backported to older releases.

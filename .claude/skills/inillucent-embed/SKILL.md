@@ -1,25 +1,65 @@
 ---
 name: inillucent-embed
-description: Put inillucent inside an application - the Rust driver, the C ABI, and the Python, Node, Go and PHP bindings over it. Use when asked to add inillucent to a codebase, write or fix a language binding, or replace an existing SQLite/embedded-database dependency in an app.
+description: Put inillucent inside an application. Covers the Rust driver, the C library, and the Python, Node, Go and PHP packages. Use when asked to add inillucent to a codebase, write or fix a language binding, or replace SQLite or another embedded database in an application.
 ---
 
 # Embedding inillucent in an application
 
-`drivers/README.md` is the full contract and is written for somebody who is **not** working on the
-engine. This page is the shape of it, plus the parts that catch people out.
+This page shows how an application uses inillucent as a library, and the behaviors that most often
+surprise a new user. `drivers/README.md` in the repository, copied as `DRIVER.md` into every
+release archive, has the full contract.
 
-## The one thing to design for
+## Terms used on this page
 
-**This engine refuses what it has not built, rather than answering it wrongly**, and there is a
-status of its own for that: `unsupported` / `INILLUCENT_UNSUPPORTED` / exit code 3. It is **not** the
-status a mistyped statement gets, and folding it into your general error type throws the design
-away — an application needs to be able to say "this engine cannot do that yet" rather than "check
-your spelling".
+| Term | Meaning |
+|---|---|
+| driver | the Rust crate `inillucent-driver`. Every language reaches the engine through it |
+| C library | `inillucent-driver-capi`, a C interface over the driver. Its header is `drivers/inillucent-driver-capi/include/inillucent_driver.h` |
+| binding | code in another language that calls the C library |
+| capability table | the list of features the engine reports, each marked `yes`, `partial` or `no` |
+| session | what `temp.` tables, `ATTACH` and connection pragmas belong to |
 
-There is also a **capability table** you can ask *before* composing a statement, and it is checked
-against the running engine by a test in both directions — a claimed capability that fails and a
-denied one that now works each turn the build red. An unknown name answers "unknown", and you should
-treat that as *no*: a capability nobody declared was never checked.
+## How each language reaches the engine
+
+| Language | Package | How it reaches the engine |
+|---|---|---|
+| Rust | `inillucent-driver` on crates.io | calls the driver directly |
+| C and C++ | the C library | calls the C library |
+| Python | `pip install inillucent` | the `Database` class calls the C library. `run()` and `query()` start the `inillucent` program |
+| Node | `npm install inillucent` | starts `inillucent --output json` and parses the JSON |
+| Go | `go get github.com/Black-Rainbow-Labs/Inillucent/packages/go` | starts `inillucent --output json` and parses the JSON |
+| PHP | `composer require black-rainbow-labs/inillucent` | starts `inillucent --output json` and parses the JSON |
+
+All four language packages are published at version 1.0.29. The Python wheel holds the C library
+and the four programs, so it needs no compiler.
+
+A package that starts the program gets JSON. A blob comes back as `{"blob": "<hex>"}`. An integer
+larger than 2^53 is rounded by JavaScript's `JSON.parse`, and by Go's `encoding/json` unless the
+decoder calls `UseNumber()`.
+
+## Design for `unsupported`
+
+The engine returns the status `unsupported` for a statement it has not built. The same status is
+`Status::Unsupported` in Rust, `INILLUCENT_UNSUPPORTED` in C, and exit code 3 on the command line.
+A mistyped statement gets a different status, such as `syntax`.
+
+```sh
+inillucent query "SELECT 1 LIMIT 1 + 1"
+```
+
+```
+Error [unsupported]: the new engine's physical pass does not handle a LIMIT or OFFSET that is not a constant yet
+  not built yet: a LIMIT or OFFSET that is not a constant
+```
+
+Keep `unsupported` separate from other errors in your code. An application can then tell its user
+"this engine cannot do that yet" instead of "check your SQL". No case in the 416 case probe against
+SQLite returns `unsupported`, and the capability table still lists 19 features as `no`, so write the
+branch.
+
+**Ask the capability table before you write unusual SQL.** `inillucent capabilities` prints it, and
+the driver's `capability(name)` returns one row. A test checks each row against the running engine.
+An unknown name returns nothing. Treat that as no.
 
 ## Rust
 
@@ -27,7 +67,7 @@ treat that as *no*: a capability nobody declared was never checked.
 use inillucent_driver::{Database, Status, Value};
 
 let database = Database::open("app.rdb")?;
-let connection = database.connect();
+let connection = database.session();
 
 connection.execute("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)", &[])?;
 connection.execute(
@@ -38,13 +78,10 @@ connection.execute(
 let rows = connection.query("SELECT id, name FROM people", &[], 200)?;
 println!("{} of {}{}", rows.rows.len(), rows.total, if rows.more { "+" } else { "" });
 
-// `limit` is a count, not a sentinel: query(.., 0) hands back no rows at all,
-// beside a `total` reporting the true count. Ask for every row by name.
+// `limit` is a count. query(.., 0) returns no rows, with `total` set to the real count.
+// Use query_all to get every row.
 let everything = connection.query_all("SELECT id, name FROM people", &[])?;
 
-// Every statement this engine has not built answers Status::Unsupported rather
-// than a syntax error, so one arm handles the whole class. Ask the capability
-// table first if you want to know before you compose the statement.
 match connection.query_all(statement, &[]) {
     Err(why) if why.status == Status::Unsupported => {
         println!("not yet: {}", why.feature.unwrap_or_default());
@@ -53,73 +90,65 @@ match connection.query_all(statement, &[]) {
 }
 ```
 
-No SQL statement answers `Unsupported` today: the 416-case probe refuses nothing SQLite answers.
-Window functions were the last twelve cases and they answer now. Write the arm anyway. A caller that
-folds this status into a general error type cannot tell a construct the engine has not built from a
-statement that is wrong, and will send the second message for the first condition.
+`Database::session` returns a `Connection`. The older name `Database::connect` still works and is
+deprecated. Rust calls the driver directly and does not go through the C library.
 
-Rust does **not** go through the C ABI — the core is Rust and its first consumer is Rust, so a
-pointer round trip and a `catch_unwind` per call would buy nothing.
+`Database::open` uses these defaults from `OpenOptions`:
 
-## Everything else
+| Option | Default |
+|---|---|
+| `create` | `true` |
+| `read_only` | `false` |
+| `cache_frames` | 4,096 frames, which is 128 MiB at the engine's 32 KiB page |
+| `limits` | unbounded |
 
-`packages/` ships the binaries and, for Python, an in-process driver. **None of
-these four is published yet**; they are what the packages will be called, and
-`packaging/PUBLISHING.md` says what each is waiting on. Install with the one-line
-installer from inillucent.com meanwhile.
+## Six behaviors to design around
 
-```sh
-pip install inillucent          # the wheel carries the binaries and the driver
-npm install inillucent
-go get github.com/Black-Rainbow-Labs/Inillucent/packages/go
-composer require black-rainbow-labs/inillucent
-```
+| Behavior | What it means for your code |
+|---|---|
+| **Values are typed.** | A value is `Null`, `Integer`, `Real`, `Text` or `Blob`. The driver does not turn numbers into text. |
+| **`Null` is its own value.** | `Value::Null` and an empty `Value::Text` are different values. |
+| **`total` is exact.** | The engine builds the whole result before it returns. `limit` only caps the rows handed back, and `more` is true when rows were left out. A query over a large table costs the whole result, so put a `LIMIT` in the SQL when that matters. |
+| **A batch is one transaction, checked before the commit.** | `Connection::transaction(work, check)` runs every statement, passes the changed row counts to `check`, and commits only when `check` returns `Ok`. Any failure rolls back every statement. |
+| **One database runs one statement at a time.** | A `Database` is neither `Send` nor `Sync`. To use one database from several threads, open it with `SharedDatabase`, which runs each statement in turn on a thread of its own. |
+| **Read only is enforced by the driver.** | With `OpenOptions::read_only` set, the driver refuses any statement that does not bind to a query, including a `PRAGMA`. The file is still open for writing, so the `readonly_open` capability says `partial`. |
 
-For a language with no package here, bind the C ABI:
-`drivers/inillucent-driver-capi/include/inillucent_driver.h` is the contract, `abi.toml` records every
-symbol with its stability and the version it appeared in, and
-`drivers/bindings/python/inillucent.py` is the reference binding — standard library only, written to
-prove the header plus the README are enough.
+## Writing a binding for another language
 
-## Six things that will otherwise cost you an afternoon
+Bind the C library. These files are the contract:
 
-1. **Values are typed, not text.** `Null | Integer | Real | Text | Blob`. A driver that rendered
-   everything as text would be choosing a float's formatting for you.
-2. **`Null` is a variant, not an empty string.** They are different values.
-3. **`total` is exact, and `limit` only caps what you are handed.** A result arrives whole, so
-   `1–200 of 4,317` is a fact rather than an estimate. The cost is that a query over a large table
-   costs what the whole result costs — put a `LIMIT` in *your own SQL*, where the planner can act on
-   it, when you cannot afford that.
-4. **A batch is one transaction, and the check runs before the commit.**
-   `Connection::transaction(work, check)` takes the predicate as an argument on purpose: a
-   postcondition tested after `COMMIT` is a report, not a guard.
-5. **One file is one buffer pool, and the engine is single threaded.** A `Database` is neither `Send`
-   nor `Sync`. Give each thread its own, or funnel through one.
-6. **Read-only is enforced by the driver, not by the file.** A statement that does not bind to a
-   query is refused — the binder's classification, not a scan of the text — but the file is still
-   open for writing. The capability table says `partial`, and says why.
+| File | What it holds |
+|---|---|
+| `drivers/inillucent-driver-capi/include/inillucent_driver.h` | the header a binding compiles against |
+| `drivers/abi.toml` | every C symbol, with its stability and the version it first appeared in |
+| `drivers/conformance/suite.json` | the driver's expected behavior, written as test cases |
+| `drivers/bindings/python/inillucent.py` | the reference binding. It uses only the Python standard library |
+| `drivers/bindings/python/run_conformance.py` | a runner for `suite.json`, written in Python |
 
-## Writing a binding
+The rules a binding must follow:
 
-Read `drivers/README.md` §"Writing a binding" in full; it is short and each rule exists because
-something broke. The three that matter most:
+- **The three ownership rules.** A handle with a `_free` or `_close` function is yours to free,
+  once. A pointer the library returns points inside a handle, stays valid until that handle is
+  freed, and is never freed by you. The library copies every pointer you pass in before the call
+  returns.
+- **Map `INILLUCENT_UNSUPPORTED` to its own error type.**
+- **Keep each database and its handles on one thread,** or guard every call with a lock your
+  binding owns. The C library has no lock inside it. `inillucent_cancel` is the one call that is
+  safe from another thread.
+- **Run `drivers/conformance/suite.json`.** A binding that passes it agrees with the driver on every
+  status, value and lifetime.
 
-- **The three ownership rules, and there are no others** — the README states them; a binding that
-  invents a fourth is leaking or double-freeing.
-- **Keep `unsupported` distinct** in whatever your language's error type is.
-- **Run the conformance suite.** `drivers/conformance/suite.json` is the driver's behaviour as data, and
-  `drivers/bindings/python/run_conformance.py` is a worked runner over it. A binding that passes it
-  agrees with the driver about every status, value and lifetime; one that does not, does not, and
-  you will find out from a user instead.
+`drivers/README.md` has the full list of steps, the status codes and the lifetime rules for a language with
+a garbage collector.
 
-## Instead of embedding
+## Using the command line instead
 
-If the consumer is a person or an agent rather than a program, the command line already produces the
-same object a binding sees:
+When the caller is a person or an agent, the command line returns the same result object a binding
+sees:
 
 ```sh
 inillucent --db app.rdb query "SELECT * FROM note" --output json
 ```
 
-and `inillucent-mcp` serves 28 of those commands over MCP — see
+`inillucent` has all 30 commands, and `inillucent-mcp` serves 28 of those commands over MCP. See
 [`inillucent-mcp`](../inillucent-mcp/SKILL.md).

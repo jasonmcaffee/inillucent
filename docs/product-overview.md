@@ -1,125 +1,160 @@
 # Product overview
 
-**What Inillucent is, who it is for, and the case for it.** If you want to install it and run a
-query, go to [Getting started](getting-started.md) instead.
+This page says what inillucent is, who it is for, and how it compares with PostgreSQL and pgvector.
+To install inillucent and run a query, go to [Getting started](getting-started.md).
 
-## What it is
+## Terms used on this page
 
-An embedded database written in Rust, in one library and one file.
+| Term | Meaning |
+|---|---|
+| Embedded database | A database that runs as a library inside your program. There is no server. |
+| Embedding | A list of numbers that stands for the meaning of a piece of text. Texts with similar meaning get similar lists. |
+| Vector search | Finding the stored embeddings closest to the embedding of a question. |
+| HNSW | A graph index that makes vector search fast by visiting only part of the data. |
+| BM25 | The standard way to rank documents for a keyword search. |
+| pgvector | The PostgreSQL extension that adds vector columns and HNSW indexes to PostgreSQL. |
+| MCP | Model Context Protocol, the way an AI agent calls tools such as a database. |
 
-It speaks SQLite's SQL on its own storage, and it holds a vector index and a keyword index in the
-same file as your tables. One `.rdb` can carry ordinary rows, an HNSW graph over an embedding column
-and a BM25 index over your text, and all three commit and roll back together.
+The [glossary](glossary.md) has every other term.
 
-There is no server to start, no port to configure, no connection string, and no network hop between
-your application and its index. Four programs come out of an install: a command line, a shell that
-works like `sqlite3`, an MCP server for AI agents, and a migrator that reads a SQLite file or a
-running PostgreSQL or MySQL server.
+## What inillucent is
 
-**Several processes can use one database file at the same time.** They take the file's lock with the
-same SHARED, RESERVED, PENDING and EXCLUSIVE protocol SQLite uses, under `PRAGMA locking_mode =
-normal`, which is the default. Each connection reads the latest committed state when it takes the
-lock, so a commit made by one process is visible to the next statement in another.
-`crates/inillucent-compat/tests/process_concurrency.rs` runs two real writer processes against one
-file and checks that the rows in it equal the commits that were acknowledged.
+inillucent is an embedded database written in Rust. It speaks SQLite's SQL on its own storage
+engine. One `.rdb` file holds your tables, a vector index (HNSW) over an embedding column, and a
+keyword index (BM25) over your text. The tables and both indexes commit and roll back together.
+
+```mermaid
+flowchart LR
+    A["Your program"] --> B["inillucent library"]
+    B --> C["SQL tables"]
+    B --> D["Vector index"]
+    B --> E["Keyword index"]
+    C --> F["One .rdb file"]
+    D --> F
+    E --> F
+```
+
+inillucent has no server, no port and no connection string. An install gives you four programs:
+
+| Program | What it does |
+|---|---|
+| `inillucent` | the command line |
+| `inillucent-shell` | an interactive shell that works like `sqlite3` |
+| `inillucent-mcp` | an MCP server, so an AI agent can use a database |
+| `inillucent-migrate` | builds a database from a legacy retrieval index. `inillucent migrate` copies a SQLite file, a PostgreSQL database or a MySQL database |
+
+Several processes can use one `.rdb` file at the same time. They lock the file with the same
+SHARED, RESERVED, PENDING and EXCLUSIVE locks SQLite uses, under `PRAGMA locking_mode = normal`,
+which is the default. A commit made by one process is visible to the next statement in another
+process. `crates/inillucent-compat/tests/process_concurrency.rs` runs two writer processes against
+one file and checks that the rows in the file match the commits the engine acknowledged.
 
 ## Who it is for
 
-**Somebody running a local AI agent.** The agent queries a body of written material: a wiki, a
-repository, a set of tickets, a chat history. It needs both meaning and exact term, and it needs them
-fast enough to run several searches inside one answer. Today that means PostgreSQL, the pgvector
-extension, and an embedding model served over a socket. Inillucent replaces all three with a library.
+**People running a local AI agent.** The agent searches written material such as a wiki, a code
+repository, tickets or chat history. The agent needs to search by meaning and by exact term, and it
+runs several searches for one answer, so each search must be fast. The usual setup for this is
+PostgreSQL, the pgvector extension, and an embedding model served by a separate process.
+inillucent replaces all three with one library.
 
-**Somebody who already uses SQLite and wants it faster.** The SQL is the same: 402 of 416 probed
-cases produce SQLite's exact bytes, nothing is refused, 6 answer differently, 6 are vector search
-features SQLite has no equivalent for, and 2 are `DELETE ... LIMIT` forms the pinned SQLite build
-refuses and inillucent runs. What changes is the storage underneath, and the measurement is
-397% faster at 100,000 rows.
+**People who use SQLite and want it faster.** inillucent runs the same SQL. The
+[feature comparison](feature-comparison.md) runs 416 SQL cases through both engines:
 
-## Where it stands
+| Result | Cases |
+|---|---|
+| Same answer as SQLite, byte for byte | 402 |
+| A different answer | 6 |
+| Vector search features SQLite does not have | 6 |
+| `DELETE ... LIMIT` and `UPDATE ... LIMIT`, which the pinned SQLite build refuses and inillucent runs | 2 |
 
-Everything here is measured, and each row links to the page carrying the run.
+No case is refused. The storage engine is where inillucent differs from SQLite, and at 100,000 rows
+inillucent is 397% faster than SQLite 3.53.4.
 
-| | | |
+## The measurements
+
+Each number below comes from the page linked beside it. The SQLite numbers are from the run on
+2026-09-23 at 100,000 rows: four runs of 30 paired rounds, both engines on the same performance
+cores. Each workload's answer is hashed and compared with SQLite's before its time counts. The
+pgvector numbers are from the graded run on 2026-09-20 over 185,078 passages at 768 dimensions,
+with both engines reading the same vectors.
+
+| Result | Detail | Source |
 |---|---|---|
-| **397% faster than SQLite 3.53.4** | 4.97x weighted over ten workload families at 100,000 rows, four consecutive 30-round runs with both engines on the performance cores, every answer hashed and compared before its timing counts | [Performance](performance.md) |
-| **50% less processor time** | 555 ms against 1,082 for the same plan, one child process each | [Performance](performance.md) |
-| **9.5% more memory** | 40.76 MiB against 37.22, on the same 128 MiB budget. The one measurement SQLite wins | [Performance](performance.md#memory) |
-| **A file within 4% of SQLite's** | 1.036x on the same imported data | [Performance](performance.md#disk) |
-| **402 of 416 SQL cases byte for byte, none refused** | every case run through both shells over a fresh database and compared byte by byte | [SQL support](sql.md) |
-| **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading byte identical vectors | [Retrieval quality](retrieval-quality.md) |
-| **174% faster unfiltered and 6,169% faster filtered** than pgvector | median in the calling process, against the correctly configured baseline | [Retrieval quality](retrieval-quality.md#latency) |
+| **397% faster than SQLite 3.53.4** | 4.97x, weighted over ten workload families | [Performance](performance.md) |
+| **49% less processor time** | 555 ms against 1,082 ms for one round of the same plan | [Performance](performance.md) |
+| **9.5% more memory** | 40.76 MiB against 37.22 MiB peak, with the same 128 MiB cache. SQLite wins this one | [Performance](performance.md#memory) |
+| **A file 3.6% larger** | 17,432,576 bytes against 16,830,464 bytes for the same imported data | [Performance](performance.md#disk) |
+| **402 of 416 SQL cases give SQLite's exact answer** | each case runs through both shells on a new database, and the output bytes are compared | [Feature comparison](feature-comparison.md) |
+| **Better than pgvector on 15 of 17 graded comparisons** | equivalent on 1, inconclusive on 1, worse on none | [Retrieval quality](retrieval-quality.md) |
+| **174% faster than pgvector without a filter** | median 0.8462 ms against 2.315 ms | [Retrieval quality](retrieval-quality.md#latency) |
+| **6,169% faster than pgvector with a filter** | median 0.5820 ms against 36.486 ms, for `source = slack` | [Retrieval quality](retrieval-quality.md#latency) |
 
-Six of the thirty weighted workloads are slower than SQLite. So were all four correlated subquery
-workloads the contract does not weight, by far more, in the graded run. At `52c4b5f`, on passes the
-gate did not grade because the machine was busy, two of those four are faster than SQLite and a
-correlated `EXISTS` over 400 outer rows takes 0.40 ms where it took 59.69; see
-[Performance](performance.md#measured-again-at-52c4b5f-on-2026-09-24-and-not-graded). **Every family but one clears the 1.00x floor
-the performance contract sets on all four runs**; `schema` went under it on three, with lower bounds
-of 0.81x to 0.95x against a 1.31x ratio - it is a family of one workload, with the widest interval on
-the page. The `transaction` family missed the floor on all four runs of two earlier measurements and now
-measures 137% faster.
-[The workloads that are slower](performance.md#the-workloads-that-are-slower) names each one and what
-it costs.
+Six of the thirty weighted workloads are slower than SQLite. Four correlated subquery workloads,
+which the performance contract does not weight, are far slower: a correlated `EXISTS` over 400
+outer rows took 59.69 ms against 0.29 ms for SQLite in the graded run.
+[The workloads that are slower](performance.md#the-workloads-that-are-slower) lists each one and the
+reason.
 
-## The case against PostgreSQL with pgvector
+## inillucent compared with PostgreSQL and pgvector
 
-That combination is the sensible default, and it is the baseline every retrieval number here is
-measured against: PostgreSQL for storage, pgvector for the vector index, and a server such as
-llama.cpp holding the embedding model. It works. Four things about it are structural rather than a
-matter of tuning.
+PostgreSQL with pgvector is the usual choice for vector search. Every retrieval number above is
+measured against it. The setup is PostgreSQL for storage, pgvector for the vector index, and a
+separate server, such as llama.cpp, running the embedding model. The setup works. It has four costs
+that tuning does not remove.
 
-**Filtering happens after the search rather than during it.** pgvector evaluates a `WHERE` clause
-after the index scan has already chosen its candidates. A plain HNSW scan produces only
-`hnsw.ef_search` of them, so a search restricted to a minority source can be left with almost none.
-pgvector's answer is `hnsw.iterative_scan`, which keeps restarting the scan until enough rows pass,
-and it costs latency: a filtered search that took a few milliseconds takes tens of them. Measured
-here, 35.583 ms against 0.6262.
+**pgvector applies a `WHERE` filter after the index scan.** A plain HNSW scan returns
+`hnsw.ef_search` candidates, and the filter then removes the rows that fail. A search restricted to
+a small source can end with almost no rows. pgvector's fix is `hnsw.iterative_scan`, which repeats
+the scan until enough rows pass. The repeated scans cost time: with `source = slack`, the configured
+pgvector took 36.486 ms at the median.
 
-inillucent applies the filter inside the traversal. A node that fails the filter is still expanded,
-so the walk can pass through it to reach what is behind it, but it is never admitted to the results.
-The walk simply continues until it has collected enough passing rows.
+inillucent applies the filter during the graph walk. A node that fails the filter is still used as a
+step to reach its neighbors, but it is never added to the results. The walk continues until it has
+enough rows that pass. The same `source = slack` search took 0.5820 ms.
 
-**An exhaustive scan is often the right plan, and pgvector will not choose it.** When a filter admits
-7,000 chunks out of 186,000, comparing the query against all 7,000 is both exactly correct and faster
-than walking a graph over the whole corpus. inillucent counts what the filter admits, compares that
-against a measured crossover, and takes the exhaustive scan when it wins. So a narrow filter is the
-case where accuracy is perfect rather than the case where it collapses.
+**pgvector does not switch to an exact scan when a filter is narrow.** When a filter admits a few
+thousand rows, comparing the query with every admitted row gives the exactly correct answer and is
+faster than walking a graph over the whole corpus. inillucent counts the rows the filter admits and
+chooses the exact scan when it costs less. A narrow filter is therefore the case where inillucent's
+results are exactly correct. [The retrieval engine](architecture.md) shows the calculation.
 
-**The embedding model is a separate process reached over a socket.** Every query pays a process
-boundary and an HTTP round trip before any searching happens, and the deployment has two things to
-keep alive instead of one. inillucent runs the same model in the same process through the ONNX
-runtime, at full precision.
+**The embedding model runs in a separate process.** With pgvector, every query waits for a request
+to the embedding server before the search starts, and there are two servers to keep running.
+inillucent runs the embedding model inside your process through ONNX Runtime. See
+[Embeddings](embeddings.md).
 
-**You are paying for durability, transactions, a planner and a wire protocol you are not using.** A
-retrieval index is derived data: it is rebuilt from the source documents. Write ahead logging,
-multiversion concurrency control, a cost based planner and a network protocol are cost with no return
-on that workload. A 186,000 chunk corpus serves from under 2 GB, which fits on a laptop, and once the
-index fits in memory everything PostgreSQL does to survive a power cut is overhead.
+**PostgreSQL does work a retrieval index does not need.** A retrieval index is rebuilt from the
+source documents, so it does not need a server, a network protocol, multiversion concurrency control
+or a cost based planner. inillucent's index for the 185,078 passage corpus is 952 MB on disk, and
+the process serving it holds 1,216 MiB of memory. The pgvector database for the same corpus is
+1,750 MB.
 
 ## What you give up
 
-- **One writer at a time.** Processes share the file, but writes take turns. A second writer waits
-  up to `PRAGMA busy_timeout` and is then refused with `busy`. A reader waits for a writer as well,
-  because there is no shared memory log index a reader could use to read a snapshot past it. Threads
-  inside one process are not supported yet.
-- **This engine's own file format.** SQLite files are imported once with
-  [`inillucent migrate`](migrating.md), not opened in place.
-- **No replication, no backups beyond a verified file copy, no wire protocol.** It is a library.
-- **Write latency on a table with a vector index rises with its delta log, not with the corpus.**
-  Adding content folds each new row into a segment, one graph insert per row written, and publishing
-  a segment is proportional to the batch. The default delta log is 1,024 entries; a table that needs
-  its write latency pinned declares `compact = N`. [Closed items](closed-items.md#a-generation-is-one-blob)
-  has the measurements and
-  [Keeping a vector index current](relational-architecture.md#10-keeping-a-vector-index-current) how
-  to choose `N`.
-- **Six of the thirty workloads are slower than SQLite**, listed on
-  [the performance page](performance.md#the-workloads-that-are-slower).
+- **One writer at a time.** Several processes share the file, but they take turns to write. A
+  second writer waits up to `PRAGMA busy_timeout`, which is 5,000 milliseconds by default, and is
+  then refused with `busy`. A reader in another process also waits for the writer, because
+  inillucent has no shared memory index that would let the reader find the log.
+- **Statements do not run in parallel inside one process.** `SharedDatabase` lets any number of
+  threads use one database, and it runs one statement at a time.
+- **inillucent has its own file format.** `inillucent migrate` imports a SQLite file once. inillucent
+  does not open a SQLite file in place. See [Migrating](migrating.md).
+- **inillucent is a library.** It has no replication and no network protocol. A backup is a checked
+  copy of the file.
+- **Writes to an `inillucent_search` table pay for its delta log.** New rows go into a delta log.
+  When the delta log reaches 1,024 entries, which is the default, a commit builds the entries into a
+  segment of the index. The table's size does not change that cost. A table that needs a different
+  limit declares `compact = N`.
+  [Keeping a vector index current](relational-architecture.md#10-keeping-a-vector-index-current)
+  explains how to choose `N`, and [Closed items](closed-items.md#a-generation-is-one-blob) has the
+  measurements.
+- **Six of the thirty weighted workloads are slower than SQLite.**
+  [Performance](performance.md#the-workloads-that-are-slower) lists them.
 
 ## Where to go next
 
-- [Getting started](getting-started.md): install it and run a query
-- [Architecture](architecture.md): how the retrieval engine works
-- [SQL support](sql.md): what runs, what differs, what is refused
-- [Vector search](vector-search.md): the retrieval engine from SQL and from the library
-- [Roadmap](roadmap.md): what is not there yet
+- [Getting started](getting-started.md): install inillucent and run a query
+- [The retrieval engine](architecture.md): how vector search and keyword search work
+- [SQL support](sql.md): what runs, what differs and what is refused
+- [Vector search](vector-search.md): vector search from SQL and from the library
+- [Roadmap](roadmap.md): what is not built yet

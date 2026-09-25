@@ -1,18 +1,23 @@
 # Pragmas
 
-Every `PRAGMA` this engine recognises. **Generated** from
-`inillucent_sql::pragma_register::REGISTER` by
-`cargo run -p inillucent-compat --bin inillucent-obligations`, and checked by
-`cargo test -p inillucent-compat --test harness`, which fails when this page and
-the register disagree. Do not edit it by hand.
+A pragma is a statement that reads or changes a setting of the database, such
+as `PRAGMA page_size` or `PRAGMA busy_timeout = 2000`. This page lists every
+pragma the engine recognises.
 
-**68 pragmas**, 62 of which take an argument in parentheses.
+This page is generated. `cargo run -p inillucent-compat --bin inillucent-obligations`
+writes it from `inillucent_sql::pragma_register::REGISTER`, and
+`cargo test -p inillucent-compat --test harness` fails when the page and the
+register differ. Do not edit it by hand.
 
-A pragma this table does not list is not recognised, and answers no rows rather
-than an error - which is SQLite's own behaviour, and is why asking for one is not
-a way to find out whether it exists. What each one *does* is
-[SQL support](sql.md); what is below is what a caller has to know before writing
-one: its name, the columns its answer has, and whether it takes an argument.
+There are **68 pragmas**. 62 of them take an argument in parentheses.
+
+A pragma that is not in this table is not recognised. It returns no rows and no
+error, which is also what SQLite does. So running a pragma does not tell you
+whether the engine knows it. Check this table instead.
+
+The table gives each pragma's name, whether it takes an argument, and the
+columns of the rows it returns. [SQL support](sql.md) describes what the
+pragmas do.
 
 | pragma | takes an argument | columns of its answer |
 |---|---|---|
@@ -85,20 +90,18 @@ one: its name, the columns its answer has, and whether it takes an argument.
 | `wal_checkpoint` | yes | `busy`, `log`, `checkpointed` |
 | `writable_schema` | yes | one unnamed column |
 
-## The two defaults that decide what a second process sees
+## Two defaults that matter when several processes share a file
 
-`busy_timeout` starts at **5000** milliseconds. It is how long a statement waits
-for a file another process holds before it is refused with `busy`, and setting it
-to 0 makes a contended statement fail at once. It governs the wait between
-processes as well as the one inside a process; before this the cross-process
-wait was a constant this pragma could not reach.
+`busy_timeout` starts at **5000** milliseconds. When another process holds the
+file, a statement waits up to this long and then fails with `busy`. Set
+`busy_timeout` to 0 to make the statement fail at once. `busy_timeout` applies to
+waits between processes and to waits inside one process.
 
-`locking_mode` starts at **normal**, which is SQLite's default too: the file lock
-is released between statements, so a second process can open the database.
-`exclusive` keeps the lock for the connection's whole life, which is faster for a
-program that never opens a second connection and means a second process waits out
-that connection or is refused. A value that is neither is an error rather than a
-silently kept setting.
+`locking_mode` starts at **normal**, which is also SQLite's default. In normal
+mode the file lock is released between statements, so a second process can open
+the database. In `exclusive` mode the connection keeps the lock until it closes.
+`exclusive` is faster for a program that only ever opens one connection. While
+it holds the lock, a second process waits for `busy_timeout` and then fails. Any
+value other than `normal` or `exclusive` is an error.
 
-`compat/api/pragmas.toml` is the same register in the form a program reads,
-and `docs/README.md` lists this page in its reading order.
+`compat/api/pragmas.toml` holds the same register in a form a program can read.

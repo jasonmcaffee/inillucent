@@ -1,246 +1,259 @@
 # The repository
 
-How the code is laid out, how to build it, and how to run the tests.
+This page describes how the source code is laid out, how to build it, and how to run the tests. It
+is for someone who wants to read or change the code.
 
-If you are changing this repository rather than reading it, [`AGENTS.md`](../AGENTS.md) §2 and
-[`agent-skills/inillucent-develop`](../agent-skills/inillucent-develop/SKILL.md) are the shorter
-pages: they carry the five contracts a test enforces, and guessing at any of them produces a red
-build rather than a review comment.
+If you are changing the code, read [`AGENTS.md`](../AGENTS.md) section 2 and
+[`agent-skills/inillucent-develop`](../agent-skills/inillucent-develop/SKILL.md) first. Both are
+shorter than this page. They list the five rules a test checks, and a change that breaks one of
+those rules fails the build.
 
-## Building it
+## Terms used on this page
+
+| Term | Meaning |
+|---|---|
+| crate | one Rust package. The repository is a Cargo workspace of 29 crates |
+| layer | a number in `docs/invariants/layering.toml`. A crate may depend only on the crates its row lists |
+| page pool | the buffer pool: the part of the engine that keeps database pages in memory |
+| log | the write ahead log. Every change is written to the log before any page changes |
+| oracle | the pinned SQLite 3.53.4 build that the differential tests compare against |
+| fuzz target | a program that feeds random bytes to a decoder to find inputs that crash it |
+| region | a unit of code coverage: one stretch of code that runs as a whole |
+
+The [glossary](glossary.md) explains B-tree, WAL, HNSW, BM25 and the other storage and search terms.
+
+## Building
 
 ```sh
 cargo build --release
 ```
 
-That is the whole of it for the engine and the four programs. Two optional features need something
-on the machine first:
+That command builds the engine and the four programs: `inillucent`, `inillucent-shell`,
+`inillucent-mcp` and `inillucent-migrate`.
 
-| feature | needs |
-|---|---|
-| `onnx` — the embedding model in process | the ONNX Runtime shared library |
-| `embed` — `embed(TEXT)` as a SQL function | the same, plus the weights |
+Two optional cargo features need extra files on the machine:
 
-Both are installed by one command, on any of the three platforms:
+| Feature | What it adds | What it needs |
+|---|---|---|
+| `onnx` | the embedding model, run inside the process | the ONNX Runtime shared library |
+| `embed` | `embed(TEXT)` as a SQL function | ONNX Runtime and the model weights |
+
+One command installs both, on Windows, Linux and macOS:
 
 ```sh
 inillucent setup-embeddings all
 ```
 
-which is also how a developer gets them: nothing has to be exported afterwards, because the engine
-looks where the command put them. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` remain overrides for a
-machine that already has a copy somewhere else — which is what this repository's own grading
-harness uses, since its eight models live on a drive the installer would never write to.
+The engine looks in the folders that `inillucent setup-embeddings` writes to, so nothing has to be
+exported afterwards. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` override those folders on a machine
+that already has a copy somewhere else. [Embeddings](embeddings.md) covers both features.
 
-[Embeddings](embeddings.md) covers both.
-
-**On Windows**, Git Bash does not inherit the MSVC `INCLUDE` and `LIB` that `onig_sys` needs. Dump
-them out of `vcvars64.bat` once and export them into the shell before `cargo build`.
+**On Windows**, Git Bash does not inherit the MSVC `INCLUDE` and `LIB` variables. The `onig_sys`
+crate compiles C code and needs them. Read them out of `vcvars64.bat` once and export them in the
+shell before `cargo build`. The test runner described below does this for you.
 
 ## The crates
 
-| group | crates | non test lines |
-|---|---|---|
-| shared foundation | `inillucent-base`, `inillucent-vfs`, `inillucent-value`, `inillucent-alloc` (the counting allocator the memory bar is measured through), `inillucent-sim` | 15,431 |
-| shared SQL front end | `inillucent-sql` (lexer, parser, binder, planner), `inillucent-scalar` (functions, JSON, window frames), `inillucent-catalog`, `inillucent-ext` (registry, virtual table contract, FTS5, R-Tree) | 37,400 |
-| the engine | `inillucent-pool`, `inillucent-wal`, `inillucent-tree`, `inillucent-txn`, `inillucent-exec`, `inillucent-engine`, `inillucent-model` (a test oracle), `inillucent-sqlite-reader` (import only) | 54,341 |
-| kept for reading SQLite files | `inillucent-storage`, `inillucent-transaction` — the old engine's pager and transaction manager, kept because `inillucent-sqlite-reader` reads a SQLite file through them and migrating away from SQLite is what that reader is for | 18,764 |
-| retrieval | `inillucent-core` (the engine), `inillucent-search` (the virtual table), `inillucent-bench` (the grading harness) | 29,825 |
-| facade and tooling | `inillucent` (a re-export of the engine), `inillucent-compat` (the manifest, the oracle, the gates, 77 test files), `inillucent-cli`, `inillucent-migrate`, `inillucent-remote` | 32,031 |
+Each crate sits on a numbered layer in `docs/invariants/layering.toml`. A crate may depend only on
+crates in lower layers, and only on the ones its row names. The test
+`the_workspace_obeys_the_dependency_contract` fails on any other dependency.
 
-**`inillucent-driver` is the public Rust API, and `inillucent` is a name for it.** `cargo add
-inillucent` gives `pub use inillucent_driver::*;` and nothing else: `Database::open`,
-`Database::session`, `Connection::query`, `Connection::prepare`, `Connection::begin` and the
-`Transaction` that rolls back when it is dropped. There were two public surfaces over one engine
-until the driver was unified into a single Rust API, with different `Value`, `Error` and `Statement`
-types and nothing saying which to depend on; the driver won because it has the transaction, the
-`Rows` type, the cancel flag and the
-capability table checked in both directions, and because the C ABI and the four language packages
-already reach the engine through it.
+```mermaid
+flowchart TB
+    L11["Layer 11: command line and MCP server (inillucent-cli)"]
+    L10["Layer 10: facade, C ABI, migration tool"]
+    L9["Layer 9: Rust driver, PostgreSQL and MySQL clients"]
+    L8["Layer 8: the database engine (inillucent-engine)"]
+    L7["Layer 7: SQLite file reader, search virtual table"]
+    L6["Layer 6: query executor, extensions"]
+    L45["Layers 4 and 5: SQL parser, functions, catalog, transactions"]
+    L3["Layer 3: the B-tree (inillucent-tree)"]
+    L2["Layer 2: page pool, write ahead log"]
+    L01["Layers 0 and 1: shared types, allocator, file system, values"]
+    CORE["Retrieval engine (inillucent-core)"]
+    OLD["Old SQLite pager and journal"]
+    L11 --> L10 --> L9 --> L8 --> L7 --> L6 --> L45 --> L3 --> L2 --> L01
+    L7 --> CORE
+    L7 --> OLD
+    OLD --> L01
+```
 
-`inillucent-engine::connect::Database` is what the driver is built on and what `inillucent-cli`
-drives directly: `open` creates or opens and recovers, `import` reads a SQLite file, and `session`
-gives a connection with `execute_batch`, `query`, `prepare_with_tail`, `explain` and `begin`. It is
-called `session` rather than `connect` because two of them share one transaction, which `connect`
-reads as denying.
+An arrow means "may depend on". `inillucent-core` is on layer 0 and depends on nothing in the
+workspace. `inillucent-search`, `inillucent-migrate`, `inillucent-cli`, `inillucent-compat` and `inillucent-bench` depend on `inillucent-core` directly. The old pager and
+journal are reached by `inillucent-sqlite-reader` and `inillucent-catalog`.
 
-The old engine was the one that reached SQLite file format parity: 264 of 271 capabilities passed,
-with seven optional ones missing. It was measured between 30% and 95% slower than SQLite across the
-families, which is why the current engine was written, and it has now been deleted -
-[Closed items](closed-items.md#the-old-engine-is-deleted) records what its four crates were and what still
-reads a SQLite file in their place.
+All 29 workspace members, as `Cargo.toml` lists them:
 
-## The other directories
+| Crate | Layer | What it is for |
+|---|---:|---|
+| `inillucent-alloc` | 0 | a counting allocator with size classes. The memory measurements go through it |
+| `inillucent-base` | 0 | checked integers, identifiers, buffers, limits, and the error codes every layer shares |
+| `inillucent-core` | 0 | the retrieval engine: HNSW vectors, a BM25 inverted index, and the store under both |
+| `inillucent-vfs` | 1 | the file system layer. It is the only crate that touches files, clocks and randomness |
+| `inillucent-value` | 1 | values, affinities, collations and record encoding |
+| `inillucent-pool` | 2 | the page pool: frames, latches, writeback, the free map and large value extents |
+| `inillucent-wal` | 2 | the write ahead log: segments, the record format, group commit and recovery |
+| `inillucent-storage` | 2 | the old engine's SQLite file pager. `inillucent-sqlite-reader` reads SQLite files through it |
+| `inillucent-tree` | 3 | the B-tree: pages, keys and records, with no knowledge of column names |
+| `inillucent-transaction` | 3 | the old engine's journal and locks, kept for the same reason as `inillucent-storage` |
+| `inillucent-txn` | 4 | transactions: snapshots, the writer slot, undo, savepoints and the commit order |
+| `inillucent-sql` | 4 | the lexer, parser, binder and planner |
+| `inillucent-scalar` | 5 | arithmetic, type conversion and the built in scalar functions such as `substr` and `strftime` |
+| `inillucent-catalog` | 5 | tables, indexes and other schema objects, and the statistics the planner reads |
+| `inillucent-exec` | 6 | the query executor. It runs the plan `inillucent-sql` produces |
+| `inillucent-ext` | 6 | JSON functions, virtual tables, FTS5, R-Tree and the extension registry |
+| `inillucent-sqlite-reader` | 7 | opens a SQLite 3 file for reading. It never writes to the file |
+| `inillucent-search` | 7 | puts the retrieval engine behind SQL as a virtual table, inside the same transactions |
+| `inillucent-engine` | 8 | the database: open, recover, import a SQLite file, and run statements |
+| `inillucent-driver` | 9 | the public Rust API that applications and language bindings use |
+| `inillucent-remote` | 9 | reads a running PostgreSQL or MySQL server so it can be migrated |
+| `inillucent` | 10 | the facade crate. It contains `pub use inillucent_driver::*;` and nothing else |
+| `inillucent-driver-capi` | 10 | the C ABI over `inillucent-driver`, built as a dynamic and a static library |
+| `inillucent-migrate` | 10 | the `inillucent-migrate` program: verified migration from SQLite, PostgreSQL, MySQL and retrieval indexes |
+| `inillucent-cli` | 11 | the `inillucent`, `inillucent-shell` and `inillucent-mcp` programs |
+| `inillucent-sim` | 11 | test only: a simulated file system that injects faults on a fixed seed |
+| `inillucent-compat` | 12 | test only: the parity manifest, the SQLite comparison, the gates and the test runner |
+| `inillucent-model` | 12 | test only: a model of what the engine should do, and the traces that drive it |
+| `inillucent-bench` | 12 | test only: the grading harness for search quality |
 
-| | |
+### The public Rust API
+
+`inillucent-driver` is the public Rust API, and the `inillucent` crate is another name for
+`inillucent-driver`. `cargo add inillucent` gives these types: `Database::open`,
+`Database::session`, `Connection::query`, `Connection::prepare`, `Connection::begin`, and the
+`Transaction` that rolls back when it is dropped. The C ABI and the four language packages reach the
+engine through `inillucent-driver` too.
+
+`inillucent-driver` is built on `inillucent_engine::connect::Database`, which `inillucent-cli` also
+calls directly. `Database::open` creates or opens a file and recovers it. `Database::import` reads a
+SQLite file. `Database::session` returns a connection with `execute_batch`, `query`,
+`prepare_with_tail`, `explain` and `begin`. The method is named `session` because two sessions can
+share one transaction.
+
+The engine that came before the current one is deleted.
+[Closed items](closed-items.md#the-old-engine-is-deleted) lists its crates and says what reads a
+SQLite file now.
+
+## The other folders
+
+| Folder | What it holds |
 |---|---|
-| `drivers/` | the sub project an application binds to. `drivers/inillucent-driver` holds every decision, `drivers/inillucent-driver-capi` is the C ABI over it as both a dynamic and a static library, and `drivers/README.md` is the front door for somebody writing a binding who is not working on the engine |
-| `compat/` | the pinned SQLite manifest, the source register, the fixtures every differential suite reads, and the performance contract in `compat/perf/contract.toml` |
-| `tests/` | the shared corpora, the crash schedules, the workload traces, the test selection map, and [the testing standard](../tests/inillucent-testing-tdd.md) |
-| `tools/` | the pinned reference build, the feature probe, and the gate fixture builder |
-| `packaging/` | how a release is cut, and what a signed installer would take on each platform |
-| `agent-skills/` | one task shaped page per job, for an AI agent |
-| `examples/` | a worked example per thing that is hard to evaluate from a document. `examples/rag-agent/` is a Greek philosophy database, already embedded and committed, that an agent can search in its first minute — it is the one place a `.rdb` and a corpus are tracked, and the `.gitignore` rules say why |
-| `fuzz/` | eight libFuzzer targets over the codecs, built and run on their own |
-| `docs/invariants/layering.toml` | the dependency contract, enforced by a test |
+| `drivers/` | the part an application binds to. `drivers/inillucent-driver` is the Rust API, `drivers/inillucent-driver-capi` is the C ABI, and `drivers/README.md` is the starting page for someone writing a binding |
+| `compat/` | the pinned SQLite manifest, the source register, the fixtures every differential suite reads, the recorded baselines, and the performance contract in `compat/perf/contract.toml` |
+| `tests/` | the shared test data, the crash schedules, the workload traces, the test selection map, and [the testing standard](../tests/inillucent-testing-tdd.md) |
+| `tools/` | the scripts that build the pinned SQLite, the feature probe, the gate fixture builder, and the documentation checks |
+| `packaging/` | the release script and the files each package format needs |
+| `agent-skills/` | one page per job, written for an AI agent |
+| `examples/` | worked examples. `examples/rag-agent/` is a Greek philosophy database with its embeddings already built, which an agent can search straight away. It is the one place a `.rdb` file and a text corpus are committed, and `.gitignore` says why |
+| `fuzz/` | 16 libFuzzer targets over the decoders and parsers, built and run separately |
+| `docs/invariants/layering.toml` | the layer of every crate and the dependencies each may have |
 
 ## Running the tests
 
-**Do not run `cargo test --workspace` while you iterate.** There is a parallel, selective runner:
+Do not run `cargo test --workspace` while you work. Use the parallel runner. It runs only the tests
+your change can affect:
 
 ```sh
 cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
 
-target/debug/inillucent-testrun --tier smoke      # about 1 s, for mid edit
-target/debug/inillucent-testrun --changed         # what your edits can break
-target/debug/inillucent-testrun --changed --list  # ...without running it
-target/debug/inillucent-testrun                   # everything, about 300 s
-target/debug/inillucent-testrun --strict          # fail on a missing prerequisite
+target/debug/inillucent-testrun --tier smoke            # the smallest tier, while editing
+target/debug/inillucent-testrun --changed               # what your uncommitted edits can break
+target/debug/inillucent-testrun --changed origin/main   # the same, after you have committed
+target/debug/inillucent-testrun --changed --list        # the selection, without running it
+target/debug/inillucent-testrun                         # everything
+target/debug/inillucent-testrun --strict                # fail when a prerequisite is missing
 ```
 
-**`--strict` matters.** Several suites need something the workspace cannot build — the pinned SQLite
-oracle, a corpus, a live PostgreSQL — and without it they *report success* when that thing is absent.
-`--strict` counts them and names them, so a green run on a machine with nothing installed cannot be
-mistaken for a green run.
+The exit code is the result. Exit code 0 means every selected target passed. Exit code 1 means a
+target failed. Exit code 2 means the run did not happen, for example because the build failed.
+[`AGENTS.md`](../AGENTS.md) section 2 explains each exit code.
 
-If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the run stops at the first
-failing binary, and has reported about a quarter of the suite.
+If you use `cargo test --workspace`, pass `--no-fail-fast`. Without `--no-fail-fast`, cargo stops at
+the first test binary that fails and the rest of the suite never runs.
 
-**One test fails today, and it is a pinned checksum rather than a behaviour.**
-`inillucent-testrun --strict` reports 1 failed over the 234 rows in `tests/selection.toml`:
-`harness::the_retrieval_baseline_is_unchanged`, which pins the retrieval engine's source files by
-checksum so that work on the relational engine cannot disturb them. The design for a faster commit
-path deliberately changed three of those files - the distance kernel, the graph build and the index -
-and the amendment that records each file, its ticket and its new digest is written when that design
-is finished. The
-wall clock was 3,250 seconds on a 24 processor desktop, so read it as one run on one machine rather
-than as a figure to plan against.
+### Tests that need something extra
 
-**It will still print `not ok` on your machine, and how many suites it names depends on what you
-have installed.** This page used to answer that with a list of the five suites one run on one
-desktop happened to name, which told a reader on a fresh clone nothing: a machine without the
-oracle, the pinned shell, a C compiler, Python with `ssl`, or `openssl` sees thirty or forty, and
-there was no way to tell an expected absence from a new one. So what is published is the shape
-instead - every prerequisite any row declares, how many rows declare it, and what provides it. It
-is read out of `tests/selection.toml`, and
-`cargo test -p inillucent-compat --test documentation` fails when a value in the map is not in this
-table.
+Some suites need a program or a file that the workspace cannot build. Without it, such a suite skips
+its cases and reports success. `--strict` turns each of those skips into a failure and names the
+suite.
+
+So a `--strict` run on a new machine names several suites. The number depends on what is installed.
+The table below lists every prerequisite that a row of `tests/selection.toml` declares, how many rows
+declare it, and how to get it. `cargo test -p inillucent-compat --test documentation` fails when a
+prerequisite in `tests/selection.toml` is missing from this table or has a different count.
 
 <!-- requires:begin -->
 
 | prerequisite | rows | what provides it |
 |---|---:|---|
-| `oracle` | 31 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
-| `shell` | 9 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
-| `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
+| `oracle` | 31 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1` or `bash tools/sqlite-reference.sh` |
+| `shell` | 9 | the pinned `sqlite3` 3.53.4 shell, built by the same two scripts |
+| `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are committed. A new clone has them. The row is for a checkout that has lost them |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
-| `python` | 3 | a Python interpreter with `ssl`, for the TLS server, the `ctypes` conformance runner and the workload extractor |
-| `fixtures` | 2 | the gate fixtures, which are 1.2 MB and 120 MB and are not tracked: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |
-| `node` | 1 | a Node.js runtime, for the npm wrapper's conformance runner: https://nodejs.org/ |
-| `go` | 1 | a Go toolchain, for the Go wrapper's conformance runner: https://go.dev/dl/ |
-| `php` | 1 | a PHP interpreter, for the PHP wrapper's conformance runner: https://www.php.net/downloads |
-| `asan` | 1 | a toolchain with the address sanitizer, which is nightly on every platform and absent on Windows |
-| `embed` | 1 | a build with `inillucent-engine/embed` compiled in, which is what registers `embed(TEXT)` as a name to refuse. The runner builds it from the target's `features` row; `tools/coverage.mjs` does not, because the feature reaches `inillucent-core/onnx` and that crate is excluded from the coverage run |
+| `python` | 3 | Python with the `ssl` module, for the TLS server, the `ctypes` conformance runner and the workload extractor |
+| `fixtures` | 2 | the gate fixtures, 1.2 MB and 120 MB, which are not committed: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |
+| `directory-link` | 2 | permission to create a directory link. Windows gives it to an elevated shell or a machine in developer mode |
+| `node` | 1 | Node.js, for the npm package's conformance runner: https://nodejs.org/ |
+| `go` | 1 | a Go toolchain, for the Go package's conformance runner: https://go.dev/dl/ |
+| `php` | 1 | PHP, for the PHP package's conformance runner: https://www.php.net/downloads |
+| `asan` | 1 | a toolchain with the address sanitizer. That is a nightly toolchain, and there is none on Windows |
+| `embed` | 1 | a build with `inillucent-engine/embed` turned on. The runner builds it from the target's `features` row. `tools/coverage.mjs` does not, because the feature needs `inillucent-core/onnx` and `inillucent-core` is left out of the coverage run |
 | `baseline` | 1 | a recorded performance baseline: `cargo run -p inillucent-compat --bin inillucent-baseline -- capture` |
-| `btree-corpus` | 1 | the retained sequences under `compat/corpus/btree/`, which are tracked |
+| `btree-corpus` | 1 | the saved sequences under `compat/corpus/btree/`, which are committed |
 | `cc` | 1 | a C compiler on `PATH`, for the program that links the C ABI |
-| `conformance-records` | 1 | what the five conformance runners recorded under `_agent_output/conformance/`: `sh tools/run-package-tests.sh` |
-| `directory-link` | 2 | permission to create a directory link, which Windows gives an elevated shell or a machine in developer mode |
-| `local-timezone` | 1 | a configured local time zone the operating system will convert an instant through: `localtime_r` on Unix, `SystemTimeToTzSpecificLocalTime` on Windows |
-| `mysql` | 1 | a live MySQL server, named by `INILLUCENT_TEST_MYSQL_URL` |
-| `narrow-slots` | 1 | the narrow integer slots compiled in, which is a constant in `crates/inillucent-tree/src/leaf.rs` |
+| `local-timezone` | 1 | a local time zone set in the operating system: `localtime_r` on Unix, `SystemTimeToTzSpecificLocalTime` on Windows |
+| `mysql` | 1 | a running MySQL server, named by `INILLUCENT_TEST_MYSQL_URL` |
+| `narrow-slots` | 1 | the narrow integer slots compiled in, set by a constant in `crates/inillucent-tree/src/leaf.rs` |
 | `network` | 1 | outbound network access, turned on by setting `INILLUCENT_NETWORK_TESTS` |
-| `nikaya` | 1 | a local checkout of the application the replay workload is extracted from. The extract is tracked, so this is only needed to check it for staleness |
-| `openssl` | 1 | the `openssl` command, which generates the certificates the TLS suite serves |
-| `postgres` | 1 | a live PostgreSQL server, named by `INILLUCENT_TEST_POSTGRES_URL` |
-| `previous-release` | 1 | a published release's binary, downloaded and verified by `pwsh tools/build-interop-fixture.ps1 -Version <version>` into the gitignored `tools/cross/bin/releases/` |
-| `sqlite-bench` | 1 | the pinned benchmark driver, built by the same two reference scripts |
-| `testrun` | 1 | the runner itself: `cargo build -p inillucent-compat --bin inillucent-testrun --features testrun`, which a plain `cargo test` does not build |
+| `nikaya` | 1 | a local checkout of the application the replay workload comes from. The extracted workload is committed, so this is only needed to check whether the extract is out of date |
+| `openssl` | 1 | the `openssl` command, which makes the certificates the TLS suite serves |
+| `postgres` | 1 | a running PostgreSQL server, named by `INILLUCENT_TEST_POSTGRES_URL` |
+| `previous-release` | 1 | a published release's binary, downloaded and checked by `pwsh tools/build-interop-fixture.ps1 -Version <version>` into `tools/cross/bin/releases/`, which git ignores |
+| `sqlite-bench` | 1 | the pinned benchmark driver, built by the same two scripts as the oracle |
+| `testrun` | 1 | the runner itself: `cargo build -p inillucent-compat --bin inillucent-testrun --features testrun`. A plain `cargo test` does not build it |
 
 <!-- requires:end -->
 
-A row without a prerequisite is a suite that runs everywhere. A suite that can skip and does not
-declare one fails `cargo test -p inillucent-compat --test selection`, and so does a row that
-declares one whose suite cannot skip - which is what keeps this table equal to the workspace rather
-than equal to the last time somebody looked.
-
-The last two joined the list during a differential bug hunt that found tests that were not running,
-and are not a new absence. Those twenty-nine cases sit
-behind the `onnx` cargo feature, which the runner did not turn on, so they were in no binary at all
-and nothing reported them - the source read as coverage while no run had ever started them.
-`tests/selection.toml` now names the features a target is built with, so they are built, they run,
-and the ones that need the weights say so. This page used to say seventeen tests failed; an earlier
-fix had already removed the cause and nobody re-ran it, which is recorded in
-[Closed items](closed-items.md#eight-items-closed-together).
+A row with no prerequisite runs everywhere. `cargo test -p inillucent-compat --test selection`
+fails when a suite can skip and its row declares no prerequisite. It also fails when a row declares
+a prerequisite and its suite cannot skip. Those two checks keep this table equal to the suites.
 
 ## What the tests cover
 
-3,499 tests across 234 test targets in the workspace, in these classes:
+The workspace has 3,499 tests across 234 test targets. There are 234 rows in `tests/selection.toml`,
+and each row is one `[[target]]` that the runner runs. `tools/doc-facts/check.mjs` fails when this
+page gives a different count from `tests/selection.toml`.
 
-The 231 is the `[[target]]` row count in `tests/selection.toml`, which is what
-`tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.
-The number of `#[test]` attributes in the tree is 3,240, and it differs from the run's count in
-both directions. `scenario!` writes six tests from one line, so a story file holds no attribute at
-all for the six it contributes. The other way, a `#[cfg(windows)]` and a `#[cfg(unix)]` pair is two
-attributes and one test on any one machine, and five `onnx` cases are built only when that feature
-is on.
+The tests fall into these classes:
 
-- **A differential harness** that runs the same SQL through the pinned SQLite 3.53.4 and compares
-  transcripts. 208 of those cases are `semantics.rs`, and 416 are the wider feature probe.
-- **A SQLLogicTest subset**, whose expected values were recorded from the pinned binary — so the
-  suite grades this engine against SQLite on a machine that has no SQLite on it. Nothing in the
-  generator reads inillucent: a corpus that recorded the engine's own answer as the thing to grade
-  against would test nothing.
-- **A `BTreeMap` model reference**, driven by operation traces.
-- **A deterministic fault injecting file system** under the page pool, the log and the transaction
-  engine. It must lose an unsynced write sometimes and a synced one never, over every seed, and a
-  recorded schedule must replay an identical trace event for event.
-- **Crash campaigns**, in which a crash on either side of a checkpoint or a log retirement has to
-  recover the same database.
-- **Eight fuzz targets** over the codecs, and a seeded twin of every one of them that runs under
-  `cargo test` on the pinned compiler. libFuzzer needs a nightly toolchain and a scheduled job, so a
-  regression only a fuzz run finds is a regression that ships; the twins are in
-  `crates/inillucent-base/tests/fuzz_seeded.rs`, `inillucent-tree`'s, `inillucent-pool`'s and
-  `inillucent-wal`'s, and each sweeps twenty thousand deterministic inputs through the decoder and
-  counts how many reached it, so a sweep that only ever exercised a refusal fails. The four
-  non-codec targets - `json`, `mysql`, `postgres`, `store` - have had theirs beside the code since
-  they were written.
-- **The locking protocol across two real processes**, not two handles in one, because advisory locks
-  are per process and a same process test would pass against a broken implementation. A dead process
-  must release its locks.
-- **One conformance suite run three ways** — against the in memory file system, the real one, and the
-  simulator — so "the simulator behaves like a disk" is a checked claim rather than a hope.
-- **The page pool and the tree are the two most covered crates in the workspace**, at 93.4% and
-  92.0% of regions and 94.3% and 93.8% of lines - the page pool being the interior, latch, meta,
-  extent, free map and swip modules, and the tree being the key codec among them.
+| Class | What it checks |
+|---|---|
+| Differential tests | the same SQL runs through inillucent and the pinned SQLite 3.53.4, and the results are compared. `semantics.rs` holds 208 cases and the feature probe holds 416 |
+| SQLLogicTest subset | expected results were recorded from the pinned SQLite, so the suite grades inillucent against SQLite on a machine with no SQLite installed. The generator never reads inillucent's output |
+| Model tests | a `BTreeMap` model runs the same operation traces as the engine, and the results must match |
+| Fault injection | a simulated file system under the page pool, the log and the transaction engine. It must lose an unsynced write sometimes and a synced write never, for every seed. A recorded schedule must replay the same trace, event for event |
+| Crash tests | a crash on either side of a checkpoint or a log retirement must recover to the same database |
+| Fuzz targets | 16 libFuzzer targets run on a nightly toolchain. Four codecs also have a seeded version that runs under `cargo test`: the `fuzz_seeded.rs` files in `inillucent-base`, `inillucent-pool`, `inillucent-tree` and `inillucent-wal`. Each one sends twenty thousand fixed inputs through a decoder and fails when too few of them reach the decoder |
+| Locking tests | two real processes take locks on one file, because advisory locks belong to a process. A dead process must release its locks |
+| File system conformance | one suite runs against the in memory file system, the real file system and the simulator |
 
-  This sentence used to claim complete **branch** coverage of those modules, sixteen lines above the
-  sentence saying branch coverage cannot be measured on the pinned toolchain. Both cannot be true,
-  and it is the second one that is: branch coverage needs `-Z coverage-options=branch`, a nightly
-  option, and `rust-toolchain.toml` pins stable. What replaced it is the two crate numbers from the
-  table below, which is what `tools/coverage.mjs` actually measures. **Per-module numbers are not
-  published**, because `tools/coverage.mjs` aggregates to the crate and nothing here has measured
-  them.
-- **29 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 21 forbid
-  `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
-  system results. The twenty-ninth to arrive was `inillucent-bench`, when the bench crate was brought
-  under the same four lints: it is a binary
-  crate, and the attributes go on `main.rs` because a `#![deny(..)]` is a crate root inner attribute
-  and `main.rs` is a crate root. Turning them on there produced 191 errors - 154 slice indexes, 18
-  slices, 8 `unwrap`s and 11 `expect`s - in the harness that scores the numbers on this page and in
-  `docs/retrieval-quality.md`.
+`inillucent-pool` and `inillucent-tree` are the two crates with the most coverage: 93.4% and 92.0% of
+regions, and 94.3% and 93.8% of lines. Those numbers come from the table below.
 
-### How much of it is covered
+29 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing, and 21 forbid `unsafe`.
+Those lints cover every path that reads SQL text, database pages, log frames, network bytes or file
+system results. The lints go on each crate root: `lib.rs` for a library and `main.rs` for
+`inillucent-bench`, which is a program.
 
-Measured on 2026-09-15 at commit `f9d1433`, which is `v0.1.3`, with
-`tools/validate.ps1 -Coverage` (`tools/validate.sh --coverage` on Unix), which
-runs every suite under `cargo llvm-cov` and prints this table. **The repository
-is at `v0.1.4` and this table has not been measured again since `v0.1.3`**, so
-read it as the last measurement rather than as the current one; the command
-above is what refreshes it, and it takes about an hour. Region and line
-coverage, not branch: branch coverage needs `-Z coverage-options=branch`, a
-nightly option, and `rust-toolchain.toml` pins the compiler to stable for the
-reason written beside the pin.
+### How much of the code the tests cover
+
+The table below was measured on 2026-09-15 at commit `f9d1433`, which is the `v0.1.3` tag. The
+command is `tools/validate.ps1 -Coverage` on Windows or `tools/validate.sh --coverage` on Unix. It
+runs every suite under `cargo llvm-cov` and takes about an hour. The workspace is now at version
+1.0.29 and the table has not been measured again.
+
+The table shows region and line coverage. Branch coverage needs `-Z coverage-options=branch`, a
+nightly compiler option, and `rust-toolchain.toml` pins a stable compiler.
 
 <!-- coverage:begin -->
 
@@ -275,44 +288,34 @@ reason written beside the pin.
 
 <!-- coverage:end -->
 
-The table is written into this page by `tools/coverage.mjs --per-crate --write`, between the two
-marker comments, rather than printed to a terminal for somebody to paste. It listed 25 crates
-against the workspace's 29: three are excluded from the run by name and the exclusion is stated
-below, and the fourth is `inillucent`, the facade, whose body is a re-export and which therefore
-emits no regions at all. `cargo test -p inillucent-compat --test documentation` fails when a
-workspace member is neither in the table, nor in `tools/coverage.mjs`'s `EXCLUDED`, nor named in a
-sentence here.
+`tools/coverage.mjs --per-crate --write` writes the table between the two marker comments. The
+table has 25 rows and the workspace has 29 crates. Three crates are left out of the run by name, and
+the fourth is `inillucent`, the facade, whose only content is one `pub use` line, so it has no regions to
+measure. `cargo test -p inillucent-compat --test documentation` fails when a workspace member has no
+row, is not in the `EXCLUDED` list in `tools/coverage.mjs`, and is not named in a sentence here.
 
-Three rows need reading rather than ranking.
+The three crates left out are `inillucent-core`, `inillucent-bench` and `inillucent-model`. They
+need ONNX Runtime and a text corpus. On a machine without those, they would add uninstrumented zeros
+to the table.
 
-`inillucent-driver-capi` reads 0.8%, and the C ABI is not untested: its
-conformance suite drives the symbols through a C program that links the built
-`cdylib`, which is a separate binary from the instrumented test executables this
-measurement merges. What the number says is that no Rust test calls those
-functions, which is true and is what a C ABI is for.
+Two groups of rows need an explanation:
 
-`inillucent-compat` and `inillucent-cli` are the two crates that are mostly
-*programs*: eighteen gate and profiling binaries between them, each run by hand
-or by a scheduled job rather than by `cargo test`. The library halves of both
-are covered by the suites that use them. Their percentages are in the table
-above and are not repeated here. They were repeated here, in prose eleven lines
-under the table, and the two copies disagreed in the first decimal place -
-which is what a number written twice does.
+- `inillucent-driver-capi` shows 0.8%. The C ABI has a conformance suite, but that suite drives the
+  functions from a C program linked against the built library. The coverage run measures only the
+  Rust test programs, and no Rust test calls the C ABI functions.
+- `inillucent-compat` and `inillucent-cli` hold many programs that run by hand or on a schedule: the
+  gates, the profilers and the benchmarks. `cargo test` does not run those programs. The library
+  code in both crates is covered by the suites that use it.
 
-The three retrieval crates - `inillucent-core`, `inillucent-bench` and
-`inillucent-model` - are excluded from the run. They need ONNX Runtime and a
-corpus, and on a machine without either they contribute uninstrumented zeros
-rather than a number.
+## The rules a test checks
 
-## The contracts a test enforces
-
-| contract | where it lives | what fails |
+| Rule | Where it is written | The test that fails |
 |---|---|---|
-| **Dependencies** — an allowed list, not a denied one | [`docs/dependency-policy.md`](dependency-policy.md) | `cargo test -p inillucent-compat --test policy` |
-| **Layering** — which crate may depend on which | `docs/invariants/layering.toml` | the same suite, `the_workspace_obeys_the_dependency_contract` |
-| **Test selection** — every test target has a row | `tests/selection.toml` | `--test selection`, which names your target |
-| **One command table** — the command line and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `--test command_parity` |
-| **The testing standard** — where a new test goes, and how the suite runs | [`tests/inillucent-testing-tdd.md`](../tests/inillucent-testing-tdd.md) | reviewed rather than compiled |
+| **Dependencies**: only crates on an allowed list | [`docs/dependency-policy.md`](dependency-policy.md) | `cargo test -p inillucent-compat --test policy` |
+| **Layering**: which crate may depend on which | `docs/invariants/layering.toml` | `the_workspace_obeys_the_dependency_contract` in the same suite |
+| **Test selection**: every test target has a row | `tests/selection.toml` | `cargo test -p inillucent-compat --test selection`, which names the target |
+| **One command table**: the command line and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `cargo test -p inillucent-compat --test command_parity` |
+| **The testing standard**: where a new test goes and how the suite runs | [`tests/inillucent-testing-tdd.md`](../tests/inillucent-testing-tdd.md) | none. A reviewer checks it |
 
 ## Reproducing the measurements
 
@@ -329,39 +332,33 @@ target/release/inillucent-fullgate <dir>/medium-run1.db --scale medium --rounds 
 target/release/inillucent-readgate    <dir>/medium-read.db --scale medium
 target/release/inillucent-shellrss
 target/release/inillucent-vectorprobe --rows 20000 --dims 256
-# a report, not a gate: it prints the retrieval consumer's absolute cost on
-# this engine's own storage and always exits 0 unless something actually
-# errors. It used to compare against the old engine's storage; that engine is
-# deleted and no recorded floor exists to gate against in its place, so it
-# reports rather than passing or failing.
+# prints the search cost on this engine's storage; it reports and always exits 0 unless it errors
 target/release/inillucent-searchgate  --documents 500 --rounds 30
-# the open.prepare family on its own, without a whole scorecard. It takes the
-# SQLite fixture and imports its own copy for the native arms, so one file is
-# all it is given.
+# the prepare family alone; it imports its own copy of the SQLite fixture
 target/release/inillucent-prepareperf <dir>/medium-prepare.db 30
 
-# the parity manifest and the dependency contract
+# the parity manifest and the dependency rules
 cargo run -p inillucent-compat --bin inillucent-manifest -- check
 cargo run -p inillucent-compat --bin inillucent-manifest -- report
 cargo run -p inillucent-compat --bin inillucent-manifest -- layering
 ```
 
-[Performance](performance.md#reproducing-it) has the settings each gate is run under and why.
-[Retrieval quality](retrieval-quality.md#running-it) has the graded comparison, and
+[Performance](performance.md#reproducing-it) lists the settings each gate runs under.
+[Retrieval quality](retrieval-quality.md#running-it) has the graded search comparison, and
 [Synthetic corpus](../tests/synthetic-corpus.md) builds the corpus it runs on.
 
 ## House style
 
-Read three neighbouring files before writing one. The conventions that carry weight:
+Read three neighbouring files before you write a new one. Then follow these rules:
 
-- **Every function has a doc comment saying what it is for**, with `@param` lines. Governed crates
-  `deny(missing_docs)`, and a test checks that every module states its invariant.
-- **Comments carry the argument, not the mechanics.** The comment worth writing here says why the
-  obvious thing is wrong: what was measured, what failed before, what a different choice would cost.
-- **A comment may only claim what its test proves.**
-- **A test asserts a value, not the absence of a crash.** `assert!(result.is_ok())` on a migration
-  that published nothing is a passing test of nothing.
-- **A test that cannot fail is worse than no test.** A benchmark that excludes the change under test,
-  a check whose prerequisite is missing, a gate whose bound is straddled — each reports green and
-  means nothing.
-- `cargo fmt` before you finish. `policy.rs` fails on an unformatted governed crate.
+- **Every function has a doc comment that says what it is for**, with `@param` lines. The governed
+  crates set `deny(missing_docs)`, and a test checks that every module states its invariant.
+- **A comment explains why.** Say why the obvious approach is wrong, what was measured, what failed
+  before, or what another choice would cost.
+- **A comment claims only what its test proves.**
+- **A test asserts a value.** `assert!(result.is_ok())` on a migration that published nothing passes
+  and proves nothing.
+- **A test must be able to fail.** A benchmark that leaves out the change under test, a check whose
+  prerequisite is missing, or a limit set so wide nothing crosses it all report success and mean
+  nothing.
+- **Run `cargo fmt` before you finish.** `policy.rs` fails on an unformatted governed crate.

@@ -1,0 +1,35 @@
+# The documents the writing rules apply to, relative to the repository root.
+#
+# A directory means every `.md` under it. `tools/doc-style/check.mjs` and
+# `crates/inillucent-compat/tests/documentation.rs` both read this file.
+#
+# Left out on purpose: `CHANGELOG.md`, the design documents under `tasks/` and `tests/*-tdd.md`, and
+# the reports under `compat/`. The changelog and the design documents record what was written at the
+# time. The reports are written by programs.
+
+README.md
+AGENTS.md
+CONTRIBUTING.md
+SECURITY.md
+CODE_OF_CONDUCT.md
+docs
+agent-skills
+drivers/README.md
+packages/go/README.md
+packages/npm/inillucent/README.md
+packages/php/README.md
+packages/python/README.md
+examples/rag-agent/README.md
+examples/rag-agent/AGENTS.md
+packaging/README.md
+packaging/PUBLISHING.md
+packaging/macos/README.md
+packaging/windows/README.md
+tests/README.md
+tests/crash/README.md
+tests/interop/README.md
+tests/synthetic-corpus.md
+fuzz/README.md
+tools/feature-probe/README.md
+.github/PULL_REQUEST_TEMPLATE.md
+.github/ISSUE_TEMPLATE/bug_report.md

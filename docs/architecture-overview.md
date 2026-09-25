@@ -1,181 +1,339 @@
 # Architecture in one page
 
-Two engines in one file, and what happens to one query across both of them.
+inillucent has two engines, and both keep their data in one `.rdb` file. This page shows how the two
+engines fit together, follows one query that uses both of them, and lists where the bytes live on
+disk. It is the page to read before [Relational architecture](relational-architecture.md) (the SQL
+engine in depth) and [Architecture](architecture.md) (the search engine in depth).
 
-[Architecture](architecture.md) covers the retrieval half in plain terms.
-[Relational architecture](relational-architecture.md) covers the SQL half: storage, transactions,
-the log, recovery. Nothing sat above them, so a reader who wanted to know what the product *is*
-before reading either had nowhere to start. This page is that.
+## Terms used on this page
+
+Each term links to its entry group in the [glossary](glossary.md).
+
+| Term | Meaning here |
+|---|---|
+| [B+tree](glossary.md#storage) | the structure every table and every index is stored in |
+| [Page](glossary.md#storage) | the fixed size block the file is divided into. The default is 32 KiB |
+| [Buffer pool](glossary.md#storage) | the pages the engine keeps in memory. The default is 128 MiB |
+| [Meta page](glossary.md#storage) | the first page of the file, which says how to read the rest |
+| [Shadow table](glossary.md#storage) | an ordinary table that a virtual table stores its data in |
+| [WAL](glossary.md#transactions-and-the-log) | the write ahead log. Every change is appended to the write ahead log before the database file changes |
+| [Checkpoint](glossary.md#transactions-and-the-log) | copying logged changes into the database file |
+| [Journal](glossary.md#transactions-and-the-log) | a file of old page images that protects a checkpoint |
+| [HNSW](glossary.md#search) | the graph index that makes vector search fast |
+| [BM25](glossary.md#search) | the formula that scores a keyword match |
+| [Virtual table](glossary.md#sql) | a table whose rows come from a module instead of a B+tree. It is read and written with ordinary SQL |
 
 ## The two engines
 
-**The relational engine** speaks SQLite's dialect on its own storage. It parses SQL, binds it
-against a catalog, plans it, and runs it over B+trees with a write-ahead log underneath. It is not a
-fork of SQLite and does not read SQLite's file format: the dialect is the thing that was kept, and
-the storage was rewritten. `inillucent migrate` reads a `.db` file into one of these.
+```mermaid
+flowchart TB
+    App["Your program or the inillucent command"] --> SQL["Relational engine: parse, bind, plan, execute"]
+    SQL --> Tables["Tables and indexes as B+trees"]
+    SQL --> Search["Retrieval engine: HNSW graph and BM25 keyword index"]
+    Search --> Shadow["Five shadow tables per search table"]
+    Tables --> Txn["One transaction"]
+    Shadow --> Txn
+    Txn --> Log[("Log segment: app.rdb-wal.0000000001")]
+    Txn --> File[("One database file: app.rdb")]
+```
 
-**The retrieval engine** searches by meaning. It holds embeddings - a list of 768 numbers per piece
-of text - in an HNSW graph, and the words of that text in an inverted index scored by BM25. Given a
-query it can find the chunks that mean something similar, the chunks that contain the words, or
-both ranked together.
+**The relational engine** runs SQL in SQLite's dialect. It parses the statement, binds names to
+tables and columns, plans the query and runs it over B+trees. The relational engine uses its own
+file format. It does not open SQLite's `.db` files directly. `inillucent migrate` copies a `.db` file
+into a new `.rdb` file.
 
-**They are one file and one transaction.** A `CREATE TABLE` with a `VECTOR(768)` column and an
-`inillucent_search` index over it is ordinary SQL; the index commits and rolls back with the rows it
-indexes, because the module that owns it writes through the same transaction the `INSERT` does. That
-is the thing this project is for. The usual arrangement is PostgreSQL with pgvector holding the rows
-and `llama.cpp` serving the model over HTTP - two processes, two network hops, and no transaction
-that covers both.
+**The retrieval engine** searches text by meaning and by keyword. It keeps each text's
+[embedding](glossary.md#search) in an HNSW graph, and the words of each text in an
+[inverted index](glossary.md#search) scored by BM25. A search returns the texts whose embeddings are
+closest to the query, the texts that contain the query's words, or both lists combined into one
+ranking.
 
-Words used below and not explained here are in the [glossary](glossary.md).
+**Both engines share one file and one transaction.** An `inillucent_search` table is a virtual table.
+The retrieval engine stores every byte of an `inillucent_search` table as rows in five ordinary
+shadow tables inside the same `.rdb` file. So a row in an ordinary table and an entry in a search
+table commit together, roll back together, and are recovered together after a crash.
 
-## One query, through both halves
+The next example shows the rollback. It adds a note to an ordinary table and to a search table in one
+transaction, and then rolls the transaction back. The table definitions are in
+[the next section](#one-query-through-both-engines).
+
+```sh
+inillucent --db notes.rdb run "BEGIN;
+  INSERT INTO note VALUES (4, 2, 'refund for a late parcel');
+  INSERT INTO note_search (rowid, body, vector) VALUES (4, 'refund for a late parcel', '[0.1, 0.3, 0.9]');
+  SELECT count(*) FROM note_search WHERE note_search MATCH 'refund' AND k = 10;
+  ROLLBACK;
+  SELECT count(*) FROM note_search WHERE note_search MATCH 'refund' AND k = 10;
+  SELECT count(*) FROM note;"
+```
+
+```text
+2
+1
+3
+```
+
+Inside the transaction the keyword search finds two notes that contain "refund". After `ROLLBACK` the
+keyword search finds one note, and the `note` table has its three original rows again.
+
+## One query through both engines
+
+This example makes a database with two ordinary tables and one search table. The search table uses
+3 numbers per embedding so the example fits on the page. A real embedding model produces 768 numbers
+per text.
+
+```sh
+inillucent create notes.rdb
+inillucent --db notes.rdb batch "
+  CREATE TABLE author (id INTEGER PRIMARY KEY, name TEXT);
+  CREATE TABLE note (id INTEGER PRIMARY KEY, author_id INTEGER, body TEXT);
+  CREATE VIRTUAL TABLE note_search USING inillucent_search(body, dims = 3);
+  INSERT INTO author VALUES (1, 'Ana'), (2, 'Ben');
+  INSERT INTO note VALUES (1, 1, 'refund policy for damaged goods'),
+                          (2, 2, 'shipping times to Europe'),
+                          (3, 1, 'how to return an item');
+  INSERT INTO note_search (rowid, body, vector) VALUES
+    (1, 'refund policy for damaged goods', '[0.1, 0.2, 0.9]'),
+    (2, 'shipping times to Europe',        '[0.9, 0.1, 0.1]'),
+    (3, 'how to return an item',           '[0.2, 0.1, 0.8]');"
+```
+
+The query asks for notes that match the word "refund" and a query vector, joins each hit to its note
+and its author, and orders the rows by the combined search score:
+
+```sh
+inillucent --db notes.rdb query "
+  SELECT a.name, n.body, s.rank
+  FROM note_search AS s
+  JOIN note   AS n ON n.id = s.rowid
+  JOIN author AS a ON a.id = n.author_id
+  WHERE note_search MATCH 'refund' AND s.vector = '[0.1, 0.1, 1.0]' AND s.k = 3
+  ORDER BY s.rank"
+```
+
+```text
+name  body                             rank
+----  -------------------------------  --------------------
+Ana   refund policy for damaged goods  -1.0
+Ana   how to return an item            -0.28771936893463135
+Ben   shipping times to Europe         -0.0
+```
+
+A lower `rank` is a better match. "how to return an item" does not contain the word "refund". It is
+in the result because its vector is close to the query vector. That is the hybrid search: the keyword
+list and the vector list are combined into one ranking.
+
+`inillucent explain` prints the plan the engine chose for the same query:
+
+```text
+SCAN n
+SEARCH a USING INTEGER PRIMARY KEY (rowid=?)
+SCAN s VIRTUAL TABLE INDEX
+USE TEMP B-TREE FOR ORDER BY
+```
+
+### The steps
 
 ```mermaid
 flowchart TB
-    Text["SQL text"] --> Parser["parser<br/>text to a syntax tree"]
-    Parser --> Binder["binder<br/>names to columns, over a catalog snapshot"]
-    Binder --> Planner["planner<br/>which index, which join order"]
-    Planner --> Exec["executor<br/>batch at a time, borrowing pinned pages"]
-
-    Exec --> Txn["transactions<br/>one writer, readers see a consistent snapshot"]
-    Txn --> Tree["B+trees<br/>one per table, one per index"]
-    Txn --> Wal["write-ahead log<br/>the record reaches disk before the page"]
-    Tree --> Pool["buffer pool<br/>one per open file"]
-    Pool --> Vfs["VFS<br/>open, read, write, sync, lock"]
-    Wal --> Vfs
-    Vfs --> File[("the .rdb file<br/>and its log")]
-
-    Exec -.->|"a virtual table"| Search["retrieval engine<br/>HNSW graph + BM25 postings"]
-    Search -.-> Store[("the index files<br/>vectors, store, graph, config")]
-    Search --> Txn
-
-    Catalog["catalog<br/>what tables and indexes exist"] --> Binder
-    Tree --> Catalog
+    Text["SQL text"] --> Parse["1. Parse: text to a syntax tree"]
+    Parse --> Bind["2. Bind: names to tables and columns, using the catalog"]
+    Bind --> Plan["3. Plan: pick the access path and join order for each table"]
+    Plan --> Exec["4. Execute: run the plan a batch of rows at a time"]
+    Exec --> Trees["5. Read note and author through their B+trees"]
+    Exec --> Module["6. Ask the search module for scores"]
+    Module --> Shadow["Search index read from its shadow tables"]
+    Trees --> Pool["Buffer pool: pages held in memory"]
+    Shadow --> Pool
+    Pool --> Disk[("notes.rdb")]
 ```
 
-The dotted edges are the retrieval half. It hangs off the executor as a **virtual table**: a table
-whose rows come from a module rather than from a B+tree, read and written with ordinary SQL. That is
-the same mechanism FTS5 and the R-tree use, and it is why the retrieval engine needs no API of its
-own. [Relational architecture section 9](relational-architecture.md#9-extensions-and-virtual-tables)
-is the protocol; [section 10](relational-architecture.md#10-keeping-a-vector-index-current) is how
-the index stays current with the rows.
+1. **Parse.** The parser turns the SQL text into a syntax tree. Text that is not valid SQL fails here
+   with a syntax error and the byte position where parsing stopped.
+2. **Bind.** The binder resolves every name against the [catalog](glossary.md#storage): which table,
+   which column, which type. A missing table or column fails here. The error names the column, for
+   example `no such column: x`.
+3. **Plan.** The planner chooses how to read each table and the order to join them in. In this query
+   it reads `note` in the outer loop (`SCAN n`). It finds each note's author by primary key
+   (`SEARCH a USING INTEGER PRIMARY KEY`). It hands the constraints on `note_search` to the search
+   module (`SCAN s VIRTUAL TABLE INDEX`). It sorts the result by `rank` at the end
+   (`USE TEMP B-TREE FOR ORDER BY`).
+4. **Execute.** The executor runs the plan a batch of rows at a time. A batch reads values directly
+   from the [pinned](glossary.md#storage) page in the buffer pool. Values are copied only when an
+   operator has to keep them, such as a sort, a hash join or an aggregate.
+5. **Read the B+trees.** The rows of `note` and `author` come from their B+trees. Each page is read
+   from the buffer pool, and from the file only when the buffer pool does not hold it.
+6. **Search.** The `inillucent_search` module receives the constraints the planner handed it: the
+   `MATCH` text, the query vector and `k`. The module scores keyword matches with BM25 and vector
+   matches by cosine distance, combines the two lists and returns rows with a `rank`. Those rows join
+   to `note` and `author` like rows from any other table. The module reads its index from its shadow
+   tables, through the same buffer pool as every other table.
 
-### The lifecycle, step by step
+The search module is a virtual table, the same mechanism SQLite uses for FTS5 and the R-Tree. So the
+retrieval engine needs no API of its own: `CREATE VIRTUAL TABLE`, `INSERT` and `SELECT` reach
+`inillucent_search`. [Relational architecture](relational-architecture.md) describes the virtual table
+protocol and how a vector index stays current with the rows it indexes.
 
-1. **Parse.** The text becomes a syntax tree. A statement that is not valid SQL stops here with
-   `SQLITE_ERROR` and the position it stopped at.
-2. **Bind.** Every name is resolved against a snapshot of the catalog: which table, which column,
-   what type, which collation. A missing table is reported here. The binder does no I/O and says so
-   in its types, so a bind cannot read a page.
-3. **Plan.** The planner chooses the access path for each table - a scan, a seek through an index, a
-   covering index that answers without touching the table - and the order to join them in.
-   `EXPLAIN QUERY PLAN` prints what it chose.
-4. **Execute.** The executor walks the plan a batch of rows at a time. A batch **borrows the bytes
-   of the pinned page** rather than copying them, so a scan that reads one column of a wide table
-   reads one region of each leaf. Values are copied only where an operator has to outlive its input:
-   a sort, a hash join, an aggregate.
-5. **Read or write.** A read descends a B+tree through the buffer pool, three page reads deep on a
-   large table. A write appends a log record, changes the page in the pool, and leaves the file
-   itself to a later checkpoint.
-6. **Retrieval, if the statement reaches it.** A query against an `inillucent_search` index goes
-   through the virtual-table protocol: the module is handed the constraints the planner could not
-   answer itself, searches its HNSW graph and its postings, and hands back rows. Those rows join
-   against ordinary tables like any others.
+### How a write commits
 
-### How a transaction commits, in one paragraph
+```mermaid
+flowchart LR
+    W["INSERT or UPDATE"] --> R["Append a record to the log"]
+    R --> C["COMMIT: append a commit record and sync the log"]
+    C --> D["The transaction is durable"]
+    D --> K["Later, a checkpoint copies the logged pages into the .rdb file"]
+```
 
-Every change is written to the **log before it is written to the database file** - that is the
-write-ahead rule, and it is the whole of why a crash is survivable. `COMMIT` appends a commit record
-and syncs the log; at that point the transaction is durable even though the database file has not
-changed at all. A **checkpoint**, later, writes the logged pages into the file and retires that part
-of the log. A crash between the two leaves a file missing the writes and a log holding them, and the
-next open replays the log from the last checkpoint. A crash *during* a checkpoint is the same
-situation: recovery applies what the file has not got and skips what it has, decided per page by the
-LSN stamped on it. [Relational architecture section 5](relational-architecture.md#5-the-log-and-what-a-crash-costs)
-has recovery in full, including what `journal_mode = off` gives up.
+Every change is written to the log before the database file changes. `COMMIT` appends a commit
+record and syncs the log to disk. At that moment the transaction is durable, and the `.rdb` file may
+not have changed yet. A checkpoint copies the logged pages into the `.rdb` file later. A checkpoint
+runs when the log grows past 4 MiB, when `inillucent checkpoint` asks for one, or when a
+connection closes. After a crash, the next open replays the log from the last checkpoint. Every page
+records the [LSN](glossary.md#transactions-and-the-log) of the last log record it holds, so recovery
+skips the records a page already has.
 
-Access from **several processes** works, over the same SHARED, RESERVED, PENDING and EXCLUSIVE lock
-protocol SQLite uses, with one writer at a time: a second writer waits up to `PRAGMA busy_timeout`
-and is then refused with `busy`. Every connection re-derives the meta record, its pages and the
-log's tail from the files at the moment it takes the lock, which is what makes a commit another
-process made visible to this one.
-`crates/inillucent-compat/tests/process_concurrency.rs` asserts that rows present equal commits
-acknowledged, with two real writer processes. **Threads inside one process** do not: a `Database` is
-neither `Send` nor `Sync` today, and [the roadmap](roadmap.md) has the step that makes it `Send`.
+Several processes can use one database file. One process writes at a time. A second writer waits up
+to `PRAGMA busy_timeout` (5000 milliseconds by default) and then fails with the status `busy`.
+`crates/inillucent-compat/tests/process_concurrency.rs` runs two real writer processes and checks
+that the number of rows in the file equals the number of commits the engine acknowledged.
 
 ## Where the bytes live
 
-One database is **one `.rdb` file and its log**. Inside the file:
+### The files on disk
 
-| | |
+A new database is one `.rdb` file and one log segment beside it. `inillucent create app.rdb` writes
+these two files:
+
+```text
+app.rdb                   131072 bytes
+app.rdb-wal.0000000001       112 bytes
+```
+
+| File | When it exists | What it holds |
+|---|---|---|
+| `app.rdb` | always | every table, every index, every search table and the catalog |
+| `app.rdb-wal.NNNNNNNNNN` | always, one current segment | the write ahead log. The ten digit number goes up as segments are retired and new ones start |
+| `app.rdb-journal` | only while a checkpoint runs, in the default `delete` journal mode | old images of the pages the checkpoint is overwriting, so a crash during the checkpoint can put them back |
+
+There is no separate folder or file for a search index. After the example above added two tables and
+a search table, the directory still held only `notes.rdb` and its log segment.
+
+`PRAGMA journal_mode` accepts SQLite's six values and the default is `delete`. In inillucent the
+write ahead log records every change in every journal mode. The journal mode decides how a
+checkpoint is protected. [Relational architecture](relational-architecture.md) covers recovery and
+each journal mode in full.
+
+### Inside the `.rdb` file
+
+```mermaid
+flowchart TB
+    Meta["Pages 0 and 1: the meta page and its copy"] --> Cat["Catalog B+tree: which tables and indexes exist"]
+    Meta --> Free["Free map: which pages are unused"]
+    Cat --> T["One B+tree per table"]
+    Cat --> I["One B+tree per index"]
+    Cat --> S["Five shadow tables per search table"]
+    T --> X["Blob extents: the rest of a value too long for one page"]
+```
+
+| Part | What it holds |
 |---|---|
-| **the meta page** | page 1, written in two copies: the page size, the catalog's root page, the free map's head. It says how to read everything else, so a file whose meta page will not decode is refused rather than believed. |
-| **one B+tree per table** | interior pages holding separator keys and pointers, leaves holding the rows in key order. |
-| **one B+tree per index** | the same structure, keyed by the indexed columns, with the row's identity at the end of each entry. |
-| **blob extents** | the tail of any value too long to sit in a leaf, chained page by page. |
-| **the free map** | which pages are not in use, so a new page is taken from inside the file rather than added to the end of it. |
+| **The meta page** | pages 0 and 1, two copies of the same record: the page size, the page number of the catalog and the start of the free map. A reader uses the copy with a valid checksum and the higher generation number. The engine refuses a file when neither copy is valid. The two copies let a checkpoint replace the meta page without a journal, because the old copy stays valid until the new copy is on disk |
+| **The catalog** | a B+tree that records every table, index, view and trigger. `SELECT * FROM sqlite_schema` lists what it holds |
+| **One B+tree per table** | [interior pages](glossary.md#storage) hold keys and page numbers. [Leaves](glossary.md#storage) hold the rows in key order |
+| **One B+tree per index** | the same structure, keyed by the indexed columns. Each entry ends with the row's key |
+| **[Blob extents](glossary.md#storage)** | the rest of a value too long to fit in a leaf, stored as a chain of pages |
+| **The [free map](glossary.md#storage)** | the pages that are not in use. A new page is taken from the free map before the file grows |
 
-The log is a separate file beside the database, named `<database>-wal.NNNNNNNNNN`; a checkpoint
-retires one segment and starts another.
+A new file uses format version 2, written in the meta page. This build also reads format 1.
 
-The **retrieval index is four more files**, in a directory of their own:
-`vectors.bin` (the embeddings), `store.bin` (the chunk text and its attributes), `graph.bin` (the
-HNSW connections) and `config.bin` (what it was built with). Each begins with a marker and a format
-number, so a file written by a different version is refused rather than misread. The word index and
-the compressed embeddings are not stored, because both are recomputed exactly from the first two
-files and recomputing them is cheaper than the disk they would take.
-[Architecture section 11](architecture.md#11-saving-and-reopening) has the sizes on the measured
-corpus.
+The page size is 32 KiB unless the file was created with another page size. `inillucent stats`
+reports it. For `notes.rdb` above, `inillucent stats` printed `page size: 32768` and
+`page count: 11`, and the file is 360,448 bytes, which is 11 times 32,768.
 
-## Threads: serialized, not parallel
+### The five shadow tables of a search table
 
-SQLite's own word for it, and the same promise. `SharedDatabase` in the driver lets any number of
-threads use one database, and exactly one statement runs at a time. No statement runs in parallel
-with another, no statement is split across threads, and the executor is unchanged. What it buys is
-that an application with a thread pool does not need a connection per thread and a protocol for
-handing them around.
+`CREATE VIRTUAL TABLE note_search USING inillucent_search(...)` creates five ordinary tables. They are
+listed in `sqlite_schema` beside `note_search`:
 
-**The database gets a thread of its own rather than a lock.** A `Database` holds `Rc` - the engine's
-state groups, the log, the compiled plans - so it is neither `Send` nor `Sync`. The obvious way to
-share one is a mutex and an `unsafe impl Send` whose argument is that the `Rc` graph is reachable
-only through the mutex; that argument has a hole, because `Connection::set_authorizer` takes an `Rc`
-the caller keeps a clone of. So the database is opened on a thread of its own and never leaves it,
-and the handles send it statements. `inillucent-driver` keeps `#![forbid(unsafe_code)]` and the
-confinement is the compiler's rather than a paragraph's. The cost is a thread per shared database
-and a channel round trip per statement.
+| Shadow table | What it holds |
+|---|---|
+| `note_search_config` | the definition: columns, vector width, distance, tokenizer, exact or approximate search, and the format number |
+| `note_search_content` | every indexed row, with its text and its vector. This is the complete copy the index can be rebuilt from |
+| `note_search_delta` | one row per change since the last index build, in commit order |
+| `note_search_gen` | the built index (HNSW graph and keyword index), stored as rows. A new build writes a new generation and never edits an old one |
+| `note_search_state` | which generation is current and how far that generation covers the delta rows |
 
-**A transaction holds the turn for its whole life.** In this engine a transaction belongs to the
-*database* rather than to the handle that opened it, so another thread's statement between a `BEGIN`
-and its `COMMIT` would join that transaction and be committed by it. `SharedTransaction` takes a
-turn lock when it opens and gives it back when it settles, so every other thread waits for the whole
-transaction. That is the cost of the promise.
+An index built with `CREATE INDEX ... USING inillucent_hnsw` on a `VECTOR(N)` column keeps its data
+in the same five kinds of shadow table.
 
-`drivers/inillucent-driver/tests/threads.rs` asserts the three properties: eight threads inserting a
-thousand rows each land eight thousand rows with no two sharing a key; a reader sampling throughout a
-thousand-row transaction sees zero rows or a thousand and never a number between; and a database
-used and dropped on another thread releases its file, which the reopen afterwards proves.
+### The legacy index directory
 
-## What is deliberately not here
+The retrieval engine was a separate library before it moved inside the `.rdb` file. That library
+saves an index in a folder of its own. Each save writes a numbered subfolder holding five files,
+`store.bin`, `vectors.bin`, `config.bin`, `graph.bin` and `lexical.bin`, and a file named `current`
+records which subfolder is the latest. inillucent does not write that folder for a database.
+`inillucent-migrate` reads such a folder and builds an `.rdb` database from it.
+[Architecture](architecture.md) describes the five files.
 
-- **A second process.** No server, no port, no connection pool. The engine is a library and the
-  database is a file.
-- **A parallel executor.** One statement runs on one thread, and several threads take turns rather
-  than running at once - see the section above. The retrieval engine's index *build* uses several
-  threads; nothing on the query path does.
-- **SQLite's file format.** `Database::import` reads a `.db` file once, into a new `.rdb`. Opening a
-  `.db` directly is not a thing this engine does, and it says so rather than half doing it.
-- **Every SQL construct.** What is not built answers exit code 3, or `unsupported` over the driver
-  and MCP, which is a different answer from a syntax error on purpose.
-  [Feature comparison](feature-comparison.md) has the 416 measured cases and
-  [the roadmap](roadmap.md) has what is open.
+## Threads
+
+A `Database` in the Rust driver can be used from one thread only. `SharedDatabase` in
+`inillucent-driver` lets any number of threads use one database. Exactly one statement runs at a
+time. SQLite calls this serialized mode.
+
+`SharedDatabase` opens the database on a thread of its own, and every handle sends its statements to
+that thread over a channel. The cost is one thread per shared database and one channel round trip
+per statement. `inillucent-driver` keeps `#![forbid(unsafe_code)]`.
+
+A transaction belongs to the database, and any statement run between `BEGIN` and `COMMIT` joins
+that transaction. So `SharedTransaction` holds the database's turn from `BEGIN` until the
+transaction commits or rolls back, and every other thread waits for the whole transaction.
+
+`drivers/inillucent-driver/tests/threads.rs` checks three properties:
+
+- eight threads that each insert a thousand rows leave eight thousand rows, with no two rows sharing
+  a key;
+- a reader that samples during a transaction of a thousand rows sees either zero rows or a thousand;
+- a database used and dropped on another thread releases its file, and reopening the file proves it.
+
+## What inillucent does not include
+
+| Missing piece | What inillucent does |
+|---|---|
+| A server process | inillucent is a library and the database is a file. There is no port and no connection pool |
+| A parallel executor | one statement runs on one thread. Building an HNSW graph uses several threads. Running a query uses one |
+| SQLite's file format | `inillucent migrate` and `Database::import_sqlite` read a `.db` file once, into a new `.rdb` file |
+| Every SQL construct | a construct the engine has not built fails with exit code 3, or the status `unsupported` over a driver or MCP. [Feature comparison](feature-comparison.md) has the 416 measured cases and [the roadmap](roadmap.md) lists what is open |
+
+## The crates
+
+Each part of the diagrams is a crate in this repository. [Repository](repository.md) lists every
+crate and the layer rules between them.
+
+| Part | Crate |
+|---|---|
+| Parser, binder and planner | `inillucent-sql` |
+| Executor | `inillucent-exec` |
+| Catalog | `inillucent-catalog` |
+| B+trees | `inillucent-tree` |
+| Buffer pool, meta page, free map and blob extents | `inillucent-pool` |
+| Write ahead log | `inillucent-wal` |
+| Transactions and snapshots | `inillucent-txn` |
+| The database: statements, pragmas and virtual tables | `inillucent-engine` |
+| The `inillucent_search` virtual table | `inillucent-search` |
+| The retrieval engine: HNSW, BM25 and the combined ranking | `inillucent-core` |
+| File access on Windows, POSIX and in memory | `inillucent-vfs` |
+| The driver an application uses, and its C interface | `inillucent-driver`, `inillucent-driver-capi` |
+| The command line, the shell and the MCP server | `inillucent-cli` |
 
 ## Where to read next
 
-| you want | page |
+| You want | Page |
 |---|---|
-| what it is and who it is for | [Product overview](product-overview.md) |
-| the words | [Glossary](glossary.md) |
-| the retrieval half, in depth | [Architecture](architecture.md) |
-| the SQL half, in depth | [Relational architecture](relational-architecture.md) |
+| what inillucent is and who it is for | [Product overview](product-overview.md) |
+| the meaning of a term | [Glossary](glossary.md) |
+| the retrieval engine in depth | [Architecture](architecture.md) |
+| the SQL engine in depth | [Relational architecture](relational-architecture.md) |
+| how to write vector and keyword searches | [Vector search](vector-search.md) |
 | which SQL runs | [SQL support](sql.md) |
-| the crates and the contracts | [Repository](repository.md) |
+| the crates and the rules between them | [Repository](repository.md) |

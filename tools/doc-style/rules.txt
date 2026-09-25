@@ -1,0 +1,108 @@
+# The phrases the documentation does not use.
+#
+# One phrase per line, matched case-insensitively against prose: text outside fenced code blocks,
+# inline code, link targets and HTML comments. `docs/writing-style.md` explains each group and says
+# what to write instead. Both `tools/doc-style/check.mjs` and
+# `crates/inillucent-compat/tests/documentation.rs` read this file, so a phrase added here is
+# checked by both.
+#
+# Every line is a literal phrase. There are no regular expressions, because the Rust test that reads
+# this file uses no regular expression library.
+
+# Invented technical words
+load-bearing
+load bearing
+first-class
+first class citizen
+battle-tested
+battle tested
+well-trodden
+self-documenting
+state of the art
+
+# Announcing that something matters or is clear
+worth noting
+worth stating
+worth mentioning
+worth calling out
+worth flagging
+worth knowing
+worth reading
+worth a look
+worth saying
+to be clear
+put simply
+plainly
+honest
+honestly
+to be up front
+up front about
+i should mention
+it bears repeating
+make no mistake
+needless to say
+
+# Emphasis by announcing the purpose
+the whole point
+the entire purpose
+which is the point
+that is the point
+that is the whole
+the real question
+
+# Contrast used as decoration
+rather than
+not because
+not just
+not merely
+not only
+
+# Metaphor and elegant variation
+the shape of
+surface
+surfaces
+materialise
+materialize
+reach for
+narrow the gap
+grades its own homework
+crowds out
+under the hood
+out of the box
+in the wild
+game changer
+game-changer
+silver bullet
+heavy lifting
+deep dive
+at the end of the day
+moving parts
+tells a story
+tell the story
+the story of
+rule of thumb
+sweet spot
+bottom line
+double-edged
+
+# Dramatic verbs for a failure
+blows up
+blow up
+takes down
+kills the
+sinks the
+breaks the world
+
+# Vague nouns standing in for a list of values
+vocabulary
+taxonomy
+
+# Hedges and filler
+it turns out
+of course
+simply put
+in other words
+as it happens
+arguably
+essentially
+fundamentally

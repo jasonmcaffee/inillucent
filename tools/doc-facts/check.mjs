@@ -44,10 +44,28 @@ const asJson = args.includes('--json');
 const siteIndex = args.indexOf('--site');
 const SITE = siteIndex >= 0 ? path.resolve(args[siteIndex + 1]) : null;
 
+/**
+ * Returns the directory cargo builds into for this checkout.
+ *
+ * A git worktree made for a ticket builds somewhere other than `target/`, because its
+ * `.cargo/config.toml` names a `target-dir` of its own. Asking cargo gives the right answer in both
+ * cases; `target/` is the answer when cargo cannot be asked.
+ */
+function targetDirectory() {
+  try {
+    const metadata = execFileSync('cargo', ['metadata', '--format-version', '1', '--no-deps', '--manifest-path', path.join(ROOT, 'Cargo.toml')], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    return JSON.parse(metadata).target_directory;
+  } catch {
+    return path.join(ROOT, 'target');
+  }
+}
+
+const TARGET = targetDirectory();
+
 /** Picks the release binaries when they are there and the debug ones otherwise. */
 function binary(name) {
   for (const profile of ['release', 'debug']) {
-    const candidate = path.join(ROOT, 'target', profile, process.platform === 'win32' ? `${name}.exe` : name);
+    const candidate = path.join(TARGET, profile, process.platform === 'win32' ? `${name}.exe` : name);
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;
@@ -741,7 +759,7 @@ function sourcesUnder(directory) {
 function testRunner() {
   const name = process.platform === 'win32' ? 'inillucent-testrun.exe' : 'inillucent-testrun';
   const built = ['release', 'debug']
-    .map((profile) => path.join(ROOT, 'target', profile, name))
+    .map((profile) => path.join(TARGET, profile, name))
     .filter((file) => fs.existsSync(file))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   if (built.length === 0) return { exe: null, error: null };

@@ -1,25 +1,53 @@
 ---
 name: inillucent-migrate
-description: Move an existing database into inillucent - a SQLite file, a running PostgreSQL or MySQL server, or a legacy retrieval index - verified by row count and digest and published only if every check passes. Use when asked to migrate, import, convert or move data into an .rdb, or to evaluate inillucent against data that already exists somewhere else.
+description: Move an existing database into inillucent. The source can be a SQLite file, a running PostgreSQL or MySQL server, or a legacy retrieval index. Every table is checked by row count and by digest, and the new file is published only when every check passes. Use when asked to migrate, import, convert or move data into an .rdb, or to try inillucent on data that already exists somewhere else.
 ---
 
 # Migrating into inillucent
 
-Four sources. All of them hold the same three invariants, and they are the reason to use this rather
-than a script:
+This page shows how to build an inillucent database from data you already have. It covers the four
+sources, the checks that decide whether the new file is published, and what to do when a check
+fails.
 
-1. **The source is never written to.** There is no flag that changes it and no cleanup step that
-   deletes anything. Going back is opening the thing that has been sitting there unchanged.
-2. **The destination is never overwritten.** The build goes to a staging file beside it and is
-   published by an atomic rename, so a half-written database never sits where an application opens
-   one.
-3. **Nothing unverified is published.** Every table is checked by row count *and* by an
-   order-independent digest — a migration that moved the right number of rows and the wrong bytes
-   passes a count check on its own. A failure publishes nothing and leaves the staging file and a
-   written report, because the thing you need after a failed migration is the evidence.
+| Source | Command |
+|---|---|
+| a SQLite database file | `inillucent migrate legacy.db --destination app.rdb` |
+| a running PostgreSQL server | `inillucent migrate "postgres://user@host:5432/db" --destination app.rdb` |
+| a running MySQL server | `inillucent migrate "mysql://user@host:3306/db" --destination app.rdb` |
+| a legacy retrieval index directory | `inillucent-migrate <source-index-dir> <destination.db>` |
 
-   A SQLite source is checked a third way, by its column list, because the digest deliberately
-   leaves one kind of column out - see **Generated columns** below.
+## Terms used on this page
+
+| Term | Meaning |
+|---|---|
+| destination | the new `.rdb` file the migration builds |
+| staging file | the file the migration writes first. It sits beside the destination under a hidden name, such as `.app.rdb.staging` |
+| publish | rename the staging file to the destination name. This happens only after every check passes |
+| digest | a SHA-256 hash over every row of a table. It does not depend on the order the rows are read in |
+| snapshot | a view of the server's data as of one instant. Writes that commit later are not visible in it |
+| TLS | the encryption a database server connection uses. See the [glossary](../../docs/glossary.md) for other terms |
+
+## What every migration does
+
+```mermaid
+flowchart TB
+    A["Read the source"] --> B["Write the staging file beside the destination"]
+    B --> C["Close and reopen the staging file"]
+    C --> D["Check every table: row count, digest, column list"]
+    D -->|"every check passes"| E["Rename the staging file to the destination"]
+    D -->|"a check fails"| F["Stop. Keep the staging file and the report"]
+```
+
+Three rules hold for every source:
+
+1. **The source is never written to.** No flag changes the source, and no step deletes anything.
+   To go back, open the source. It is unchanged.
+2. **The destination is never overwritten.** `inillucent migrate` refuses a destination path that
+   already exists. The build goes to the staging file, so a half written database never sits at the
+   path an application opens.
+3. **Nothing unverified is published.** Every table is checked by row count and by digest. A copy
+   with the right number of rows and the wrong bytes passes a count check. The digest catches it.
+   When a check fails, nothing is published, and the staging file stays on disk for you to look at.
 
 ## From a SQLite file
 
@@ -27,101 +55,153 @@ than a script:
 inillucent migrate legacy.db --destination app.rdb
 ```
 
-Tables, indexes, views and triggers come across. FTS5 tables are **rebuilt** rather than copied —
-their storage is SQLite's own, so the text is re-indexed through this engine's fts5 and the docids
-are preserved. A virtual table using any other module is reported as not carried, with its module
-named.
+```
+imported legacy.db into app.rdb
+```
+
+`inillucent migrate` treats a source that is a path as a SQLite file. `--kind sqlite` says the same
+thing explicitly.
+
+What comes across:
+
+| Object | What happens |
+|---|---|
+| tables and their rows | copied, then checked by count, digest and column list |
+| indexes, views, triggers | copied |
+| FTS5 tables | rebuilt: the text is indexed again through inillucent's own `fts5`, and the row ids are kept |
+| a virtual table using any other module, such as `rtree` | the migration fails and names the module. SQLite stores that module's data in its own format, and inillucent has no content table to rebuild it from |
+| `PRAGMA user_version`, `PRAGMA application_id` | copied from the source file's header and checked |
+
+`--output json` returns every check with its name, whether it passed, and a detail. This is the
+result of a migration of a table `note` with three rows and an FTS5 table `doc`:
+
+```json
+{
+  "ok": true,
+  "command": "migrate",
+  "columns": [],
+  "rows": [],
+  "row_count": 0,
+  "total": 0,
+  "more": false,
+  "changes": 0,
+  "last_insert_rowid": 0,
+  "elapsed_ms": 106.0701,
+  "destination": "app.rdb",
+  "checks": [
+    { "name": "columns.note", "passed": true, "detail": "3 columns, in the order the source declares" },
+    { "name": "count.note", "passed": true, "detail": "3 rows" },
+    { "name": "digest.note", "passed": true, "detail": "c49ee80130e38a4eadd292ae05452225521ea9758ab159d42aac23215b2e1e25" },
+    { "name": "carried.doc", "passed": true, "detail": "1 rows rebuilt through this engine's own fts5" },
+    { "name": "pragma.application_id", "passed": true, "detail": "0 carried from the source" },
+    { "name": "pragma.user_version", "passed": true, "detail": "7 carried from the source" }
+  ],
+  "text": "imported legacy.db into app.rdb"
+}
+```
 
 ### Generated columns
 
-A `STORED` generated column occupies a field in SQLite's record, so it is copied and digested like
-any other column. A `VIRTUAL` one occupies nothing: SQLite computes it on read and so does this
-engine. The digest therefore folds only the stored columns, and `columns.<table>` compares the whole
-declared list beside it, so a `VIRTUAL` column that was dropped or moved is still a failure.
+A `STORED` generated column has a value in each SQLite row, so it is copied and included in the
+digest like any other column. A `VIRTUAL` generated column has no stored value. SQLite computes it
+when the row is read, and inillucent does the same.
 
-Folding it would compare two engines evaluating an expression rather than comparing a copy, which is
-not a check this tool can make - it has no SQLite evaluator and does not require a SQLite install.
-Before it was left out, **every** database holding a `VIRTUAL` generated column failed its own
-verification and was deleted with its rows correct.
+So the digest covers only the stored columns. The `columns.<table>` check compares the full list of
+declared columns, in order, so a `VIRTUAL` column that was dropped or moved still fails the
+migration.
 
-## From a running PostgreSQL or MySQL
+## From a running PostgreSQL or MySQL server
 
 ```sh
 inillucent migrate "postgres://user@127.0.0.1:5432/corpus" --destination corpus.rdb
-inillucent migrate "mysql://root@127.0.0.1:3306/app"        --destination app.rdb
+inillucent migrate "mysql://root@127.0.0.1:3306/app" --destination app.rdb
 ```
 
-The kind is taken from the URL's scheme; `--kind postgres|mysql` overrides it. `--batch N` sets how
-many rows go in one destination transaction (default 10,000) and changes how long it takes and
-nothing about what it produces.
+The URL's scheme picks the kind. `--kind postgres` or `--kind mysql` overrides it.
 
-**The whole read happens inside one repeatable-read, read-only snapshot**, opened before the catalog
-is read — so every table, and even the schema, is as of one instant. Reading table B after table A
-committed would produce a destination describing a database that never existed. Rows stream through
-a cursor, so a table larger than memory costs one batch.
-
-The password comes from the URL, or from `PGPASSWORD` / `MYSQL_PWD`. **It is redacted everywhere it
-is printed** — the terminal, the written report, and the MCP result — because those outlive the run.
-
-### What comes across, and what is reported instead
-
-| | |
+| Option | What it does |
 |---|---|
-| carried | every ordinary table, its columns in order, its nullability, and its primary key |
-| reported, not carried | views, sequences, materialized views, foreign tables, triggers, routines — one line each in the report |
-| PostgreSQL schemas | a schema other than `public` is folded into the name as `schema__table`, because this dialect has one namespace. Two same-named tables in two schemas do not collide |
+| `--destination <file>` | the `.rdb` file to build. Required |
+| `--kind <kind>` | `sqlite`, `postgres`, `mysql` or `index` |
+| `--batch <n>` | rows per destination transaction. Default 10,000. It changes how long the migration takes. It does not change the result |
+| `--insecure-plaintext` | allows an unencrypted connection to a host that is not a loopback address. See [Encryption](#encryption) |
 
-### How values are carried
+**The whole read happens inside one read only snapshot at the repeatable read isolation level.**
+The snapshot opens before the migration reads the list of tables. So every table, and the schema
+itself, comes from the same instant. Rows arrive through a cursor, so a table larger than memory
+costs one batch of memory.
 
-Exactly where this dialect has an equivalent, and **as the server's own text rendering where it does
-not**. That second half is the important one:
+### Where the password goes
 
-| source | carried as |
+A URL on the command line is visible in the process list for the whole run. There are four ways to
+give the password or the whole URL:
+
+| Where | How |
 |---|---|
-| integers | `INTEGER`, exactly |
+| in the URL | `postgres://user:secret@host/db` |
+| `INILLUCENT_SOURCE_URL` | leave out the source argument and set this variable to the URL |
+| standard input | write `-` as the source, and `inillucent migrate` reads one line from standard input |
+| `PGPASSWORD` or `MYSQL_PWD` | the password alone, read when the URL has none |
+
+The password is replaced with `***` everywhere it is printed: the terminal, the report file, and
+the MCP result.
+
+### What comes across
+
+| Object | What happens |
+|---|---|
+| ordinary tables | copied: columns in order, whether each column allows NULL, and the primary key |
+| views, materialized views, sequences, foreign tables, partitioned tables, triggers | listed in the report as not carried, one line each |
+| MySQL routines | listed in the report as not carried |
+| PostgreSQL tables in a schema other than `public` | copied with the schema in the name, as `schema__table`. inillucent has one namespace for table names, so two tables with the same name in two schemas do not collide |
+
+### How values are converted
+
+| Source type | Stored as |
+|---|---|
+| integer types | `INTEGER`, exactly |
 | `real`, `double`, `float` | `REAL` |
-| `numeric` / `decimal`, and `BIGINT UNSIGNED` past the signed range | **`TEXT`, digit for digit** |
-| `boolean`, `TINYINT(1)` | `INTEGER`, 0 or 1 |
-| `bytea`, `BLOB`, `BINARY`, `VARBINARY` | `BLOB` |
-| dates, times, `uuid`, `json`, arrays, ranges, enums, everything else | `TEXT`, exactly as the server prints it |
+| `numeric`, `decimal`, PostgreSQL `money`, MySQL `BIGINT UNSIGNED` | `TEXT`, digit for digit |
+| `boolean` | `INTEGER`, 0 or 1 |
+| MySQL `TINYINT(1)` | `INTEGER`, the value the server holds |
+| `bytea`, `BLOB`, `BINARY`, `VARBINARY`, MySQL `BIT` and geometry types | `BLOB` |
+| dates, times, `uuid`, `json`, arrays, ranges, enums and every other type | `TEXT`, exactly as the server prints it |
 
-A `numeric(38,10)` rounded into an IEEE double is still a number, still eight bytes, and no check
-anywhere would notice. Its digits, carried as text, are what `psql` prints and cannot lose anything
-they had. If you want it as a float in the destination, cast it there, knowingly.
+A `numeric(38,10)` converted to a 64 bit float loses digits, and no check would notice. Stored as
+text, it keeps every digit the server printed. To use the value as a number, cast it in a query on
+the destination.
 
-### The connection is encrypted and verified, or it does not happen
+### Encryption
 
-**A migration to anything that is not a loopback address uses TLS, with the certificate chain and
-host name checked, and refuses rather than falling back** — whether or not the URL says anything
-about transport.
+A migration from a host that is not a loopback address uses TLS. inillucent checks the certificate
+chain and the host name before it sends any user name, database name or password. When TLS fails,
+the migration stops. It does not fall back to an unencrypted connection.
 
-| what you write | what happens |
+| What you write | What happens |
 |---|---|
-| nothing about transport, host is not loopback | verified TLS |
-| `sslmode=require` / `verify-full` / MySQL's `ssl-mode=REQUIRED` | verified TLS |
-| nothing, host is `127.0.0.1`, `::1` or `localhost` | plaintext |
-| `sslmode=disable` **and** `--insecure-plaintext` | plaintext |
-| either of those two on its own | refused |
-| `sslmode=prefer` or `allow` | refused |
+| nothing about encryption, and the host is not a loopback address | verified TLS |
+| `sslmode=require`, `verify-ca` or `verify-full`, or MySQL's `ssl-mode=REQUIRED` | verified TLS |
+| nothing, and the host is `127.0.0.1`, `::1` or `localhost` | no encryption |
+| `sslmode=disable` and the `--insecure-plaintext` flag | no encryption |
+| only one of `sslmode=disable` and `--insecure-plaintext` | refused |
+| `sslmode=prefer` or `allow`, or MySQL's `preferred` | refused |
 
-Plaintext across a network needs both halves because either one alone is something people type
-without meaning it. `prefer` is refused rather than implemented: it means "encrypt if the server
-happens to allow it", which puts the answer in a server setting nobody in the migration can see.
+`prefer` means "encrypt if the server allows it". The answer would depend on a server setting the
+migration cannot see, so inillucent refuses it and asks for `require` or `disable`.
 
-The certificate is checked **before any credential is sent**, so a server that turns TLS down or
-presents a bad certificate gets no user name, no database and no password. A private authority goes
-in `sslrootcert=<file>` (or `ssl-ca=`), and naming one is stricter than the machine store: that
-authority becomes the only trusted root for the connection.
+A server with a certificate from a private authority needs `sslrootcert=<file>` in the URL
+(`ssl-ca=<file>` also works). That authority then becomes the only trusted root for the connection.
 
-The report beside the destination and the `transport` field of `--output json` say `verified-tls` or
-`plaintext`, so what happened is in the artifact.
+The report file and the `transport` field in `--output json` say `verified-tls` or `plaintext`.
 
-### The limit that is refused by name rather than worked around
+### MySQL 8 accounts that use `caching_sha2_password`
 
-- **`caching_sha2_password` full authentication** (MySQL 8's default plugin, on an account the
-  server's cache does not hold) needs an RSA exchange this client does not speak. The refusal
-  names the two ways out: connect once with the `mysql` client to prime the cache, or run the
-  migration as an account created `IDENTIFIED WITH mysql_native_password`. Both are tested.
+inillucent cannot complete the full `caching_sha2_password` login. That login needs an RSA key
+exchange the client does not implement. The fast path works when the server has the account in its
+cache. When it does not, the migration is refused, and the message names two fixes:
+
+- connect once with the `mysql` client, which puts the account in the server's cache, or
+- run the migration as an account created `IDENTIFIED WITH mysql_native_password`.
 
 ## From a legacy retrieval index
 
@@ -129,52 +209,67 @@ The report beside the destination and the `transport` field of `--output json` s
 inillucent-migrate <source-index-dir> <destination.db> [--no-publish]
 ```
 
-This one is resumable — it keeps a manifest and picks up from the last committed batch, because a
-directory does not change underneath a resumed run. A **server** does, so a remote migration is one
-pass and a leftover staging file is refused rather than resumed.
+This migration uses the separate program `inillucent-migrate`, because it needs the retrieval
+engine. `inillucent migrate --kind index` returns the status `unsupported` and prints this command.
 
-## Reading the result
+`--no-publish` stops with a verified staging file and does not rename it.
 
-Every check is printed whether it passed or not: knowing that the counts are right and one table's
-digest is not is a different problem from knowing that nothing arrived.
+A legacy index migration can resume. It keeps a manifest and continues from the last committed
+batch, because a directory does not change between runs. A server can change between runs, so a
+migration from PostgreSQL or MySQL always runs in one pass and refuses a staging file left by an
+earlier run.
+
+## Reading the result from a server migration
+
+Every check is printed, whether it passed or failed:
 
 ```
 postgres://user:***@127.0.0.1:5432/corpus -> corpus.rdb
 PostgreSQL 17.2, 6 tables, 13 rows
+transport: plaintext
   pass structure.integrity every tree walks in key order on a fresh open
   pass source.count.note 3 rows, counted separately from the scan
   pass count.note 3 rows
-  pass digest.note 3b226c3862edea05bf0590bb25b713ec…
-  …
+  pass digest.note 3b226c3862edea05bf0590bb25b713ec...
+  ...
 published: corpus.rdb
 ```
 
-A `.migration-report.md` is written beside the destination with the same content plus what was not
-carried. `--output json` gives you `tables`, `checks` and `notCarried` as arrays.
+A file named `<destination>.migration-report.md` is written beside the destination. It has the same
+checks, the transport, and the list of objects that were not carried.
 
-**What the verification proves**: the source's rows are read off a socket by one reader and the
-destination's off PAX leaves by another, so a disagreement means the copy is wrong and agreement
-means every value read reached the destination unchanged. **What it does not prove**: that the wire
-decoding was right in the first place, because the copy and the digest share that reader. That
-oracle is a third engine — `psql` and `mysql` themselves — and it lives in
-`crates/inillucent-remote/tests/live_postgres.rs` and `live_mysql.rs`.
+`--output json` adds these fields to the result: `destination`, `transport`, `source` (with the
+password replaced), `server`, `rows`, `tables`, `checks` and `notCarried`.
+
+**What the checks prove.** The source rows come off the network through one reader. The
+destination rows come off inillucent's own storage through another reader. When the two digests
+agree, every value the migration read reached the destination unchanged.
+
+**What the checks do not prove.** The copy and the source digest share the reader that decodes the
+server's network protocol. If that reader decoded a value wrongly, both sides would agree on the
+wrong value. The tests `crates/inillucent-remote/tests/live_postgres.rs` and `live_mysql.rs` check
+that reader against `psql` and `mysql` themselves.
 
 ## From an agent, over MCP
 
-`inillucent_migrate` takes the same arguments. One thing to expect: **a server confined with
-`--root DIR` refuses a `postgres://` or `mysql://` source**, because the confinement is about reach
-rather than about paths and a verb that dials a host and port would go straight through it. Run a
-remote migration from an unconfined command line.
+The MCP tool `inillucent_migrate` takes the same arguments as `inillucent migrate`.
 
-## If it fails
+An MCP server started with `--root DIR` refuses a `postgres://` or `mysql://` source. `--root`
+limits which files an agent can reach, and a migration from a server connects to a host and a port
+outside that limit. Run a server migration from a command line without `--root`.
 
-- **`… already exists. This tool never overwrites.`** — pick another destination. The file that is
-  there is untouched.
-- **`… is left over from an earlier migration`** — a previous run failed and left its staging file,
-  which is the evidence. Read the report beside it, then move the staging file aside and re-run.
-- **`postgres 28P01: …` / `mysql 1045 (28000): …`** — the server refused the login, and the code in
-  front is its own SQLSTATE. Match on that, not on the sentence.
-- **Verification failed** - nothing was published; the report names which table and whether it was
-  the count, the column list or the digest that disagreed. A digest failure on a SQLite source also
-  names the rows: how many each side holds, which columns were compared, and up to three rows each
-  side holds alone, rendered as `name=value`.
+On a server started with `--root`, the source `-` (read from standard input) is also refused,
+because MCP uses standard input for its own messages. Set `INILLUCENT_SOURCE_URL` instead.
+
+## When it fails
+
+| Message | Meaning | What to do |
+|---|---|---|
+| `"app.rdb" already exists. This tool never overwrites.` | the destination path is taken. The file there is untouched | pick another destination |
+| `... is left over from an earlier migration` | a server migration failed before and left its staging file | read the report beside the staging file, move the staging file somewhere else, and run again |
+| `postgres 28P01: ...` or `mysql 1045 (28000): ...` | the server refused the login. The code at the start is the server's own error code | match on the code. The wording after it can change |
+| `... was not published: carried.r: r uses the rtree module ...` | a SQLite virtual table uses a module inillucent cannot rebuild | drop that table from a copy of the source, or migrate without it |
+| `verification failed; nothing was published` | a count, digest or column check disagreed | read the report. It names the table and the check |
+
+A digest failure on a SQLite source also names the rows: how many rows each side holds, which
+columns were compared, and up to three rows that only one side holds, written as `name=value`.

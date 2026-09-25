@@ -1,107 +1,212 @@
 ---
 name: inillucent-troubleshoot
-description: Diagnose an inillucent failure - exit code 3 and the unsupported status, a refused overwrite, a locked or busy database, a query that is slower than expected, a test suite that is green because its prerequisite is missing. Use when inillucent did something unexpected, an error message needs interpreting, or a green result looks too easy.
+description: Diagnose an inillucent failure. Covers exit code 3 and the unsupported status, the other status names (syntax, not_found, constraint, readonly, busy, corrupt, invalid_state), a refused overwrite or a path outside --root, a busy database, a slow query, a value with an unexpected type, a failed migration, a damaged file, and a test run that passes because its prerequisite is missing. Use when inillucent did something unexpected, an error message needs interpreting, or a passing result looks too easy.
 ---
 
 # When inillucent does something you did not expect
 
-Start by reading the *class* of the failure rather than the sentence. Every surface reports one:
-the process exit code, or the `status` field in `--output json` / a driver error / an MCP result.
+This skill explains what an inillucent failure means and what to do next. Start with the class of
+the failure, then read the message. Every way of running inillucent reports the class: the exit
+code of the `inillucent` command, and the `status` name in `--output json`, in a driver error and in
+an MCP result.
 
-| exit | status | means |
-|---|---|---|
-| 0 | — | it worked |
-| 1 | `syntax`, `constraint`, `io`, `invalid_state`, `not_found`, … | it failed, and the status says how |
-| 2 | — | the command line was not one anybody could act on |
-| **3** | **`unsupported`** | **the engine has not built that construct** |
+## Terms used on this page
 
-## "It says unsupported / it exited 3"
+| Term | Meaning |
+|---|---|
+| status | one word that names the class of a failure, such as `unsupported` or `busy`. The drivers, the command line and MCP use the same names |
+| `--root` | a flag that confines `inillucent` and `inillucent-mcp` to one directory. Every path must resolve inside it |
+| affinity | the rule a column's declared type sets for converting a value on the way in. It does not fix the type of what is stored |
+| query plan | the steps the engine chooses to answer a query. `inillucent explain` prints it |
+| prerequisite | something a test suite needs that the workspace cannot build, such as the pinned SQLite or a live PostgreSQL |
 
-**This is not a mistake in your SQL, and rewording will not help.** Three is a separate code on
-purpose so a script can branch on "not yet" without matching on a message.
+Other terms are in [the glossary](../../docs/glossary.md).
 
-```sh
-inillucent capabilities                # the whole table
-inillucent capabilities triggers       # one row
+## Read the exit code and the status first
+
+```mermaid
+flowchart TB
+    A["inillucent exits"] --> B{"exit code"}
+    B -- "0" --> C["it worked"]
+    B -- "1" --> D["it failed: read the status"]
+    B -- "2" --> E["the command line was wrong: run inillucent help"]
+    B -- "3" --> F["unsupported: the engine has not built that construct"]
 ```
 
-Every row is checked against the running engine by a test in **both** directions — a claimed
-capability that fails and a denied one that now works each turn the build red — so it is worth
-trusting in a way a hand-written feature list is not. **A name that is not in the table answers
-*no***, because a capability nobody declared was never checked.
+| Exit code | Status | Meaning |
+|---|---|---|
+| `0` | | it worked |
+| `1` | every status except `unsupported` | it failed, and the status says how |
+| `2` | | the command line was not one `inillucent` could act on: an unknown verb or flag, or a missing argument |
+| `3` | `unsupported` | the engine has not built that construct |
 
-`docs/feature-comparison.md` is the measured side-by-side against SQLite: 416 differential cases, 402 of
-which produce SQLite's exact bytes, and every one of the differences named with what it measures. Of
-the other fourteen, six are vector features SQLite does not have, six answer differently, and two are
-`DELETE ... LIMIT` forms the pinned SQLite build refuses and inillucent runs.
+The statuses you will see most often, each produced by the release build:
+
+| Status | What caused it | An example message |
+|---|---|---|
+| `unsupported` | a construct the engine has not built | `the new engine's physical pass does not handle a LIMIT or OFFSET that is not a constant yet` |
+| `syntax` | the statement is not valid SQL | `near "SELEC": syntax error` |
+| `not_found` | no such table, column, index, function or capability | `no such table: nothere` |
+| `constraint` | a constraint refused the write | `UNIQUE constraint failed: t.a` |
+| `readonly` | a write on a connection opened with `--readonly` | `'exec' changes the database, and this is read only.` |
+| `busy` | another process holds the file for writing, for longer than `PRAGMA busy_timeout` | `another process holds the file for writing; ...` |
+| `corrupt` | the file is not a database, or is damaged | `database disk image is malformed` |
+| `io` | the file system refused a read or a write | |
+| `invalid_state` | a misuse the command itself refused: a file that already exists, a path outside `--root`, two statements given to `query` or `exec` | `exec runs one statement and this is several; ... Use batch` |
+
+The driver has four more statuses: `interrupted`, `full`, `too_big` and `internal`. `internal` is a
+defect in inillucent. Report it.
+
+With `--output json`, a failure prints one object with these members:
+
+| Member | What it holds |
+|---|---|
+| `ok` | `false` |
+| `command` | the verb that failed |
+| `status` | the status name from the table above |
+| `message` | what went wrong, in a sentence |
+| `feature` | only for `unsupported`: the construct the engine has not built |
+| `offset` | only when the failure knows it: the byte in the statement where it went wrong |
+| `text` | the same failure as the text output prints it |
+
+Branch on `status` or on the exit code. Do not match on `message`, because the wording of a message
+can change between releases.
+
+## "It says unsupported" or "it exited 3"
+
+```sh
+inillucent query "SELECT 1 LIMIT 1+1"
+```
+
+```text
+Error [unsupported]: the new engine's physical pass does not handle a LIMIT or OFFSET that is not a constant yet
+  not built yet: a LIMIT or OFFSET that is not a constant
+```
+
+The SQL is correct. The engine has not built that construct, so rewording the same construct gets
+the same answer. Write the query another way: here, compute the number first and bind it with
+`--params`. Ask what the engine supports before you write an unusual statement:
+
+```sh
+inillucent capabilities                  # the whole table
+inillucent capabilities triggers         # one row
+```
+
+`inillucent capabilities` lists 49 capabilities. A test checks every row but two against the running
+engine in both directions: a row that says yes and fails, or a row that says no and works, fails the
+build. The two unchecked rows are `cancel` and `readonly_open`, and both say `partial`. A name that
+is not in the table is the status `not_found` and means no.
+
+[`docs/feature-comparison.md`](../../docs/feature-comparison.md) compares inillucent with the pinned
+SQLite 3.53.4, case by case. On the 1.0.29 build, 402 of 416 probed cases produce the same answer.
+Of the other fourteen:
+
+| Cases | What they are |
+|---|---|
+| 6 | vector features SQLite does not have |
+| 6 | answers that differ from SQLite's |
+| 2 | `DELETE ... LIMIT` and `UPDATE ... LIMIT`, which the pinned SQLite build refuses and inillucent runs |
 
 ## "It refuses to write the file"
 
-- **`… already exists. This tool never overwrites.`** — `create`, `migrate` and `backup` all refuse
-  an existing destination rather than replacing it. Choose another path; the file that is there is
-  untouched.
-- **`… is outside <DIR>, which this server is confined to.`** — the surface was started with
-  `--root`, and the path you named is not under it.
-- **`… resolves to <PATH>, which is outside <DIR>, which this server is confined to.`** — the path
-  you named *is* under `--root` and the file is not. Something on the way is a Windows junction or a
-  Unix symbolic link pointing out of the root. The message names where it actually lands, which is
-  what tells a junction apart from a typo.
-- **`this surface is confined to a directory with --root, and a migration from a server reaches a
-  host and a port`** — `--root` is about reach, not only about paths. Run the remote migration from
-  an unconfined command line.
-- **A statement was refused on a `--readonly` surface** — the classification is the binder's, so a
-  `SELECT` containing the word "delete" is fine and `SELECT …; DROP TABLE …` is not.
+| Message | What it means | What to do |
+|---|---|---|
+| `"<path>" already exists. Open it instead of creating it.` | `inillucent create` never replaces a file | open the file with `--db`, or create a different path |
+| `"<path>" already exists. This tool never overwrites.` | `inillucent migrate` never replaces its destination | choose another `--destination`. The existing file is untouched |
+| `"<path>" is outside <DIR>, which this server is confined to.` | the command runs with `--root`, and the path is outside `<DIR>` | use a path under `<DIR>` |
+| `"<path>" resolves to <RESOLVED>, which is outside <DIR>, which this server is confined to.` | the path resolved to `<RESOLVED>`, outside `<DIR>` | compare `<RESOLVED>` with what you typed. When the path you typed is under `<DIR>`, a Windows junction or a symbolic link on the way leads out of `<DIR>` |
+| `this surface is confined to a directory with --root, and a migration from a server reaches a host and a port ...` | `--root` also refuses network access | run the server migration without `--root` |
+| `'exec' changes the database, and this is read only.` | the connection was opened with `--readonly` | drop `--readonly`, or run a `SELECT` |
 
-## "The database is busy / locked"
+`inillucent backup <file>` does replace an existing file at `<file>`. Never give `backup` the path of
+the database it is copying: on the 1.0.29 build that fails with `io` and leaves the database
+damaged.
 
-One writer at a time, with a `busy_timeout`. A second writer waits and then reports busy rather than
-corrupting anything. If a process is holding a write transaction open, that is the one to find. Note
-that a `Database` is **single threaded** and neither `Send` nor `Sync` — sharing one across threads
-is a different bug that will surface here.
+`--readonly` decides by what a statement does. The SQL parser classifies the statement, so
+`SELECT 'delete' FROM t` runs, and `DELETE FROM t` is refused with `readonly`.
+
+## "The database is busy"
+
+One process writes at a time. A second process waits up to `PRAGMA busy_timeout`, which is 5000
+milliseconds by default, and then fails with the status `busy`. On the 1.0.29 build, while one
+process held a write transaction open, a second process could not open the file at all. It waited
+5013 ms and failed:
+
+```text
+Error [busy]: could not open "<path>": another process holds the file for writing; this connection wanted it for reading, and waited 5013 ms of the 5000 ms PRAGMA busy_timeout
+```
+
+Find the process that holds a write transaction open, and make it commit or roll back. To wait
+longer, run `PRAGMA busy_timeout = <milliseconds>` on the connection that waits.
+
+Inside one Rust program, a `Database` from `inillucent-driver` is neither `Send` nor `Sync`, so it
+cannot move between threads. To use one database from several threads, open a `SharedDatabase`.
+`SharedDatabase` runs one statement at a time.
 
 ## "A query is slower than I expected"
 
 ```sh
-inillucent --db app.rdb explain "SELECT …"
+inillucent --db app.rdb explain "SELECT * FROM n WHERE k = 'a'"
 ```
 
-A `SCAN` where you expected a `SEARCH` means the index is not being used, or is not there —
-`describe <table>` lists the indexes that exist. `analyze` gathers the statistics the planner reads.
+```text
+SCAN n
+```
 
-Two shapes worth knowing:
+`SCAN n` means the engine reads every row of `n`. After `CREATE INDEX n_k ON n(k)`, the same
+command prints `SEARCH n USING INDEX n_k (k=?)`, which means the engine uses the index.
 
-- **A result arrives whole.** `total` is exact because the engine materialises, so a query over a
-  large table costs what the whole result costs. `--limit` caps what you are *handed*, not what was
-  produced — put a `LIMIT` in your own SQL, where the planner can act on it.
-- **Vector search with no index is an exhaustive scan**, and is still correct.
-  `CREATE INDEX … USING inillucent_hnsw (v)` backfills the rows already there.
+| Check | Command |
+|---|---|
+| which indexes a table has | `inillucent --db app.rdb describe n` |
+| gather the statistics the query planner reads | `inillucent --db app.rdb analyze` |
+| the query plan | `inillucent --db app.rdb explain "<SQL>"` |
+
+Two things cost more than they appear to:
+
+- **`--limit` does not make a query cheaper.** The engine computes the whole result, so `total` is
+  exact. `--limit` (200 by default) only cuts the rows printed. Put `LIMIT` in the SQL itself.
+- **A vector search with no index reads every row.** The answer is still correct.
+  `CREATE INDEX <name> ON <table> USING inillucent_hnsw (<column>)` adds an HNSW index, including
+  over rows already in the table.
 
 ## "A value came back with the wrong type"
 
-Values are dynamically typed, as in SQLite: a column's declared type is an **affinity** — a rule
-about what converts on the way in — not a guarantee about what came out. `--output json` reports the
-storage class each column's values *actually* had, and `mixed` when they disagreed. That is the fact;
-the declared type in `describe` is the hint.
+Values are typed as in SQLite. A column's declared type sets its affinity: how a value is converted
+when it is written. The declared type does not guarantee the type of what is stored.
 
-If the value arrived through a migration, check how it was carried: `numeric`/`decimal` and
-`BIGINT UNSIGNED` past the signed range are carried as **TEXT**, digit for digit, on purpose — see
-[`inillucent-migrate`](../inillucent-migrate/SKILL.md).
+`--output json` reports each result column's `type` from the values in the result. When the values
+have different types, the `type` is `mixed`. That is what was stored. The type in
+`inillucent describe` is only the declared type.
+
+A server migration stores some columns as `TEXT` on purpose, to keep every digit:
+
+| Source column | Stored as |
+|---|---|
+| PostgreSQL `numeric`, MySQL `decimal` or `numeric` | `TEXT`, digit for digit |
+| MySQL `BIGINT UNSIGNED` | `TEXT`, because a value above the signed 64 bit range does not fit an `INTEGER` |
+
+The [`inillucent-migrate`](../inillucent-migrate/SKILL.md) skill lists every type.
 
 ## "A migration failed"
 
-Every check is printed whether it passed or not, so the output names which table and whether it was
-the count or the digest that disagreed. Nothing that failed a check was published, and the staging
-file and a `.migration-report.md` are left beside the destination — that is the evidence, not
-litter. A leftover staging file makes the next run refuse rather than resume, because a server
-changes underneath a resumed migration.
+`inillucent migrate` prints every check, passed or failed. A failed check names the table and says
+whether the row count or the digest disagreed.
 
-A digest that disagrees re-reads that one table and prints what differs: how many rows each side
-holds, which columns were compared, and up to three rows each side holds alone as `name=value`. A
-`VIRTUAL` generated column is left out of the digest on both sides, because no file stores it, and a
-separate `columns.<table>` check compares the declared column list.
+- Nothing that failed a check is published. The destination path stays empty.
+- The staging file `.<name>.staging` stays beside the destination. A server migration also writes
+  `<name>.migration-report.md` there. Both are the evidence of what happened.
+- A server migration refuses to start while an old staging file is there. It never resumes, because
+  the server may have changed since the first run. Move or remove the staging file, then run
+  `inillucent migrate` again.
 
-Login failures carry the server's own code: `postgres 28P01: …`, `mysql 1045 (28000): …`. Match on
-the code, not on the sentence — the sentence follows the server's locale.
+For a SQLite file, a digest that disagrees on a table is explained. The message says how many rows
+each side holds, which columns were compared, and up to three rows that only one side holds, written
+as `name=value`. A `VIRTUAL` generated column is left out of the digest on both sides, because no
+file stores its value. A separate `columns.<table>` check compares the declared column lists.
+
+A server login failure starts with the server's own error code: `postgres 28P01: ...` or
+`mysql 1045 (28000): ...`. Match on the code. The rest of the sentence is in the server's language.
 
 ## "Is this file damaged?"
 
@@ -109,50 +214,60 @@ the code, not on the sentence — the sentence follows the server's locale.
 inillucent --db app.rdb integrity-check
 ```
 
-It exits 0 with `"ok": true` only when every check answered exactly `ok`. Anything else, including no
-answer at all, is the status `corrupt` with the rows that say what is wrong: a page two tables both
-claim, a page the free map says is free while a table uses it, an index entry with no row, or
-`Page N: never used`. `PRAGMA quick_check` reads every tree and accounts for every page;
-`PRAGMA integrity_check` does that and then reads each index against its table, which is the slow
-part. A file whose free page chain loops is refused at open, naming the chain, rather than hanging.
+`inillucent integrity-check` exits 0 with `"ok": true` only when every row of
+`PRAGMA integrity_check` is exactly `ok`. Any other answer, including no rows, fails with the status
+`corrupt`, and the message lists what is wrong. Examples: a page two tables both claim, a page the
+free map lists as free while a table uses it, an index entry with no row, or `Page N: never used`.
+A file that cannot be opened at all also fails with `corrupt`.
 
-## "The test suite is green and I do not believe it"
+| Pragma | What it checks |
+|---|---|
+| `PRAGMA quick_check` | every tree's structure, and which tree owns each page |
+| `PRAGMA integrity_check` | the same, then every index against its table. This is the slower one |
 
-Good instinct. Several suites need something the workspace cannot build — the pinned SQLite oracle, a
-fixture corpus, a live PostgreSQL or MySQL — and each **reports success when it is absent**.
+A file whose free map chain returns to a page it already read is refused when it is opened, with a
+message that names the chain.
+
+## "The test suite passes and I do not believe it"
+
+Some suites need a prerequisite the workspace cannot build: the pinned SQLite, a fixture corpus, a
+live PostgreSQL or MySQL server. Such a suite reports success when its prerequisite is absent.
 
 ```sh
 target/debug/inillucent-testrun --strict
 ```
 
-`--strict` counts those and names them, so a green on a bare machine cannot be mistaken for a real
-one. Set up the prerequisites first: `tools/sqlite-reference.ps1` (or `.sh`) for the oracle, and the
-headers of `crates/inillucent-remote/tests/live_postgres.rs` and `live_mysql.rs` for the two servers.
+`--strict` counts those suites as failures and names them. Set up the prerequisites first:
 
-## "It printed an error and the exit code said zero"
+| Prerequisite | How to get it |
+|---|---|
+| the pinned SQLite, in `.sqlite-ref/` | `pwsh tools/sqlite-reference.ps1`, or `tools/sqlite-reference.sh` |
+| the fixtures in `_agent_output/fixtures/` | `tools/build-gate-fixtures.sh`, or copy them from the main checkout |
+| a live PostgreSQL or MySQL | the comments at the top of `crates/inillucent-remote/tests/live_postgres.rs` and `live_mysql.rs` |
 
-Two different things, and the second one is not the runner.
+## "It printed an error and the exit code was zero"
 
-**Exit code `2` means the run did not happen** — the build failed, a named selection
-matched nothing, `--filter` matched no test. Nothing was graded, so nothing in that run is evidence
-of anything. `1` means the run happened and was red, and `0` means it happened and passed. Branch on
-the code rather than on the last line.
+`inillucent-testrun` has three exit codes:
 
-**A `0` after a shell pipeline is the pipeline's last command, not the runner.**
+| Exit code | Meaning |
+|---|---|
+| `0` | every selected target ran and passed |
+| `1` | the run happened and failed |
+| `2` | the run did not happen: the build failed, a named selection matched nothing, or `--filter` matched no test. Nothing was graded |
+
+In a shell, `$?` after a pipeline is the exit code of the last command in the pipeline:
 
 ```sh
-target/debug/inillucent-testrun --changed | tail -40 ; echo $?   # tail's 0, always
-target/debug/inillucent-testrun --changed > run.log 2>&1 ; echo $?   # the runner's
+target/debug/inillucent-testrun --changed | tail -40 ; echo $?       # the exit code of tail, always 0
+target/debug/inillucent-testrun --changed > run.log 2>&1 ; echo $?   # the exit code of the runner
 ```
 
-That is what made a failed build read as a passing suite, and it cost 60 KB of log to
-find out.
+## Where to look next
 
-## Still stuck
-
-| | |
+| Question | Page |
 |---|---|
-| what the engine gets wrong, and what it refuses | `README.md`, "What it gets wrong" |
-| every construct, measured against SQLite | `docs/feature-comparison.md` |
-| what a driver promises | `drivers/README.md` |
-| how the suite decides what to run | `tests/inillucent-testing-tdd.md` |
+| what SQL the engine supports, and what it refuses | [`docs/sql.md`](../../docs/sql.md) |
+| every probed construct, measured against SQLite | [`docs/feature-comparison.md`](../../docs/feature-comparison.md) |
+| what is not built yet | [`docs/roadmap.md`](../../docs/roadmap.md) |
+| what a driver promises | `drivers/README.md` in the repository, `DRIVER.md` in a release archive |
+| how the test runner decides what to run | [`tests/inillucent-testing-tdd.md`](../../tests/inillucent-testing-tdd.md) |

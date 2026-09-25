@@ -1,607 +1,573 @@
 # Closed items
 
-What came off [the roadmap](roadmap.md), with the measurement that closed each, and what is settled
-and will not be pursued, with the reason. A reader who remembers a roadmap number can find what
-happened to it here.
+This page lists the items that came off [the roadmap](roadmap.md) and the measurement that closed
+each one. It also lists what is settled and will not be pursued, with the reason. A reader who
+remembers a roadmap item can find what happened to it here.
+
+The page is history. Each entry says what the item was, what was done, and the number that closed
+it, with its date. The current numbers are in [Performance](performance.md) and
+[Retrieval quality](retrieval-quality.md).
+
+## Terms used on this page
+
+| Term | Meaning |
+|---|---|
+| [Page](glossary.md) | The unit the database file is read and written in. The gates run at a 32 KiB page |
+| [Buffer pool](glossary.md) | The pages the engine holds in memory. One slot in it is a **frame** |
+| [Write ahead log](glossary.md) | The file every change is written to before it reaches the database file. This page calls it "the log" |
+| [Checkpoint](glossary.md) | Copying the changes in the log into the database file |
+| [Journal](glossary.md) | A file that holds a copy of each page from before a checkpoint changes it, so a crash can put the old page back |
+| [Redo](glossary.md) | Applying log records to pages when a file is opened after a crash |
+| [LSN](glossary.md) | The position of a record in the log. Every page stores the LSN of the last record that changed it |
+| [Delta area](glossary.md) | A region at the end of a B-tree leaf where new rows go first. A **compaction** sorts them into the leaf |
+| Crash campaign | A test that stops the engine at every write and sync of a workload (each one a **cut point**), reopens the file, and checks what survived |
+| Gate | A program that runs the same workloads on inillucent and on SQLite 3.53.4 and reports the speed ratio. A ratio above 1.00x means inillucent is faster |
+| Family | A group of gate workloads with one weight and one bar in `compat/perf/contract.toml` |
+| [Generation](glossary.md) | One published version of a built search index |
+
+## Summary
+
+| Item | How it closed | The number that closed it | Date |
+|---|---|---|---|
+| [A macOS archive](#a-macos-archive) | built, signed and notarised on the Windows machine | every release since 0.1.7 ships macOS binaries | 2026-09-19 |
+| [Memory](#memory) | settled at its current level | 40.76 MiB against SQLite's 37.22, 9.5% more | 2026-09-23 |
+| [`write.insert.batch`](#writeinsertbatch-is-faster-than-sqlite) | a new delta area and a compaction splice | 1.47x, 7.0 µs a row against 10.2 | 2026-09-23 |
+| [Four performance designs](#what-the-performance-designs-closed) | built and measured | weighted 3.55x before, 4.53x after | 2026-09-20 |
+| [Two family bars](#two-family-bars-the-workloads-cannot-reach) | settled: a decision about the contract | `open.prepare` needs `SELECT 1` in 83 ns | 2026-09-23 |
+| [The operator chain](#the-operator-chain-is-reused-between-executions) | a compiled chain reused between executions | `SELECT 1` 63% cheaper | during the engine rework |
+| [Linux](#linux) | settled by experiment | the same speed on both systems, 38.97 ms and 38.20 ms | before 2026-09-20 |
+| [Threads](#threads) | `SharedDatabase`: many threads, one statement at a time | 8 threads, 8,000 rows, none lost | 2026-09-15 |
+| [`extension.fts.build`](#extensionftsbuild) | a segment format built and reverted | now 0.95x | 2026-09-23 |
+| [The old engine](#the-old-engine-is-deleted) | deleted | 30,697 lines removed | during the engine rework |
+| [Search index publishing](#a-generation-is-one-blob) | segmented generations | a commit's cost no longer grows with the table | during the engine rework |
+| [Seven correctness items](#eight-items-closed-together) | fixed, with crash campaigns | zero damage at every cut point | during the engine rework |
+| [Torn page during recovery](#recovery-reads-a-page-before-redo-has-had-a-chance-to-rewrite-it) | fixed in `cdc58eb` | 199 of 199 rows answered | 2026-09-15 |
 
 ## A macOS archive
 
-This was roadmap item 4, on the grounds that every platform's archive was built on that platform
-and there was no Mac. The release is built on the Windows machine instead: zig cross links the
-Mach-O, `rcodesign` signs it and replaces `lipo`, `codesign`, `productsign`, `notarytool` and
-`stapler`, and Apple's notary is an HTTPS API. 0.1.3 was the first release with macOS binaries, and
-0.1.7 publishes all of them:
+**What it was.** Roadmap item 4. Each platform's archive was built on that platform, and there was no
+Mac.
 
-- `inillucent-0.1.7.pkg`, signed with a Developer ID and notarised by Apple, universal for Apple
-  silicon and Intel
-- `inillucent-0.1.7-universal-apple-darwin.tar.gz`, the same binaries
-- the npm packages `@blackrainbowlabs/cli-darwin-arm64` and `@blackrainbowlabs/cli-darwin-x64`
-- the PyPI wheel `inillucent-0.1.7-py3-none-macosx_13_0_universal2.whl`
-- the Homebrew formula in `black-rainbow-labs/inillucent`
+**What was done.** Every target is built on the Windows machine:
+
+- zig links the Mach-O binaries.
+- `rcodesign` signs them and replaces `lipo`, `codesign`, `productsign`, `notarytool` and `stapler`.
+- Apple's notary service is an HTTPS API, so notarising needs no Mac.
+
+**Result.** 0.1.3 was the first release with macOS binaries. 0.1.7 (2026-09-19) was the first to
+publish all of them, and every release since does the same:
+
+| What | Name |
+|---|---|
+| installer, signed with a Developer ID, notarised, universal for Apple silicon and Intel | `inillucent-<version>.pkg` |
+| archive with the same binaries | `inillucent-<version>-universal-apple-darwin.tar.gz` |
+| npm packages | `@blackrainbowlabs/cli-darwin-arm64`, `@blackrainbowlabs/cli-darwin-x64` |
+| PyPI wheel | `inillucent-<version>-py3-none-macosx_13_0_universal2.whl` |
+| Homebrew formula | the tap `black-rainbow-labs/inillucent` |
 
 `tasks/task-1995-macos-releases-without-a-mac-tdd.md` records the three things Apple refused in the
-first `.pkg`, and `AGENTS.md` how the release is run.
+first `.pkg`. `AGENTS.md` says how a release is run.
 
 ## Memory
 
-**40.76 MiB against SQLite's 37.22, which is 9.5% more**, on the same 128 MiB budget, while running
-397% faster and spending 50% less processor (2026-09-23). It came down three times, from 102% more, then 43%, then
-14%. The last step was the second design in the performance TDD: a bulk index build used to write each page into a buffer
-pool frame that then had to be written out and evicted, and it writes into the file directly now, so
-`schema.index` - which is what sets this plan's high water mark - raises it by 10.73 MiB rather than
-12.50.
+**Result on 2026-09-23.** Peak resident memory for one round of the gate plan was **40.76 MiB against
+SQLite's 37.22, which is 9.5% more**. Both ran on the same 128 MiB buffer pool budget. In the same
+run inillucent was 397% faster and used 50% less processor time.
 
-The remaining 3.7 MiB is a page pool holding a file that is within 4% of SQLite's, a process floor, and
-one `CREATE INDEX`. **The allocator is not part of it, and that is measured rather than assumed**: a
-130 KB Rust program whose `main` reads its own working set and returns peaks at **3.62 MiB with
-`inillucent-alloc` installed and 3.62 MiB without it**, 0.66 MiB private either way. It has no initial
-reservation to size down - its free lists start empty and a full class hands its block back to the
-system allocator - so the question the tenth design in the performance TDD asked, whether two to
-three of these mebibytes were the allocator's arena, is answered no. [Where the memory goes](performance.md#memory) attributes
-every megabyte. Closed by decision: this is where it stays.
+**How it came down.** The gap was 102%, then 43%, then 14%, then 9.5%.
+
+| Step | What changed |
+|---|---|
+| 102% to 43% | the redo buffer bounded to 512 KiB; the index build stopped holding three copies of the tree; a version log that nothing collected is now collected; the allocator's free list is capped in bytes as well as in blocks |
+| 43% to 14% | the database file became smaller |
+| 14% to 9.5% | a bulk index build writes each page to the file directly, and no longer through a buffer pool frame |
+
+The last step changed the plan's peak from 42.45 MiB to 40.76. `schema.index` sets the peak, and it
+now raises it by 10.53 MiB where it raised it by 12.50.
+
+**Why it stays.** The remaining 3.54 MiB is a buffer pool holding a file within 4% of SQLite's size,
+the fixed cost of a process, and one `CREATE INDEX`. The allocator is not part of it. A 130 KB Rust
+program that reads its own working set and exits peaks at **3.62 MiB with `inillucent-alloc`
+installed and 3.62 MiB without it**, 0.66 MiB private either way. `inillucent-alloc` makes no initial
+reservation: its free lists start empty. [Where the memory goes](performance.md#memory) attributes
+every megabyte.
+
+Closed by decision. The memory figure stays where it is.
 
 ## `write.insert.batch` is faster than SQLite
 
-**It reads 1.47x on 2026-09-23, 7.0 µs a row against SQLite's 10.2**, where this was roadmap item 2
-under the title "`write.insert.batch` is about 67% slower than SQLite". A later change closed it: a leaf's
-delta area keeps a directory in key order and is sized by the page's free space rather than capped at
-32 rows, and a compaction whose rows fit the page's existing column widths splices them in. The `write`
-family went from 2.12x on 2026-09-20 to 3.04x. [Performance](performance.md#what-moved-since-2026-09-20)
-has the run. What follows is the item as it stood when it was open, kept for the measurements in it.
-**About 0.60x**: 2,000 inserts in one transaction. It was 72% slower, then 43%, and it sits inside a
-family that clears its bar, so it blocks nothing.
+**What it was.** Roadmap item 2, "`write.insert.batch` is about 67% slower than SQLite". The workload
+inserts 2,000 rows in one transaction into a table with two secondary indexes. It read about 0.60x.
 
-**That same change took the cost of an index from about 5.2 µs a row to about 2.0, on the index count
-sweep.** The sweep is the measurement this item lacked: the gate's `main_table` has two secondary
-indexes, so a change aimed at index maintenance measured there is one point of a curve.
+**Result on 2026-09-23.** **1.47x, 7.0 µs a row against SQLite's 10.2.** The `write` family went from
+2.12x on 2026-09-20 to 3.04x. [Performance](performance.md#what-moved-since-2026-09-20) has the run.
+
+**What was done.** Two changes to the leaf page:
+
+1. **The delta area has a directory in key order and no count limit.** It used to compact every 32
+   rows. With a directory, a lookup in the delta area is a binary search, so the delta area can use
+   all of the page's free space. At 10 indexes, compactions fell from 1,624 to 423.
+2. **A compaction splices its delta rows into the packed page when they fit the page's existing
+   column widths.** It no longer reads, sizes and writes every kept row again. At 10 indexes, 391 of
+   the 423 compactions were splices.
+
+Both change the page format, so the file format is 2. The current build reads format 1.
+[What a file's format version promises](relational-architecture.md#6-what-a-files-format-version-promises)
+explains how, and what earlier releases do with a format 2 file.
+
+### The index count sweep
+
 `inillucent-writeprofile --sweep` inserts 5,000 rows in one transaction into a 100,000 row table
-carrying 0, 2, 5 and 10 indexes, and `inillucent-perfhistory --only insert.indexes` asks SQLite the
-same of a 20,000 row table. Two changes, measured separately in one quiet window, fastest of five
-interleaved rounds, microseconds a row:
+with 0, 2, 5 and 10 indexes. Each change was measured separately in one quiet window on 2026-09-22.
+Each figure is the fastest of five interleaved rounds, in microseconds a row. The rows are
+`before`, `directory` and `directory-and-splice` in `tests/performance-history.tsv`.
 
-| indexes | before | the delta area sized by the free gap | and the compaction splice |
+| indexes | before | with the directory | with the directory and the splice |
 |---:|---:|---:|---:|
 | 0 | 7.93 | 5.04 | 5.14 |
 | 2 | 18.28 | 10.47 | **9.12** |
 | 5 | 33.45 | 17.16 | **15.50** |
 | 10 | 73.06 | 39.97 | **37.20** |
-| cost per index at 2 | 5.17 | 2.71 | **1.99** |
-| compactions at 10 indexes | 1,624 | 423 | 423, 391 of them spliced |
+| cost per index, at 2 | 5.17 | 2.71 | **1.99** |
+| compactions, at 10 indexes | 1,624 | 423 | 423, 391 of them spliced |
 
-Against SQLite, net of process startup, the wall ratio at 2 indexes went from 0.08x to 0.19x and at
-10 indexes from 0.43x to **1.28x** - the first arm of this workload this engine wins. Rows `before`,
-`directory` and `directory-and-splice` in `tests/performance-history.tsv`.
+`inillucent-perfhistory --only insert.indexes` asks SQLite the same of a 20,000 row table. After
+subtracting process startup, the ratio against SQLite at 2 indexes went from 0.08x to 0.19x. At 10
+indexes it went from 0.43x to **1.28x**.
 
-- **The delta area has a directory in key order and no count limit.** It compacted every 32 rows
-  whatever the leaf held, which the performance review had priced as "the two indexes are 69% of
-  this workload". With a directory a lookup is a binary search, so the area can take the whole free
-  gap: 1,624 compactions became 423. The audit predicted 18 to 20% of the workload; it was 43% at two
-  indexes, because the compaction count fell by 3.7x rather than the 8x the audit assumed and every
-  compaction became cheaper as well.
-- **A compaction splices its delta rows into the packed page when the rows fit its widths**, instead
-  of reading, pricing and writing every kept row again. It is 7% to 15% on top of the
-  first change at two indexes and more, and nothing without an index: a table's own tree appends at
-  its right edge and rarely compacts.
+### Measurements taken while the item was open
 
-Both are page format changes, so the file format is 2. This build reads format 1;
-`docs/relational-architecture.md` section 5a says how, and what the earlier releases answer for a
-format 2 file.
+These were taken before the two changes, at a 32 KiB page, on the medium fixture. They show where
+the time went.
 
-**The 0.72x this item carried until now was measured by a gate that was not asking both arms the same
-question.** `inillucent-writegate` never ran a workload's own `pre`, and `sqlite_bench.c` runs one
-before it starts its clock - so on `txn.batched` and `txn.large`, which both carry
-`UPDATE side_table SET note = 'note ' || id`, SQLite did work this engine skipped. That was fixed
-in `aa140c7`, and every workload agrees again. Measured after that fix, four runs alternating between
-this build and a control, at a 32 KiB page: `write.insert.batch` reads **0.56x and 0.63x**, and the
-`write` family 1.67x and 1.80x against its 1.50x bar.
-
-**This item has now named the wrong cause twice, and the second time the measurement says which
-number was the misleading one.** The first text blamed `locate()`'s walk of each leaf's unsorted delta
-area; that was counted and came to under eight per cent. The second blamed the split record's log
-volume, which is real and is not what the workload waits for.
-
-`inillucent-writelogattrib` on the medium fixture at the gate's own geometry, a 32 KiB page, 2,000
-inserts into `main_table` with its two secondary indexes, and then the identical run with both indexes
-dropped:
+`inillucent-writelogattrib`, 2,000 inserts with both indexes and then with both dropped:
 
 | | with both indexes | without either | the two indexes |
 |---|---:|---:|---:|
-| wall | 50.43 ms | 15.47 ms | **34.96 ms, 69%** |
-| applying the changes to pages | 46.37 ms | 11.77 ms | 34.60 ms |
+| wall time | 50.43 ms | 15.47 ms | **34.96 ms, 69%** |
+| applying changes to pages | 46.37 ms | 11.77 ms | 34.60 ms |
 | log written | 1,563.9 KiB | 1,163.4 KiB | 400.5 KiB |
 | leaf compactions | 181 | 58 | 123 |
 | splits | 9 | 8 | 1 |
 
-| where the log goes | records | bytes | share |
+| log record | records | bytes | share of the log |
 |---|---:|---:|---:|
 | `Structural` (a split) | 9 | 864.7 KiB | **55%** |
 | `InsertRow` | 6,000 | 687.5 KiB | 44% |
 | `CompactLeaf` | 181 | 11.3 KiB | 0.7% |
 | `AllocPage` and the commit | 10 | 0.4 KiB | 0.03% |
 
-A split costs **98,384 bytes** at this page size - three whole pages for one row that would not fit -
-so a logical split record would take 55% off the log's volume. **It would take about 2% off the
-workload's time**, because the log is written once and synced once at the commit and the bytes are not
-what the workload is waiting for. The time is the 34.96 ms of index maintenance: 8.7 µs for each of
-the four thousand index row insertions, against 2.4 µs for each of the two thousand table rows.
+A split wrote 98,384 bytes of log at this page size: three whole pages. A smaller split record would
+remove 55% of the log's bytes and about 2% of the time, because the log is written and synced once
+at the commit. The time was index maintenance: 8.7 µs for each of the 4,000 index row insertions,
+against 2.4 µs for each of the 2,000 table rows.
 
-**And the third measurement says which part of the index maintenance it is.** `WriteStats` gained
-`room_nanos`, the time inside `make_room` - compacting a leaf, or splitting one - because the rows
-above say how many there were and not what they took. It read 23.97 ms of a 44.17 ms transaction
-then, 54% of it.
-
-**Making room is now 10.57 ms of 29.60, and it has been split into the four passes it actually is.**
-`LeafRef::live_source` is `live_order` and then `materialise` - deciding which rows
-survive, then reading every one of them - and `compact_image` reports its sizing pass and its encode
-apart. Medians of five runs, 32 KiB page, the same fixture:
+`WriteStats::room_nanos` times `make_room`, which compacts or splits a leaf. Medians of five runs:
 
 | | with both indexes | without either |
 |---|---:|---:|
-| wall | 29.60 ms | 14.30 ms |
+| wall time | 29.60 ms | 14.30 ms |
 | **making room** | **10.57 ms** | 4.12 ms |
-| building the image | 7.77 | 1.59 |
-| - the merge, which rows are live | 1.98 | 0.50 |
-| - reading every one of them | 1.90 | 0.33 |
-| - the sizing pass | 1.16 | 0.12 |
-| - the encode | 2.22 | 0.35 |
+| building the new page image | 7.77 ms | 1.59 ms |
+| of which: choosing the live rows | 1.98 ms | 0.50 ms |
+| of which: reading the live rows | 1.90 ms | 0.33 ms |
+| of which: sizing the page | 1.16 ms | 0.12 ms |
+| of which: encoding the page | 2.22 ms | 0.35 ms |
 
-**Only one of those four does not grow with the page size, and it is the one a splice cannot
-remove.** At an 8 KiB page the merge is 1.89 ms against 1.98 here - it is per delta row, and a delta
-area holds at most thirty-two whatever the page holds - while reading the rows, sizing the page and
-encoding it all roughly double, because a 32 KiB leaf keeps four times as many rows. An attribution
-of this stage taken at 8 KiB therefore understates it by about half, and the gate runs at 32 KiB.
+The sizing step was 4.00 ms before `fit_all_widths` replaced a row by row check with one pass. That
+took the transaction from 33.91 ms to 29.60 ms. The test `fit_all_widths_agrees_with_fit_widths`
+checks that both produce the same page bytes. At the gate, alternating four runs between that build
+and a control, inillucent's own time went from 37.65 ms to 33.04 ms as medians, 12.2% faster.
 
-**2.84 ms of it came off by asking the sizing pass a simpler question.** `pack_all_rows` wants one
-bit - do *all* the live rows fit one page - and `fit_widths` answered it by pricing the leaf a row at
-a time, resolving the whole candidate layout and recomputing the page size on every row, because its
-other caller stops at the first row that does not fit. `fit_all_widths` observes every column's shape
-in one pass, resolves once and compares once: 4.00 ms to 1.16, and the transaction 33.91 to 29.60.
-The two cannot disagree, because the price of a run of rows never falls as rows are added - so a leaf
-that fits whole had every prefix of it fit, and the layout the incremental loop ends on is `resolve`
-over the shapes of all the rows. `fit_all_widths_agrees_with_fit_widths` asserts the page bytes and
-not only the verdict.
+An earlier guess blamed the walk of each leaf's unsorted delta area. It measured **8,329 calls,
+119,645 entries walked, 5.1 ms** against 66.8 ms of apply time at an 8 KiB page: under 8%.
 
-**What that is worth at the gate**, once the gate was fixed to measure again. Four runs at a 32 KiB
-page, alternating between this build and a control with the sizing pass put back, so that drift in
-the box shows up in both:
-
-| | control | this build |
-|---|---|---|
-| `write.insert.batch`, this engine's arm | 38.34 ms, 36.95 ms | **33.14 ms, 32.93 ms** |
-| the same workload's ratio | 0.46x, 0.58x | **0.56x, 0.63x** |
-| the `write` family | 1.54x, 1.74x | **1.67x, 1.80x** |
-
-**Read this engine's own arm rather than the ratio.** The box was not quiet - another ticket held
-both GPUs and the local model server throughout - and it shows in the SQLite arm, which drifted from
-18.49 ms to 21.33 ms across the four runs while this engine's arm varied by 3.8% in the control and
-0.6% here. On its own arm the change is **12.2% faster**, 37.65 ms to 33.04 ms as medians, which is
-the same figure `inillucent-writelogattrib` reports for the same workload off the gate.
-
-**What is left for a splice is the encode, 2.22 ms of 29.60.** A compaction that spliced its delta
-rows into the column-major image rather than re-encoding every kept row still has to decide which
-rows survive, and still has to settle the slot widths: `compact_image` narrows a column when the
-widest value in it was tombstoned, and `CompactLeaf` carries an empty image and a `from_lsn` so that
-recovery re-derives those bytes rather than copying them. A splice that chose different widths would
-produce a correct page that is not the same page, and nothing would say so, because the checksum is
-computed over whatever was produced. Settling the widths means observing every value, and
-`live_source`'s own measurement says reading values straight through the mini-columns instead of
-materialising them once is *slower* - `txn.large` 4.1 ms to 5.7. So the splice's ceiling is 7% of the
-transaction, before its own memcpys, offset rewrites and class-array shifts cost anything, against a
-second row source on the hottest write path and its own crash campaign.
-
-**And two things outside making room are now larger than that ceiling.** Timed with temporary
-per-write timers, which cost about 27% of the wall themselves and so give shares rather than
-absolutes, the apply time of the same transaction divides as: making room 38%, **locating the key
-16%**, placing the row with its log and undo records 14%, **the room check 10%**, encoding the row
-3%, the descent 2%. The room check is `LeafMut::room_for`, which reads - and it is reached through
-`Pool::modify`, which takes the page mutably and marks the frame dirty, once per row written.
-
-What this item carries is the number rather than a guess: the delta walk was under eight per cent,
-the split record is 55% of the bytes and about 2% of the time, making room is 36% of the transaction,
-and inside it the encode a splice would replace is 7%.
-
-And the earlier delta walk measurement, kept because it is what closed the first guess: **8,329 calls,
-119,645 entries walked, 5.1 ms**, 14.4 entries a call, against 66.8 ms of apply time at an 8 KiB page.
-Under eight per cent, and that is the whole walk rather than what a fingerprint block would save - a
-probe that matches still decodes, and the block itself costs a hash per insert and 64 bytes a leaf.
-`crates/inillucent-compat/src/bin/writelogattrib.rs`'s own header already recorded that a previous fix
-to that decode "did not move the gate ratio"; this is the number behind that sentence.
+An earlier figure of 0.72x came from a gate that did not run a workload's `pre` statement, while
+`sqlite_bench.c` did. Commit `aa140c7` fixed the gate.
 
 ## What the performance designs closed
 
-Four of its ten designs are built and measured; the pair of four-run gates that measures them was taken
-back to back on one box, because the same pinned SQLite binary reads 2.16x faster on a quiet box than
-on a busy one and a stored baseline is therefore not a comparison. **3.55x weighted before, 4.53x
-after**, with processor time 0.635 of SQLite's before and 0.400 after.
+Four of the ten designs in `tasks/task-2000-inillucent-performance-tdd.md` are built and measured.
+The before and after gates were taken back to back on one machine on 2026-09-20. The same SQLite
+binary reads 2.16x faster on a quiet machine than on a busy one, so a stored baseline is not a fair
+comparison.
 
-**A commit is one log append and one sync of it** (design 1). It used to be a checkpoint: the log
-folded into the file, and a rollback journal holding the pre-image of every page the fold was about to
-overwrite, at six to eight `fsync` class calls a statement. The fold is deferred now - until the log
-passes four mebibytes, until a caller asks, or until the connection closes - and it is made safe
-without a rollback journal by appending the after image of every page it is about to write to the log
-first. Measured on the gate's own new counters: `txn.autocommit`'s hundred statements make **100 log
-writes, 100 log syncs, no data file syncs and no folds**, where they used to make 202 syncs and write
-3,252 KiB of log for 50 KiB of rows. `txn.autocommit` went from 0.13x to 0.94x and
-`write.insert.autocommit` from 0.47x to 3.04x; the `transaction` family from 1.25x to 2.36x and `write`
-from 1.46x to 2.12x, both lower bounds now clear of the 1.50x bar.
+| | before | after |
+|---|---:|---:|
+| weighted speed | 3.55x | **4.53x** |
+| processor time, as a share of SQLite's | 0.635 | **0.400** |
 
-**A bulk index build writes each page once** (design 2). `schema.index` went from 0.66x to 1.37x and
-the plan's peak resident set from 42.45 MiB to 40.76. Its crash campaign cuts 1,200 points of a
-`CREATE INDEX`, including the one cut where the statement commits and the power then goes: that
-snapshot holds a database whose catalog has never been written in place, so the committed index exists
-in the log and nowhere else, and recovery rebuilds it over pages that were synced before the commit.
+| Design | What changed | Result |
+|---|---|---|
+| 1. A commit is one log append and one sync | A commit used to run a checkpoint with a journal, at six to eight `fsync` calls a statement. The checkpoint now waits until the log passes 4 MiB, a caller asks, or the connection closes. It writes the new image of each page to the log before it overwrites the page, so it needs no journal | `txn.autocommit`'s 100 statements make 100 log writes, 100 log syncs, no data file syncs and no checkpoints. They used to make 202 syncs and write 3,252 KiB of log for 50 KiB of rows. `txn.autocommit` 0.13x to 0.94x, `write.insert.autocommit` 0.47x to 3.04x, the `transaction` family 1.25x to 2.36x, `write` 1.46x to 2.12x |
+| 2. A bulk index build writes each page once | The build writes pages to the file directly | `schema.index` 0.66x to 1.37x. Peak memory 42.45 MiB to 40.76. The crash campaign cuts 1,200 points of a `CREATE INDEX`, including a power loss just after the commit |
+| 4. `count(*)` is one addition a batch | The aggregate used to be called once a row | `scan.aggregate` 11.41x to **52.16x**, `scan.group` 7.89x to **27.51x**, `read.analytical` 5.29x to 10.48x, its lower bound 4.67x to 8.14x, over its 5.00x bar |
+| 9. The retrieval index builds on every core | `HnswParams::build_threads` defaults to every core. The two halves of a hybrid search run in parallel. `distance::dot` uses an AVX2 and FMA kernel with eight 256 bit accumulators | Index build 129.7 s to **16.8 s** for 185,078 chunks at 768 dimensions. Vector search p50 0.934 ms to **0.8462 ms** |
 
-**`count(*)` is one addition a batch** (design 4). The operators answered it by calling the accumulator
-once a row with a `NULL` argument, so a hundred thousand row scan made a hundred thousand calls that
-each compared a discriminant and added one. `scan.aggregate` went from 11.41x to **52.16x** and
-`scan.group` from 7.89x to **27.51x**, which took `read.analytical` from 5.29x to 10.48x and its lower
-bound from 4.67x to 8.14x, over the 5.00x bar it had been missing.
+A parallel build produces a different graph from a serial one. The condition for design 9 was that
+the score card's ranking verdicts stay the same. They did: **15 better, 1 equivalent, 1
+inconclusive, 0 worse**, with every correctness gate passing. So the parallel build is the default
+everywhere.
 
-**The retrieval index builds on every core** (design 9). `HnswParams::build_threads` defaults to
-`available_parallelism()`, the two legs of a hybrid search run under `rayon::join`, and
-`distance::dot` dispatches once to an AVX2 and FMA kernel with eight 256-bit accumulators. The index
-build went from 129.7 s to **16.8 s** for 185,078 chunks at 768 dimensions, and vector search p50 from
-0.934 ms to **0.8462**. The acceptance condition was the score card's ranking verdicts, because a
-parallel build's graph is not the serial one: they are byte for byte what they were, **15 better, 1
-equivalent, 1 inconclusive, 0 worse, every correctness gate passing**, which is why the default is the
-parallel build everywhere rather than only in the command line.
+The AVX2 kernel adds numbers in a different order from the scalar kernel, so the answers are not bit
+identical. Over ten thousand random normalised pairs at 768 dimensions, the largest difference was
+**5.4e-8**, under half a unit in the last place of an `f32` near 1.0.
 
-The wide kernel does not produce bit identical answers to the scalar one and cannot - a different
-number of accumulators is a different summation order - and the measured worst disagreement over ten
-thousand random L2 normalised pairs at 768 dimensions is **5.4e-8**, under half a unit in the last
-place of an `f32` near 1.0.
+## Two family bars the workloads cannot reach
 
-## Two per family bars that arithmetic cannot reach
+`compat/perf/contract.toml` sets a bar for each family. The bars were written before any measurement.
+They are targets and fail nothing. Two of them cannot be reached by work on the engine, so they are
+not roadmap items. Moving them is a decision about the contract. Numbers from 2026-09-23:
 
-`open.prepare` is `prepare.point` at 4.96x and `prepare.trivial` at 0.51x; for the family to reach
-its 5.00x bar, `prepare.trivial` would have to reach 5.05x, and SQLite compiles, binds, steps and
-resets `SELECT 1` in 483 ns, so the bar asks for 96 ns. `schema` is one `CREATE INDEX`, 26.78 ms
-against SQLite's 33.54, whose stages are `scan 3.7, sort 5.5, pack 11.4, catalog 0.3, seal 5.8`: a
-packer costing nothing at all leaves 15.4 ms, which is 2.18x against a 3.00x bar. Both bars are in
-`compat/perf/contract.toml`, written before any measurement. They are targets rather than
-requirements and fail nothing. Whether to move them is a decision about the contract, not work on
-the engine, so they are not roadmap items.
+| Family | Bar | Result | Why the bar is out of reach |
+|---|---|---|---|
+| `open.prepare` | 5.00x | 1.69x | The family is `prepare.point` at 5.10x and `prepare.trivial` at 0.57x. For the family to reach 5.00x, `prepare.trivial` would have to reach 4.90x. SQLite compiles, binds, steps and resets `SELECT 1` in 407 ns, so the bar asks for 83 ns |
+| `schema` | 3.00x | 1.31x | One `CREATE INDEX`: 26.47 ms against SQLite's 34.63. Its stages are `scan 3.6 ms, sort 4.8, pack 15.1 to 16.3, catalog 0.2, seal 1.1`. If writing the index pages cost nothing, the workload would take about 10.5 ms, about 3.3x. So the bar needs the index written for almost nothing |
 
-## The operator chain is rebuilt on every execution
+`prepare.trivial` makes 13 allocations, down from 24, measured by `inillucent-prepareprofile`. Nine of
+the 13 are part of the compiled statement that the call returns.
 
-Built as part of the engine rework. A `Compiled` with no lifetime owns the borrow free part of a statement's chain and
-re-acquires the tree borrows inside `run`; `Cached::Select` carries a slot of `Untried | Reusable |
-Never`, and a re-entrant execution falls back to a fresh build rather than refusing. The index
-nested loop tower (`JoinRecipe` in `crates/inillucent-exec/src/compiled.rs`) and the same slot on
-the write path's `Cached::Insert`, `Update` and `Delete` (`crates/inillucent-engine/src/plans.rs`)
-landed in the same ticket. Paired measurement, 40 rounds of 200 executions per arm with the arm
-order swapped every round:
+## The operator chain is reused between executions
 
-| statement | rebuilt | reused | saved | rounds reused faster |
+**What it was.** Every execution of a prepared statement rebuilt its chain of operators.
+
+**What was done.** Built during the engine rework:
+
+- A `Compiled` owns the part of the chain that borrows nothing, and takes the tree borrows again
+  inside `run`.
+- `Cached::Select` holds a slot that is `Untried`, `Reusable` or `Never`. An execution that starts
+  while the same statement is already running builds a fresh chain.
+- The index nested loop join (`JoinRecipe` in `crates/inillucent-exec/src/compiled.rs`) and the write
+  statements `Cached::Insert`, `Update` and `Delete` (`crates/inillucent-engine/src/plans.rs`) use
+  the same slot.
+
+**Result.** 40 rounds of 200 executions per arm, with the order of the arms swapped every round:
+
+| statement | rebuilt | reused | saved | rounds where reuse was faster |
 |---|---:|---:|---:|---:|
 | `SELECT 1` | 3,486 ns | 1,280 ns | 63% | 40 of 40 |
 | a point lookup by rowid | 20,149 ns | 12,471 ns | 39% | 35 of 40 |
-| a 200-row range scan | 1,191,358 ns | 1,221,768 ns | **none** | **17 of 40** |
+| a 200 row range scan | 1,191,358 ns | 1,221,768 ns | **none** | **17 of 40** |
 | a covering range scan | 33,772 ns | 27,379 ns | 18% | 37 of 40 |
 | a point join | 20,204 ns | 11,564 ns | 41% | 38 of 40 |
 
-The 200 row range scan does not move, and the sequential arms' 11 to 14% was noise: 17 of 40 rounds
-went the other way. Its cost is per entry across 200 probes, which no per statement saving can
-reach; that is [roadmap item 1](roadmap.md#1-the-extension-and-join-families-either-side-of-their-bars).
-Building this surfaced four defects that were live in `build_statement` and invisible only because
-nothing reused a chain: `Statement::run` never re-ran `subquery::fold`, so a second execution of a
-statement whose source key reads a subquery refused; it formatted an `EXPLAIN` string and threw it
-away every execution; `Correlated` and `LateralModule` copy the parameters at build time and nothing
-counted that as a read; and `build_materialised_join` bakes its inner rows in at build time. The
-first two are fixed; the last two are excluded from reuse by the verdict.
+The 200 row range scan spends its time on each of its 200 probes, so a saving per statement does not
+change it. That cost is
+[roadmap item 1](roadmap.md#1-the-extension-and-join-families-either-side-of-their-bars).
+
+The work found four defects in `build_statement`:
+
+| Defect | Status |
+|---|---|
+| `Statement::run` never ran `subquery::fold` again, so a second execution of a statement whose key reads a subquery was refused | fixed |
+| every execution formatted an `EXPLAIN` string and discarded it | fixed |
+| `Correlated` and `LateralModule` copy the parameters when the chain is built | such chains are not reused |
+| `build_materialised_join` stores the inner rows when the chain is built | such chains are not reused |
 
 ## Linux
 
-**53% faster there, where Windows measured 279% at the time.** Settled by experiment: with a size
-classed free list in place of the system allocator the two platforms run the same absolute speed,
-38.97 ms against 38.20, and it is SQLite's own arm that moves across platforms rather than this
-engine's. [Linux](performance.md#linux) has the measurement and the caveat: nothing since the
-allocator change has been measured on Linux, so the Linux figure is older than the 397% Windows
-headline. Re-measuring wants a Linux machine that is not also running the Windows arm; both inside
-one box would measure the contention and not the platform.
+**What it was.** The same binary measured 53% faster than SQLite on Linux, while Windows measured 279%
+faster at the time.
+
+**What was found.** With a free list sorted by size class in place of the system allocator, a
+`SELECT 1` compile went from 46.95 ms to 38.97 ms on Windows and from 39.91 ms to 38.20 ms on Linux.
+The two systems then ran at the same speed. SQLite's time is what changes between the two systems:
+Windows charges more than Linux for the calls SQLite makes to the operating system on each statement.
+
+**Status.** Settled. Nothing since the allocator change has been measured on Linux, so the Linux
+figure is older than the Windows figure of 397%. A new measurement needs a Linux machine that is not
+also running the Windows arm. [Linux](performance.md#linux) has the details.
+
+## Threads
+
+**What it was.** Roadmap item 3. Several processes could share one database file, and several
+threads in one process could not share one database.
+
+**What was done.** `SharedDatabase` in `drivers/inillucent-driver/src/shared.rs` lets any number of
+threads in one process use one database. Exactly one statement runs at a time, and a transaction
+keeps its turn until it ends. SQLite calls this serialized mode. A web server can give one
+`SharedDatabase` to a pool of workers, and each worker clones it.
+
+The database is opened on a thread of its own and never leaves that thread. The other threads send
+it statements over a channel. So `inillucent-driver` needs no `unsafe` code and keeps
+`#![forbid(unsafe_code)]`. The cost is one thread per shared database and one channel round trip per
+statement.
+
+**Tests.** `drivers/inillucent-driver/tests/threads.rs` checks four things:
+
+| Test | What it checks |
+|---|---|
+| `eight_threads_inserting_a_thousand_rows_each_land_eight_thousand` | 8 threads insert 1,000 rows each, and the table holds 8,000 rows with no key repeated |
+| `a_reader_sees_the_state_before_a_transaction_or_the_state_after_it` | a reader during a 1,000 row transaction sees 0 rows or 1,000, never a number between |
+| `a_database_is_used_and_dropped_on_another_thread` | dropping the database on another thread releases the file, and the file reopens |
+| `a_dropped_transaction_rolls_back_and_gives_the_turn_up` | a transaction dropped without a commit rolls back and lets the next thread run |
+
+Several processes use the same locking protocol as SQLite (SHARED, RESERVED, PENDING, EXCLUSIVE)
+under `PRAGMA locking_mode = normal`, the default. One writer holds the file at a time. A second
+writer waits for `PRAGMA busy_timeout` and then fails with `busy`.
+`crates/inillucent-compat/tests/process_concurrency.rs` starts two real writer processes and checks
+that the rows in the file equal the commits the engine acknowledged. Before that test existed, two
+real processes lost 43% of their acknowledged commits on every round.
+
+**Not planned.** Statements do not run in parallel. A parallel executor is not on the roadmap.
 
 ## `extension.fts.build`
 
-**0.60x against SQLite**: 10.92 ms against 6.23 ms, measured on a quiet box over 30 rounds. Two
-changes were built for it and measured. One bought nothing and was kept; the other cost half of
-query throughput and was reverted.
+**What it was.** The slowest workload in the `extension` family: building an FTS5 index over 500
+documents.
 
-**The doubled write, kept.** FTS5 used to do four tree writes per document; the engine rework made the last
-two one row, `%_idx` carrying the doclist inline rather than an integer naming the `%_data` row it
-lived in. Measured as a genuine A/B with the change alternated in and out of the tree and a release
-rebuild each time, the paired ratio read 0.50x/0.56x before and 0.55x/0.53x after: the row count was
-never what this workload pays for, the bytes are. It is kept because it is simpler and because old
-files still read; `crates/inillucent-compat/tests/fts5_legacy_layout.rs` manufactures an old layout
-file and requires the same answers.
+**Status on 2026-09-23.** **0.95x, 10.9 µs a document against SQLite's 10.4.** It was 0.69x on
+2026-09-20. It improved with the write path change that closed
+[`write.insert.batch`](#writeinsertbatch-is-faster-than-sqlite).
 
-**The segment format, built and reverted.** A `segid` per flush, tombstones at a negative segid, a
-manifest at `%_data` row `-1` whose absence identifies a pre-segment file, and an automerge fold. It
-made `fts.build` no faster and roughly halved `fts.query`, taking the `extension` family under the
-contract's 1.00x floor:
+Two changes were built for it earlier, when it read 0.60x (10.92 ms against 6.23 ms, 30 rounds on a
+quiet machine).
 
-| | `fts.query` | `extension` family, 95% low |
+**One row a document, kept.** FTS5 used to write four rows a document. The engine rework merged the
+last two: `%_idx` holds the document list inline, where it used to hold the number of a `%_data` row.
+Alternating the change in and out with a release build each time, the ratio read 0.50x and 0.56x
+before and 0.55x and 0.53x after. The workload pays for bytes written, and the row count does not
+change the bytes. The change is kept because it is simpler. Files in the old layout still read, and
+`crates/inillucent-compat/tests/fts5_legacy_layout.rs` checks that they give the same answers.
+
+**A segment format, built and reverted.** Each flush wrote a new segment, with a manifest at
+`%_data` row `-1` and an automatic merge. It made `fts.build` no faster and roughly halved
+`fts.query`:
+
+| | `fts.query` | `extension` family, 95% lower bound |
 |---|---:|---:|
 | before the segment format | **1.32x** | not measured |
-| with it | 0.45x | **0.93x**, under the floor |
-| after a per-segment prefix seek | 0.60x | 1.08x |
-| after skipping a needless merge on one segment | 0.65x | 1.13x |
-| after a tombstone-presence bit in the manifest | 0.57x - 0.71x | 1.15x |
+| with it | 0.45x | **0.93x**, under the 1.00x floor |
+| after a prefix seek per segment | 0.60x | 1.08x |
+| after skipping a merge when there is one segment | 0.65x | 1.13x |
+| after a bit in the manifest that says whether there are deletions | 0.57x to 0.71x | 1.15x |
 | **reverted** | **1.43x** | **1.40x** |
 
-The remaining cost was the manifest re-read from disk on every query, which could not be cached
-because a module had no hook that said "another connection may have committed since you last
-looked". That hook exists now: `VirtualTable::committed_elsewhere` and `schema_changed`.
-Re-attempting the format with a cached manifest is what
-[roadmap item 1](roadmap.md#1-the-extension-and-join-families-either-side-of-their-bars) names for
-the `extension` family.
+The remaining cost was reading the manifest from disk on every query. A module had no way to learn
+that another connection had committed, so the manifest could not be cached. That hook now exists:
+`VirtualTable::committed_elsewhere` and `schema_changed`. Trying the format again with a cached
+manifest is part of
+[roadmap item 1](roadmap.md#1-the-extension-and-join-families-either-side-of-their-bars).
 
 ## The old engine is deleted
 
-`inillucent-vm` (16,356 lines), `inillucent-session` (8,331), `inillucent-capi` (5,350) and
-`inillucent-legacy` (660) are gone from the workspace: 30,697 lines, the engine that reached SQLite
-file format parity, its connection, its facade and its `sqlite3_*` C ABI. It was measured between
-30% and 95% slower than SQLite across the families, which is why the rearchitecture happened, and
-`drivers/inillucent-driver-capi` had already replaced what the C ABI was waiting on.
+**What was removed.** Four crates, 30,697 lines:
 
-36 files in `inillucent-compat` named one of the four, and every one was rewritten before the crates
-came out so every suite could be run against the replacement first. Differential tests that ran the
-old engine beside the new one were re-pointed at the pinned SQLite oracle, or at the new engine
-alone asserting the value the old one used to agree about; `tests/capi.rs` was deleted, because it
-proved an ABI against the official `sqlite3.h` that the shipping driver does not implement and was
-never trying to; and old VM bytecode cases with nothing to survive went with it. Three capability
-rows in `compat/sqlite-3.53.4.toml` (`vm.bytecode.verifier`, `vm.statement.interrupt`, `txn.hooks`)
-moved to `status = "missing"` as a result.
+| Crate | Lines | What it was |
+|---|---:|---|
+| `inillucent-vm` | 16,356 | the engine that first reached SQLite file format parity |
+| `inillucent-session` | 8,331 | its connection |
+| `inillucent-capi` | 5,350 | its `sqlite3_*` C ABI |
+| `inillucent-legacy` | 660 | its facade |
 
-**`inillucent-storage` and `inillucent-transaction` stay.** `inillucent-engine` and
-`inillucent-migrate` both depend on `inillucent-sqlite-reader`, which depends on both of them, because
-reading a SQLite file in order to migrate away from it is what keeps 18,764 lines of the old engine
-alive, and that is a feature rather than a leftover. `policy.rs`'s
-`no_new_crate_reaches_into_the_retired_engine` ratchet watches only these two crates.
-[Dependency policy](dependency-policy.md) has the edges and the ratchet.
+That engine measured between 30% and 95% slower than SQLite across the families, which is why the
+engine was rebuilt. `drivers/inillucent-driver-capi` had already replaced the C ABI.
+
+**What changed in the tests.** 36 files in `inillucent-compat` named one of the four crates. All were
+rewritten before the crates were removed:
+
+- Tests that compared the old engine with the new one now compare the new engine with the pinned
+  SQLite, or check the new engine's answer alone.
+- `tests/capi.rs` was deleted. It tested an ABI against the official `sqlite3.h`, and the shipping
+  driver does not implement that ABI.
+- Three capability rows in `compat/sqlite-3.53.4.toml` (`vm.bytecode.verifier`,
+  `vm.statement.interrupt`, `txn.hooks`) moved to `status = "missing"`.
+
+**What stays.** `inillucent-storage` and `inillucent-transaction`, 18,764 lines. `inillucent-engine`
+and `inillucent-migrate` use `inillucent-sqlite-reader` to read SQLite files for migration, and
+`inillucent-sqlite-reader` depends on both crates. The test
+`no_new_crate_reaches_into_the_retired_engine` in `policy.rs` stops any other crate depending on
+them. [Dependency policy](dependency-policy.md) lists the dependencies.
 
 ## A generation is one blob
 
-Adding content stopped rebuilding the graph when a commit became a **fold**: the
-published generation is loaded and each entry of the delta log inserted into it, one graph insert
-per row written rather than one per row in the table. What was still proportional to the corpus was
-publishing, because a generation was one serialised index.
+**What it was.** Publishing a vector index wrote the whole index as one serialised generation, so
+the cost of a commit grew with the table.
 
-Segmented generations closed that: many small immutable segments merged at read time,
-the way an LSM tree works, so both the graph work and the bytes written are proportional to the
-batch rather than to the corpus. `crates/inillucent-search/src/module.rs` and `merge.rs` hold it
-(`SegmentMeta`, `flush`, `merge_cascade`). The default delta log became a constant 1,024 entries at
-the same time; it had been `max(1024, rows / 8)`.
+**What was done.** A generation is now many small segments that never change after they are
+written. A search merges them when it reads, the way an LSM tree works. The graph work and the bytes
+written at a commit grow with the batch, and do not grow with the table. The code is
+`flush` and `merge_cascade` in `crates/inillucent-search/src/module.rs`, `merge.rs`, and
+`SegmentMeta` in `store.rs`.
+
+The default delta log became a constant 1,024 entries at the same time. It had been
+`max(1024, rows / 8)`.
 [Keeping a vector index current](relational-architecture.md#10-keeping-a-vector-index-current) has
 the measured range and how to choose `compact = N`.
 
-## Eight items closed together
+<a id="eight-items-closed-together"></a>
 
-Eight items came off the roadmap during the engine rework. Each is named here so a reader who remembers the old
-numbers can find what happened to them.
+## Seven items closed during the engine rework
 
-- **A vector index answering zero rows instead of the rows it holds.** This is the wrong answer this
-  engine
-  is built not to have. Two faults, both a write that is never committed: `create_vector_index`
-  returned without the `seal()` every other directive ends with, and `ImportedDatabase::write` reads
-  `next_txn` and moves it on at once, so `current_txn()` answered the *following* number for the rest
-  of the statement and every index entry was logged into a transaction nothing commits. A third
-  change makes the index fast as well as correct: the backfill and the write path now
-  flush the module, so an index publishes a generation instead of replaying its whole delta log on
-  every query: 2.34 s against 0.66 for the exhaustive scan, before. `examples/rag-agent`'s ten
-  questions all answer through an index now, and `scripts/verify-indexed.sh` is what says so.
-- **`embed(TEXT)` called once per row when it is a constant.** A deterministic scalar whose arguments
-  do not vary within a statement is now evaluated once for the statement. It is folded at translation when
-  every argument is a literal, and at execution setup when one is a bound parameter, because a
-  compiled chain is re-bound and a parameter folded at compile time would be correct only for the
-  values it was built against. `embed` is registered `deterministic`, which it always was. The
-  documented query over `examples/rag-agent`'s 2,661 passages went from **105.7 s to 1.50 s**.
-- **A registered function refused in the write path.** `INSERT ... VALUES`, `UPDATE ... SET` and
-  `RETURNING` now reach one, through a catalog parameter on `RowSpace::compile` and the callers that
-  reach it. `INSERT ... SELECT` is no longer the only shape that works.
-- **A second metric on the vector index.** `WITH (metric = 'l2')`, honoured by the graph rather than
-  only parsed: the metric decides the distance *and* whether vectors are normalised at all, the
-  persisted generation records which metric it was built under and refuses one that disagrees, and
-  the planner probes only when the `ORDER BY` function matches, falling back to the scan otherwise. A
-  generation with no stored metric reads as cosine, so existing files are unaffected. It also
-  uncovered a live defect: `streaming_search` ranked by cosine whatever metric the set was built
-  under.
-- **No-steal was not in force in the engine that ships, so an uncommitted row could survive a
-  crash.** This is the one a reviewer found rather than a campaign, and it is the most serious thing
-  the ticket touched. `Pool::writeback` declines to write a page belonging to an open transaction
-  only when `Pool::holds_uncommitted` says so, and that reads a watermark nothing ever set: the only
-  code in the workspace that called `Pool::uncommitted_handle` was `inillucent-txn`'s `Engine`, which
-  is not the engine this project ships. So the watermark stayed at `u64::MAX`, `holds_uncommitted`
-  answered `false` for every page, and the long comment beside it calling no-steal "a condition
-  rather than a convention" described a crate that is not in the product.
+### A vector index returned zero rows
 
-  Two ordinary ways in. `BEGIN; INSERT ...; PRAGMA wal_checkpoint;` then a power loss: the pragma
-  had no guard against running inside a transaction, and the checkpoint then recorded a point
-  *above* the open transaction's own records and retired the segments holding them. And any
-  transaction whose dirty pages outgrow the buffer pool, where the evictor writes an uncommitted
-  page and the page-LSN rule then makes redo skip every committed record at or below its stamp.
-  A bulk load larger than 4,096 frames of 32 KiB is an ordinary thing to do.
+A vector index answered with no rows when its table held rows. There were two faults, and both
+wrote index entries into a transaction that never committed:
 
-  The watermark is armed now, the checkpoint records `durable.min(uncommitted_lsn)` rather than
-  `durable`, and `PRAGMA wal_checkpoint` inside a
-  transaction that has written is refused, which is what the pinned SQLite 3.53.4 does, checked
-  rather than assumed, and a bare `BEGIN` that has written nothing still checkpoints.
+- `create_vector_index` returned without calling `seal()`.
+- `ImportedDatabase::write` advanced `next_txn` early, so `current_txn()` returned the next number
+  for the rest of the statement.
 
-  **The two new campaigns run under `PRAGMA journal_mode = off`, and that is deliberate.** Under the
-  default the rollback journal happened to put the uncommitted page back, so both tests passed
-  whether or not no-steal was armed. A test that passes for a reason it is not about is a test that
-  cannot fail, and `off` removes the safety net so the only thing left protecting the row is the
-  mechanism the campaign is named after.
+A third change made the index fast: the backfill and the write path now flush the module, so a
+query reads a published generation. Before, every query replayed the whole delta log, and took
+2.34 s against 0.66 s for an exhaustive scan. All ten questions in `examples/rag-agent` are answered
+through an index, and `scripts/verify-indexed.sh` checks that.
 
-- **Four ways a checkpoint lost a database that the crash had left intact.** The crash
-  campaigns in `crates/inillucent-compat/tests/durability.rs` were re-pointed onto the shipping
-  engine during this ticket. The two they had never been run against, `PRAGMA journal_mode =
-  truncate` and `= persist`, failed at the 35th cut point of the commit. All three defects are
-  below, each with the thing that makes it a defect rather than a tuning choice. The campaigns now
-  record 101 cut points each with **zero detected damage**, and `tests/crash/truncate-full-crash.txt`
-  and `tests/crash/persist-full-crash.txt` are the schedules a review reads rather than takes on
-  trust.
+### `embed(TEXT)` ran once a row when its argument was a constant
 
-  **The journal was never synced before a page was overwritten.** `Pool::checkpoint` sealed the
-  journal at its head, which is before `flush` has saved a single pre-image, because pre-images are
-  saved by the writeback loop that runs next. So it synced an empty file, and every pre-image the
-  checkpoint then wrote was still in the file's buffers while the same loop overwrote the pages those
-  pre-images belonged to. That is the one ordering a rollback journal exists to forbid, and it is
-  stated as the invariant at the top of `crates/inillucent-pool/src/journal.rs`. `flush` now takes two
-  passes: save every pre-image, sync once, then write the pages. A batch of a thousand pages still
-  pays for one sync.
+A deterministic function whose arguments do not change within a statement is now evaluated once for
+the statement. When every argument is a literal it is evaluated when the statement is compiled. When
+an argument is a bound parameter it is evaluated when execution starts, because a compiled
+statement can be bound again with other values. The documented query over the 2,661 passages in
+`examples/rag-agent` went from **105.7 s to 1.50 s**.
 
-  **The journal had no checksums, so recovery wrote torn bytes over a good database.** At the failing
-  cut point the database file was intact. Page 3 stored the checksum `b59f5196` and computed
-  `b59f5196`. The corruption the test reported was manufactured by recovery itself, out of a journal
-  whose seventeen sectors the crash model had left Torn, Garbage and Dropped. Nothing in the file
-  format could tell a replay that a pre-image was not the bytes that had been written. Every record
-  now carries a CRC over the transaction's nonce, the
-  page id and the image; the header carries one over itself; and `replay_hot_journal` stops at the
-  first record that fails its check. Stopping there restores everything that is owed: a record can
-  only be unverifiable if it was written after the last sync, and a page is only overwritten after
-  the sync that covers its own pre-image, so a record that fails names a page the crash never
-  reached, as does every record appended after it. The magic is `RDBJRNL2`; a journal an older build
-  left behind is removed rather than replayed.
+### A registered function was refused when writing
 
-  **The two meta pages were the only pages a checkpoint overwrote without a pre-image.** With the
-  first two fixed, the campaigns reached cut point 47 and came back with no tables at all. The
-  journal had correctly rolled the data pages back to before the checkpoint, and the meta page still
-  read `generation 5, checkpoint_lsn 17160`, which is a checkpoint that had not finished. Redo
-  believed it,
-  started above it, and skipped the records that would have re-applied what the journal had just
-  undone; the catalog's own root was one of the rolled-back pages. The shadow meta page does not
-  cover this and was never going to: `checkpoint` writes the *same* image to both slots, so the
-  second is a second chance for the new record to survive rather than an older copy to fall back on.
-  A checkpoint now journals both meta pages and syncs before it writes them, so the record that says
-  a checkpoint happened is undone by the same mechanism as the pages it describes.
+`INSERT ... VALUES`, `UPDATE ... SET` and `RETURNING` can now call a registered function. Before,
+only `INSERT ... SELECT` could.
 
-  **The reason all three hid is that the campaigns named after the rollback journal were not
-  reaching it**, and that is fixed rather than noted. The journal holds pre-images only while a
-  *checkpoint* is moving pages out of the log and into the data file. The commit campaigns commit
-  into the log and stop, so every cut point they covered fell inside the log. `TRUNCATE` and
-  `PERSIST` were covered by accident. `PRAGMA journal_mode = truncate` is a real change from the
-  connection's default and runs two checkpoints on its way in, which is where all three defects
-  were found. `PRAGMA journal_mode = delete` matches the default, returns without doing
-  anything, and left the **default** journal mode the only one never tested inside a checkpoint.
+### A second distance metric on the vector index
 
-  There are now four campaigns that crash inside the checkpoint itself, and their assertion is the
-  stronger one: the failure is armed *after* the transaction is acknowledged, so the committed
-  state is the only answer allowed at any cut point, where a crash inside a commit can only be
-  asked for the old database or the new one.
+`WITH (metric = 'l2')` is used by the graph. The metric decides the distance and whether vectors are
+normalised. A stored generation records its metric and refuses a query with a different one. The
+planner uses the index only when the `ORDER BY` function matches the metric, and scans otherwise. A
+generation with no stored metric reads as cosine, so existing files are unaffected. The work found
+that `streaming_search` ranked by cosine whatever the metric was, and fixed it.
 
-  | schedule | cut points | outcome |
-  |---|---:|---|
-  | `tests/crash/delete-full-checkpoint-crash.txt` | 44 | every one recovered to the committed state |
-  | `tests/crash/delete-full-checkpoint-io-error.txt` | 44 | every one recovered to the committed state |
-  | `tests/crash/delete-full-checkpoint-disk-full.txt` | 44 | every one recovered to the committed state |
-  | `tests/crash/truncate-full-checkpoint-crash.txt` | 50 | every one recovered to the committed state |
-  | `tests/crash/persist-full-checkpoint-crash.txt` | 50 | every one recovered to the committed state |
+### An uncommitted row could survive a crash
 
-  `crates/inillucent-compat/tests/search_crash.rs` had the same gap and it is closed the same way.
-  Its `TAIL` was two `SELECT count(*)` statements, both served out of the buffer pool, so they made
-  no VFS call at all: `a_rollback_journal_commit_is_atomic_across_both` was covering the log rather
-  than the journal its name claims. With `PRAGMA wal_checkpoint` appended to that tail it covers
-  the journal and passes.
+The engine must never write a page changed by an open transaction to the database file. This is the
+**no steal** rule. `Pool::writeback` follows the rule only when `Pool::holds_uncommitted` says a page
+is uncommitted. `Pool::holds_uncommitted` read a watermark that only `inillucent-txn`'s `Engine` set,
+and that engine does not ship. So in the shipping engine, `Pool::holds_uncommitted` returned `false`
+for every page.
 
-  **And closing that gap found a fourth defect, in `wal` mode, where there was no journal at all.**
-  With the checkpoint campaigns reaching further, `wal_crash.rs` and `search_crash.rs` both failed at
-  cut 32: different files, different workloads, the same call. A checkpoint writes pages into the
-  data file **in place**, and this engine's log is logical: once a page's content is below the
-  recorded checkpoint point, the records that built it are redundant and their segments are retired,
-  so the log no longer describes it. A page the checkpoint half wrote before a power loss is
-  therefore content nothing can rebuild. Not the log, which has moved past it, and not the page,
-  which is torn. The trace is unambiguous:
+Two ordinary cases reached the defect:
 
-  ```
-  seq=116 write /sim/wal.db offset=8192  len=4096     page 2
-  seq=117 write /sim/wal.db offset=12288 len=4096     page 3
-          crash: neither synced; sectors 16-31 come back Torn, Garbage, Dropped
-  meta after the crash: gen=4 ckpt_lsn=56, the previous one, correctly not advanced
-  recovery: page 3 checksum fe9063aa is not the computed f53956bb
-  ```
+- `BEGIN; INSERT ...; PRAGMA wal_checkpoint;` followed by a power loss. The checkpoint recorded a
+  point above the open transaction's records and retired the log segments that held them.
+- A transaction whose changed pages outgrow the buffer pool (4,096 frames of 32 KiB). The buffer
+  pool wrote an uncommitted page, and redo then skipped committed records at or below that page's
+  LSN.
 
-  Everything about that is right except the outcome. The meta record correctly still named the
-  *previous* checkpoint, and the log still held every record above it. Recovery failed because the
-  page it needed to rebuild was one the log had stopped describing.
+**Fix.** The watermark is set. A checkpoint records `durable.min(uncommitted_lsn)` in place of
+`durable`. `PRAGMA wal_checkpoint` inside a transaction that has written is refused, as the pinned
+SQLite 3.53.4 refuses it. A `BEGIN` that has written nothing still checkpoints.
 
-  SQLite is not exposed to this, and the reason is structural rather than careful: its log holds
-  whole page images and a checkpoint is a copy, so an interrupted one is simply redone. A connection
-  in `wal` now takes a `delete` journal. See `journal_for` in `crates/inillucent-engine/src/engine/locks.rs`.
-  It holds the pre-images for the duration of a checkpoint and removes the file once the
-  checkpoint's meta record is durable. It is the cost the default mode already pays, and what it
-  buys is that an interrupted checkpoint is undoable in every mode rather than in three of the five.
-  `off` is the one mode that still gets nothing, because that is what it asks for.
+The two new crash campaigns run with `PRAGMA journal_mode = off`. With a journal, the journal put
+the uncommitted page back, and the tests passed whether the fix was in place or not.
 
-  Two of the checked-in schedules moved in ways to read rather than skim.
-  `tests/crash/delete-full-short-write.txt` went from **one** detected corruption to **none**: a
-  short write that lands on the journal now fails its record's checksum, so the replay stops instead
-  of putting half a page image back, and the database is left whole rather than left detectably
-  damaged. And every `DELETE`-mode campaign covers 22 cut points where the `TRUNCATE` and `PERSIST`
-  ones cover 101, which is not a gap in the engine but a gap in the campaign: `PRAGMA journal_mode =
-  delete` matches the connection's default and returns without doing anything, while the other two
-  spellings run two checkpoints on their way in and the campaign then crashes inside those as well.
-  The default mode is therefore the least exercised of the three, which is the wrong way round.
+### Four ways a checkpoint lost an intact database
 
-  Two smaller things came off the same thread. `Journal::finish` synced at `SyncMode::Normal` in its
-  `truncate` and `persist` arms, which is the level that is allowed not to reach the media. What
-  makes a journal stop being hot in those two modes is a change to that file, so until it lands the
-  next open still finds pre-images naming a database whose commit completed. Both are `Full` now,
-  which is what the `delete` arm already did. And `Body::Pad`, the filler the log writes to keep a
-  synced write's tail on a device sector boundary, was being handed to the redo applier and counted
-  among the records recovery applied; it names no page and carries nothing to apply, so it is now
-  skipped where every other record that belongs to no transaction is decided.
+The crash campaigns in `crates/inillucent-compat/tests/durability.rs` were moved to the shipping
+engine. The two modes they had never run against, `PRAGMA journal_mode = truncate` and `persist`,
+failed at the 35th cut point. Four defects were found and fixed:
 
-- **The seventeen failing tests.** There were none. `schema_forms` 14, `planner` 5 and `ordering` 2
-  all pass, with the pinned `sqlite3` present rather than absent. An earlier change had already
-  removed the cause: `crates/inillucent-compat/src/interchange.rs` moves a database between the engines as
-  `.dump` output replayed by the reference shell, instead of handing `sqlite3` a file it cannot read.
-  This document was simply never updated.
+| Defect | Fix |
+|---|---|
+| The journal was synced before any page copy was written to it, so the copies could still be in memory when the checkpoint overwrote their pages | `flush` makes two passes: write every page copy, sync once, then write the pages |
+| The journal had no checksums, so recovery wrote torn bytes over a good database | Every record has a CRC over the transaction's nonce, the page number and the image. The header has its own CRC. `replay_hot_journal` stops at the first record that fails. The journal's magic is `RDBJRNL2`, and a journal from an older build is removed without being replayed |
+| The two meta pages were written without a copy in the journal. After a crash the data pages were rolled back, but the meta page still named the new checkpoint, so redo skipped records it needed | A checkpoint journals both meta pages and syncs before writing them |
+| In `wal` mode there was no journal. The log is logical, so once a checkpoint passes a page, the log no longer holds what built it. A page torn during a checkpoint could not be rebuilt | A connection in `wal` mode takes a `delete` journal for the length of each checkpoint. See `journal_for` in `crates/inillucent-engine/src/engine/locks.rs` |
+
+The fourth defect showed as a checksum failure at cut 32 in both `wal_crash.rs` and
+`search_crash.rs`:
+
+```
+seq=116 write /sim/wal.db offset=8192  len=4096     page 2
+seq=117 write /sim/wal.db offset=12288 len=4096     page 3
+        crash: neither synced; sectors 16-31 come back Torn, Garbage, Dropped
+meta after the crash: gen=4 ckpt_lsn=56, the previous one, correctly not advanced
+recovery: page 3 checksum fe9063aa is not the computed f53956bb
+```
+
+SQLite's log holds whole page images, so an interrupted checkpoint is copied again. inillucent's log
+holds row changes, so it needs the journal. `PRAGMA journal_mode = off` still has no journal, which is
+what `off` asks for.
+
+**Why the defects were missed.** The journal holds page copies only while a checkpoint runs. The
+commit campaigns crashed inside the commit, which only writes the log. `PRAGMA journal_mode = delete`
+matches the default and does nothing, so the default mode was never crashed inside a checkpoint.
+`truncate` and `persist` run two checkpoints when they are set, which is where the first three
+defects were found. `search_crash.rs` had the same gap: its last statements were two
+`SELECT count(*)` reads served from the buffer pool. It now ends with `PRAGMA wal_checkpoint`.
+
+**Campaigns that crash inside a checkpoint.** The failure is armed after the transaction is
+acknowledged, so the committed state is the only correct answer at every cut point. From the
+schedules checked in on 2026-09-22:
+
+| Schedule | Cut points | Outcome |
+|---|---:|---|
+| `tests/crash/delete-full-checkpoint-crash.txt` | 55 | every one recovered to the committed state |
+| `tests/crash/delete-full-checkpoint-io-error.txt` | 55 | every one recovered to the committed state |
+| `tests/crash/delete-full-checkpoint-disk-full.txt` | 55 | every one recovered to the committed state |
+| `tests/crash/truncate-full-checkpoint-crash.txt` | 54 | every one recovered to the committed state |
+| `tests/crash/persist-full-checkpoint-crash.txt` | 54 | every one recovered to the committed state |
+
+The commit campaigns in the same schedules:
+
+| Schedule | Cut points | Detected damage |
+|---|---:|---:|
+| `tests/crash/delete-full-crash.txt` | 94 | 0 |
+| `tests/crash/truncate-full-crash.txt` | 166 | 0 |
+| `tests/crash/persist-full-crash.txt` | 166 | 0 |
+| `tests/crash/delete-full-short-write.txt` | 94 | 3 detected, 1 commit lost to a half written call |
+
+A short write that lands on the journal now fails its record's checksum, so the replay stops before
+it writes half a page back.
+
+Two smaller fixes came from the same work:
+
+- `Journal::finish` synced at `SyncMode::Normal` in `truncate` and `persist` mode, which may not reach
+  the disk. It now syncs at `Full`, as `delete` mode already did.
+- `Body::Pad`, the filler the log writes to align a synced write to a sector, was passed to redo and
+  counted as an applied record. Redo now skips it.
+
+### The seventeen failing tests
+
+There were none. `schema_forms` (14), `planner` (5) and `ordering` (2) all pass with the pinned
+`sqlite3` present. An earlier change had removed the cause:
+`crates/inillucent-compat/src/interchange.rs` moves a database between the engines as `.dump`
+output replayed by the reference shell. This page had not been updated.
 
 ## Recovery reads a page before redo has had a chance to rewrite it
 
-**Closed by `cdc58eb`.** It was roadmap item 6, described there in the past
-tense - the fix landed, the pair of tests landed, and the item stayed on the
-open list. What closed it is
-`replay_with_repair` in `crates/inillucent-engine/src/recovery.rs`, and what
-holds it closed is `crates/inillucent-compat/tests/torn_page_with_image.rs`.
+**What it was.** Roadmap item 6. It was fixed in commit `cdc58eb` on 2026-09-15 and stayed on the list afterwards.
 
-**Root cause named, and it is one level deeper than the hypothesis was.** The guess was a read on
-the open path, before the tolerant pass that repairs the catalog root. It is not: the read is inside
-redo itself. A logical row record changes a page by reading it - an `INSERT` into a leaf reads the
-leaf, adds the row and writes it back - so a crash that tore a page failed the replay at the
-**first** record naming that page, even when a later record in the same window carried the page
-whole. The window's end state was knowable and recovery refused the file anyway.
+**Cause.** A row record in the log changes a page by reading it first: an `INSERT` reads the leaf,
+adds the row and writes the leaf back. When a crash tore a page, redo failed at the first record
+that read that page, even when a later record in the same log held the whole page.
 
-It was found by naming every read in `open_file`. At cut 8 of
-`crates/inillucent-compat/tests/free_map_checkpoint_crash.rs`'s `journal_mode = off` sweep the
-refusal reads `replaying the log: page 4 checksum ... is not the computed ...`, and the three reads
-before redo - the bootstrap open, the catalog attach, the catalog read - are all named and none of
-them is it. Those names stay, because the next person asking this question should not have to
-instrument a build to answer it.
+The cause was found by naming every read in `open_file`. At cut 8 of the `journal_mode = off` sweep
+in `crates/inillucent-compat/tests/free_map_checkpoint_crash.rs`, the error reads
+`replaying the log: page 4 checksum ... is not the computed ...`. The three reads before redo (the
+first open, attaching the catalog, reading the catalog) are named in the error text, and none of
+them was the cause. The names stay in the code.
 
-**The fix, and where it runs.** When the logical pass fails with a corruption code, every record in
-the window that carries a whole page image is applied - `WritePage`, a `CompactLeaf` that carries
-one, and a split's three pages - and the same pass runs again. The images need no catalog and no row
-decoder, which is what lets them go first. Re-running is sound because redo is idempotent on the
-page-LSN rule: a record the first attempt applied has stamped its pages with its own LSN, so the
-second attempt skips it. The free map's own read moved inside what the retry covers, because that
-page is a page like any other and it is the one a checkpoint rewrites every time.
+**Fix.** `replay_with_repair` in `crates/inillucent-engine/src/recovery.rs`. When redo fails with a
+corruption error, every record that holds a whole page image is applied: `WritePage`, a
+`CompactLeaf` that holds one, and a split's three pages. Then redo runs again. Running redo twice is
+safe because each applied record stamps its pages with its LSN, so the second pass skips it. The
+read of the free map moved inside the retry, because a checkpoint rewrites that page every time.
 
-**On the failure and not before it, and that is measured rather than chosen.** Applying the images
-unconditionally makes `read_checkpointed_catalog` succeed where it used to fail, which flips the
-`repaired` flag and seeds the logical pass with the checkpoint-time catalog rather than the
-end-of-window one. `wal_crash`'s commit campaign priced that: the one cut of twenty-three that
-reaches the new state stopped reaching it. A committed transaction lost is a worse defect than the
-one being fixed.
+The images are applied only after a failure. Applying them on every open changed which catalog redo
+started from, and in the `wal_crash` commit campaign one cut of 23 then lost a committed
+transaction.
 
-`crates/inillucent-compat/tests/torn_page_with_image.rs` is the pair the item asks for. A page the
-window carries whole **and** that a record reads is torn and the database opens, answering all 199
-rows; a page a record reads and no record carries is torn and the open refuses with
-`SQLITE_CORRUPT`, naming the page. Both pages are chosen by reading the log rather than by being
-named, so neither goes stale when the layout moves, and the fixture crashes rather than closing -
-closing checkpoints the log away and there would be no window to be about.
+**Test.** `crates/inillucent-compat/tests/torn_page_with_image.rs` has two cases. Both choose the
+page by reading the log, and both crash the fixture without closing it:
 
-`journal_mode = off` is documented to mean a torn checkpoint page is not recoverable at all, and
-cuts 8 to 18 of that sweep still refuse: the log holds no image for page 4 there, so there is
-nothing to rebuild it from. That is the mode behaving as specified, and it is what the second test
-asserts deliberately rather than by accident.
+| Case | Result |
+|---|---|
+| a torn page that a later record holds whole | the database opens and answers all 199 rows |
+| a torn page that no record holds whole | the open fails with `SQLITE_CORRUPT` and names the page |
+
+With `journal_mode = off`, a page torn during a checkpoint cannot be recovered. Cuts 8 to 18 of that
+sweep still fail to open, because the log holds no image of page 4. That is the documented behavior
+of `off`, and the second case tests it.
+
+## Where to go next
+
+- [Roadmap](roadmap.md): what is still open.
+- [Performance](performance.md): the current speed and memory figures.
+- [Retrieval quality](retrieval-quality.md): the current search quality and latency figures.

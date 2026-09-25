@@ -1,198 +1,278 @@
-# Packaging
+# Packaging and releasing
 
-Everything that turns a build into something somebody can install.
+This directory turns a build of inillucent into files people can install, and publishes those
+files. One script, `packaging/ship.ps1`, runs a whole release: it builds every target, signs the
+results, publishes them to every destination, and then asks each destination what it serves.
 
+This page is for the person or agent cutting a release. [`PUBLISHING.md`](PUBLISHING.md) has the
+detail for each destination. [`macos/README.md`](macos/README.md) covers the macOS signing setup, and
+[`windows/README.md`](windows/README.md) covers the Windows installer.
+
+## Terms used on this page
+
+| Term | Meaning |
+|---|---|
+| route | One destination a release publishes to, such as npm or inillucent.com. `ship.ps1` runs fourteen of them in a fixed order. |
+| preflight | The first phase. It reads every credential and prints which routes will run. It changes nothing. |
+| DPAPI | The Windows data protection API. It encrypts a file so that only the same Windows account on the same machine can decrypt it. Every release credential is stored this way. |
+| RAM disk | A drive held in memory, `R:\` on the release machine. A credential is decrypted onto it for the length of a run and deleted afterwards. |
+| notarise | Send a macOS build to Apple. Apple checks the signatures and records that it accepted those exact bytes. |
+| Mach-O | The executable file format macOS uses. |
+| minisign | A small signing tool. It signs `SHA256SUMS`, and the signature is published as `SHA256SUMS.minisig`. |
+| OpenPGP | The signing standard `apt` and `dnf` check on a `.deb` or `.rpm`. |
+| mirror | The public GitHub repository `Black-Rainbow-Labs/Inillucent`. It holds one commit per release. Development happens in a separate repository. |
+| tap | A GitHub repository Homebrew reads formulas from. This project's tap is `Black-Rainbow-Labs/homebrew-inillucent`. |
+
+## Cut a release
+
+```powershell
+pwsh packaging/ship.ps1 -WhatIf              # print the plan and write nothing
+pwsh packaging/ship.ps1 -Part patch          # bump 1.0.29 to 1.0.30 and release it
+pwsh packaging/ship.ps1 -Only site,github    # run two routes again, for the current version
 ```
-packaging/
-  release.ps1  release.sh      build the archive every installer is made from
-  install.ps1  install.sh      install it, on Windows / on macOS and Linux
-  cargo-publish.ps1            publish the workspace to crates.io
-  sign-sums.ps1                the minisign signature over SHA256SUMS
-  mirror-github.ps1            build the public mirror's commit for a release
-  windows/README.md            why there is no MSI, and what one would take
-  macos/                       the .pkg: build, sign, notarise, and what each costs
-  homebrew/                    the formula, and a script that fills its checksums
-packages/
-  npm/                         the `inillucent` package and its four platform packages
-  python/                      the PyPI wheel: binaries plus the real driver binding
-  go/                          a Go package, and `go install` as a way to get the binaries
-  php/                         a Composer package (its composer.json is at the repo root)
+
+Run `ship.ps1` from a `git worktree` of `main`. `ship.ps1` refuses a checkout with uncommitted
+changes, and so does `cargo publish`. The checkout you work in usually has something in progress.
+
+```powershell
+git worktree add -b release-1.0.30 ../inillucent-release main
+pwsh -WorkingDirectory ../inillucent-release -File ../inillucent-release/packaging/ship.ps1 -Part patch
 ```
 
-## The shape of it
+Start `ship.ps1` with the release worktree as the working directory. Cargo reads
+`.cargo/config.toml` from the working directory, and that file sets the build directory. A release
+started from another worktree builds into that worktree's build directory.
 
-**One archive, six ways of delivering it.** `release.ps1`/`release.sh` produce
+`ship.ps1` finds the site checkout, the Homebrew tap and the cross compiling toolchain through the
+repository the worktree belongs to. A worktree on another drive needs no extra arguments.
+
+### Parameters
+
+| Parameter | What it does |
+|---|---|
+| `-WhatIf` | Runs preflight, says whether the tests would run, lists every file the version phase would change, and stops. Nothing is written. |
+| `-Part patch`, `-Part minor`, `-Part major` | Raises the workspace version by one step before the release. |
+| `-Version <x.y.z>` | Releases exactly this version. The default is the version in `Cargo.toml`. A version lower than the current one is refused. |
+| `-Only <routes>` | Runs only the named routes. The tests and the version phase still run. |
+| `-Skip <routes>` | Runs every route except the named ones. |
+| `-SkipTests` | Skips the test phase. `ship.ps1` prints that the release is untested and writes the same sentence into the GitHub release notes. |
+| `-AllowDirty` | Builds from a checkout with uncommitted changes. |
+| `-Otp <six digits>` | A one time code for npm, for an npm token that cannot publish without one. |
+| `-SitePath <path>` | The `inillucent-site` checkout. The default is a folder named `inillucent-site` beside the main checkout. |
+| `-TapPath <path>` | The Homebrew tap checkout. The default is a folder named `homebrew-inillucent` beside the main checkout. |
+
+## The six phases
+
+```mermaid
+flowchart LR
+    A["preflight: read credentials, print the plan"] --> B["tests: run the suite"]
+    B --> C["version: write the new version into every file"]
+    C --> D["build: compile, sign, package, notarise"]
+    D --> E["publish: tag, mirror, GitHub, site, registries"]
+    E --> F["report: each route published, skipped or failed"]
+```
+
+| Phase | What happens | Why it is in this place |
+|---|---|---|
+| preflight | Decrypts the credentials, checks each route's needs, and prints `[run ]` or `[skip]` for every route with the reason. For npm and GitHub it prints the account it will publish as. | A tag cannot be taken back quietly, so the plan is known before anything is written. |
+| tests | Builds `inillucent-testrun` and runs `inillucent-testrun --strict`. Exit code 1 or 2 stops the release. | A red suite stops the release before the version phase has changed any file. |
+| version | Writes the new version into every file that carries it and refreshes `Cargo.lock`. Warns about any other tracked file that still names the old version. | Every later route reads the version this phase writes. |
+| build | The `build`, `linux-packages` and `signature` routes. Nothing has left the machine yet. | A build failure leaves nothing published. |
+| publish | The routes from `tag` to `homebrew`, in the order in the table below. After each route, `ship.ps1` asks the destination whether the release arrived. | Some destinations read what an earlier route wrote. |
+| report | Prints one line per route: `published`, `skipped` or `failed`, with the reason. | A route counts as published only when its check of the destination passes. `ship.ps1` exits 1 when any route failed. |
+
+A route with no credential is skipped. The skip carries the sentence that fixes it. `ship.ps1`
+still runs every route that can run. To repeat only the routes that failed, pass them to `-Only`.
+
+## The routes
+
+The routes run in this order.
+
+| Route | What it publishes | What it needs | How the destination is checked |
+|---|---|---|---|
+| `build` | Windows x86-64, Linux x86-64 and aarch64, and a universal macOS build, signed and notarised. Runs `release-all.ps1 -Targets all`. | `tools/cross/bin`, filled by `pwsh tools/cross/fetch-toolchain.ps1`. The Apple credentials in [`macos/README.md`](macos/README.md). | The build smoke test (below) |
+| `linux-packages` | A `.deb` and an `.rpm` for x86-64 and for aarch64, signed with OpenPGP. Runs `linux/package-linux.ps1`. | `INILLUCENT_GPG_KEY` | none |
+| `signature` | `SHA256SUMS.minisig`. Runs `sign-sums.ps1`. | `INILLUCENT_MINISIGN_KEY`, and `packaging/inillucent.pub` | none |
+| `tag` | Commits the version files, creates the annotated tag `v<version>`, and pushes both to the development repository. | nothing | none |
+| `mirror` | One commit on the mirror whose tree is the tag's tree, and the tag `v<version>` on it. Runs `mirror-github.ps1 -Push`. | the `brl` git remote | none |
+| `github` | A GitHub release on the mirror with every artifact attached. A draft release is made public. | `gh`, and a GitHub token | The release exists and has assets |
+| `interop` | `tests/interop/<version>/`, a database written by the Windows binary this release published. Committed and pushed. | nothing | `app.rdb`, `expected.tsv` and a log segment exist |
+| `site` | The downloads on inillucent.com, then the links on its home page, then a rebuild and restart of the site. | The site checkout. `install.sh` and `macos/verify-macos.sh` must parse and contain no carriage return. | `downloads/VERSION`, a link for each of the nine downloads, every name in `SHA256SUMS` served at the built size, and the smallest file hashed in full |
+| `crates` | Every publishable workspace crate on crates.io. Runs `cargo-publish.ps1 -Execute -Confirmed`. | `CARGO_REGISTRY_TOKEN` | crates.io names the version for `inillucent-cli` |
+| `npm` | The five platform packages `@blackrainbowlabs/cli-*`, then the `inillucent` wrapper. | `npm`, and a credential `npm whoami` accepts | The npm registry names the version |
+| `pypi` | Four wheels: Windows, macOS, and Linux x86-64 and aarch64. | a PyPI token, `python` and `twine` | PyPI names the version |
+| `go` | The tag `packages/go/v<version>` on the mirror. | nothing | `proxy.golang.org` names the version |
+| `packagist` | Asks Packagist to read the mirror's tags again. | a Packagist token | Packagist names the version |
+| `homebrew` | `Formula/inillucent.rb` in the tap, committed and pushed. | the tap checkout | The formula on GitHub names the version |
+
+Each registry check retries for three minutes, because npm, PyPI and crates.io show a new version a
+little after the upload returns.
+
+### Why the order matters
+
+- **`mirror` runs before `github`.** The GitHub release is created on the mirror. When
+  `gh release create` names a tag that does not exist, GitHub creates the tag at the repository's
+  current commit. Before the `mirror` route runs, that commit is the previous release.
+- **`go` and `packagist` run after `mirror`.** `proxy.golang.org` and Packagist record which commit a
+  version names the first time they see the tag, and never change it. The Go module at v0.1.5 and
+  the Composer package at v0.1.6 serve 0.1.3's source for this reason, and cannot be
+  corrected.
+- **`interop` runs after `github`.** It downloads the published Windows archive and checks it against
+  `SHA256SUMS` and the minisign signature before it runs the binary.
+- **The npm wrapper goes last.** The wrapper pins each platform package at an exact version, so the
+  platform packages have to exist first.
+
+## Credentials
+
+`ship.ps1` reads every credential from a sealed store and nothing has to be exported by hand. A
+value already in the environment is used in place of the sealed one, except for npm, where only
+`NPM_TOKEN` takes precedence. Decrypted files go on the RAM disk and are deleted at the end of the
+run.
+
+| Credential | Stored at | Environment variable | Route |
+|---|---|---|---|
+| minisign secret key | `%LOCALAPPDATA%\inillucent\signing\minisign.key.sealed` | `INILLUCENT_MINISIGN_KEY` (a path), `INILLUCENT_MINISIGN_PASSPHRASE` | `signature` |
+| OpenPGP key id | `%LOCALAPPDATA%\inillucent\signing\gpg.keyid` | `INILLUCENT_GPG_KEY` | `linux-packages` |
+| OpenPGP passphrase | `%LOCALAPPDATA%\inillucent\signing\gpg.passphrase.sealed` | `INILLUCENT_GPG_PASSPHRASE` | `linux-packages` |
+| npm token | `%LOCALAPPDATA%\inillucent\signing\npm.token.sealed` | `NPM_TOKEN` | `npm` |
+| PyPI token | `%LOCALAPPDATA%\inillucent\signing\pypi.token.sealed` | `TWINE_PASSWORD`, or a `~/.pypirc` | `pypi` |
+| crates.io token | `%LOCALAPPDATA%\inillucent\signing\crates.token.sealed` | `CARGO_REGISTRY_TOKEN` | `crates` |
+| Packagist token | `%LOCALAPPDATA%\inillucent\signing\packagist.token.sealed` | `PACKAGIST_USER` names the account | `packagist` |
+| GitHub token | the credential `git push` already uses | `GH_TOKEN`, or a `gh auth login` | `github` |
+| Apple Developer ID keys and notary key | `%LOCALAPPDATA%\inillucent\apple\` | `INILLUCENT_APPLE_DIR` (the folder) | `build` |
+
+## The files that carry the version
+
+The version phase writes the version into seven files and refreshes an eighth, `Cargo.lock`.
+
+| File | What it holds |
+|---|---|
+| `Cargo.toml` | the workspace version, and the version each workspace crate requires of the others |
+| `packages/npm/inillucent/package.json` | the wrapper's version, and the version of each platform package it pins |
+| `packages/go/cmd/inillucent-install/main.go` | `nativeVersion`, the release the Go installer downloads |
+| `packages/python/pyproject.toml` | the Python distribution's version |
+| `packages/python/src/inillucent/__init__.py` | `__version__` |
+| `packaging/homebrew/inillucent.rb` | the formula's version |
+| `packages/php/bin/inillucent-install` | `NATIVE_VERSION`, the release the PHP installer downloads |
+
+A new file that holds the version goes into `Get-VersionCarriers` in `ship.ps1`. The version phase
+warns about any other tracked file that still names the old version outside a comment. That warning
+cannot see `packages/go/`, because the Go package names old versions in its test data.
+
+## What a build contains
+
+`release.ps1` builds one archive for each target. Every installer and every package on every
+registry is a way of getting this one directory onto a machine.
 
 ```
 dist/inillucent-<version>-<target>/
-    bin/     inillucent  inillucent-shell  inillucent-mcp  inillucent-migrate
-    lib/     the C ABI shared library
-    include/ inillucent_driver.h
-    docs/    the reference pages README.md links into
-    tests/   the synthetic corpus recipe and the testing standard
-    agent-skills/ one page per job, for an AI agent
+    bin/          inillucent  inillucent-shell  inillucent-mcp  inillucent-migrate
+    lib/          the C ABI shared library
+    include/      inillucent_driver.h
+    docs/  tests/  agent-skills/
     README.md  AGENTS.md  DRIVER.md  LICENSE  VERSION
 dist/inillucent-<version>-<target>.zip   (or .tar.gz)
 dist/provenance.json
 dist/SHA256SUMS
 ```
 
-and every package below is a different way of getting that directory onto a
-machine. Six packaging systems with six *builds* would be six things that can
-differ; six wrappers around one build cannot.
+`release.ps1` refuses to build unless the checkout is clean, the tag `v<version>` points at the
+current commit, the version matches the workspace, and the compiler is the one `rust-toolchain.toml`
+names. Then it installs the archive into an empty folder and runs the installed copy:
 
-The one exception is `cargo install inillucent-cli`, which builds from source
-because that is what cargo does. It is also the fallback the other five point at
-when a platform has no prebuilt archive.
+1. `inillucent --version` must print the version being released.
+2. It creates a database, writes a row, closes and reopens the file, and reads the row back.
+3. It sends `inillucent-mcp` an `initialize`, a `tools/list` and a `tools/call`.
+4. It compiles a C program against the shipped header and links it to the shipped library.
 
-## What a release refuses, and why
+Each refusal has an override: `-AllowDirty`, `-AllowUntagged`, `-AllowVersionMismatch` and
+`-SkipSmoke`. `provenance.json` records every override used, and `SHA256SUMS` covers
+`provenance.json`. `-SmokeOnly` builds, stages and runs the smoke test, then stops.
 
-Before this was fixed, the release scripts staged whatever was in the working tree and
-labelled it with whatever `--version` said. Four things were possible and none
-of them was detectable from the archive afterwards:
+inillucent.com offers nine downloads for each release:
 
-- a release built from a **dirty checkout**, so the commit it records is not the
-  code inside it;
-- `--version 2.0.0` on a tree whose binaries answer `0.1.0`;
-- a **tag pointing at different code** than the commit that was built;
-- an archive **nobody opened** — a release that has only been checked for having
-  produced an archive.
+| Platform | File |
+|---|---|
+| Windows x86-64 | `inillucent-<version>-x86_64-pc-windows-msvc.zip` |
+| macOS installer | `inillucent-<version>.pkg` |
+| macOS archive | `inillucent-<version>-universal-apple-darwin.tar.gz` |
+| Linux x86-64 | `inillucent-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 | `inillucent-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Debian and Ubuntu x86-64 | `inillucent_<version>_amd64.deb` |
+| Debian and Ubuntu aarch64 | `inillucent_<version>_arm64.deb` |
+| Fedora x86-64 | `inillucent-<version>.x86_64.rpm` |
+| Fedora aarch64 | `inillucent-<version>.aarch64.rpm` |
 
-So a release now refuses unless the checkout is clean, `v<version>` exists and
-points at HEAD, the compiler is the one `rust-toolchain.toml` pins, and the
-staged archive **installs into an empty directory and works**. The smoke test
-runs the installed copy rather than `target/release`, because a library found by
-being beside the build passes there and fails on somebody's machine. It:
+The Linux builds start on glibc 2.28 or newer. The macOS builds need macOS 13.0 or newer.
 
-1. runs `inillucent --version` and checks it answers with the version on the tin;
-2. creates a database, writes, **reopens** and reads — reopened, because a write
-   that never reached the file passes every check that does not close first;
-3. drives `inillucent-mcp` over JSON-RPC through `initialize`, `tools/list` and a
-   `tools/call`, which is the surface an agent is handed and the one nothing
-   else tests;
-4. compiles a C program against the **shipped** header and links the **shipped**
-   library, which is what every binding that is not Rust does with this archive.
+## Things that stop a release
 
-Each refusal has a named override — `-AllowDirty`, `-AllowUntagged`,
-`-AllowVersionMismatch`, `-SkipSmoke` — because a refusal nobody can get past on
-a bad afternoon is a refusal somebody deletes. **Every override used is recorded
-in `provenance.json`**, which `SHA256SUMS` covers, so a release made with one
-says so and a downloader who verified the archive has verified the claims about
-it too.
+- **A published version is permanent.** npm, crates.io and PyPI refuse to replace a version. An npm
+  version number that was unpublished can never be used again. `inillucent@0.1.3` and `@0.1.4` on
+  npm are marked deprecated because they could not be fixed in place.
+- **`packaging/install.sh` must use LF line endings.** On Debian and Ubuntu, `sh` is dash. dash reads
+  a carriage return as part of the command and stops with `set: Illegal option -`. `.gitattributes`
+  marks `*.sh` as LF, and the `site` route refuses a script that fails `bash -n` or holds a carriage
+  return.
+- **The Windows build needs the Visual Studio C compiler environment.** `onig_sys` compiles
+  oniguruma with `cl.exe`, which needs `INCLUDE` to be set. `release-all.ps1` calls
+  `Import-MsvcEnvironment` from `stage-layout.ps1`, which runs `vcvars64.bat` when `INCLUDE` is not
+  set. Every other script in this directory that runs cargo needs `Import-MsvcEnvironment` loaded
+  by hand.
+- **A PowerShell module path can hide `Get-FileHash`.** A terminal can inherit a `PSModulePath` in
+  which `Microsoft.PowerShell.Utility` does not load. The script then keeps going and writes an
+  empty `SHA256SUMS`. `release.ps1` and `publish-site.ps1` check for the commands they need before
+  they start.
 
-`--smoke-only` builds, stages and smokes without any of the tag or
-clean-checkout requirements. That is what CI runs on every commit, so the
-packaging is checked continuously rather than once at a tag.
+## Run the scripts through `ship.ps1`
 
-## Cutting a release
+Every script `ship.ps1` calls still works alone, with its own parameters. Use them alone only to
+repair one step of a release that already exists. Running them one at a time is how 0.1.3 was
+tagged and left half published for four days, with its GitHub release still a draft.
 
-One machine. The Windows box builds Windows, both Linux architectures and both
-Apple architectures, signs and notarises macOS, packages everything, signs the
-checksums and publishes the site.
+| Script | What it does |
+|---|---|
+| `ship.ps1` | The whole release |
+| `release-all.ps1` | Builds every target. `-Targets windows`, `linux` or `macos` builds one family |
+| `release.ps1`, `release.sh` | Builds, stages, smoke tests and archives one target |
+| `macos/release-macos.ps1` | Builds, signs and notarises the macOS half |
+| `linux/package-linux.ps1` | Builds the `.deb` and `.rpm` files with `nfpm` and signs them |
+| `sign-sums.ps1` | Signs `SHA256SUMS` with minisign |
+| `mirror-github.ps1` | Builds, pushes or checks the mirror commit for a release |
+| `publish-site.ps1` | `-Stage` copies the downloads to the site, `-Link` adds the links |
+| `deploy-site.ps1` | Builds the site and restarts the service that serves it |
+| `cargo-publish.ps1` | Publishes the workspace to crates.io. Without `-Execute` it is a dry run |
+| `homebrew/update.sh` | Writes the formula with the checksums from `dist/SHA256SUMS` |
+| `fetch-macos-artifacts.ps1` | Collects and checks macOS files built on a Mac |
+| `install.ps1`, `install.sh` | The installers inillucent.com serves |
+| `verify-sites.sh` | Downloads every file the site offers and checks it against `SHA256SUMS` |
+| `verify-installs.sh` | Installs from every published route and runs the result |
 
-That was not always true. The macOS half used to run on a MacBook,
-because `lipo`, `codesign`, `pkgbuild`, `productbuild`, `notarytool` and
-`stapler` are macOS programs. Each of them now has a replacement that runs here:
-`rcodesign` for five of them, `tools/macos-pkg` for the two that build the
-`.pkg`. Apple's notary service is an HTTPS API and answers a Windows client the
-same way it answers a Mac. `packaging/macos/README.md` is the detail, including
-how the Developer ID certificates are obtained without a Mac.
+## How the installers behave
 
-```powershell
-pwsh tools/cross/fetch-toolchain.ps1        # once: zig, cargo-zigbuild, rcodesign, nfpm, minisign
-pwsh packaging/release-all.ps1              # every target, including the signed and notarised macOS half
-pwsh packaging/linux/package-linux.ps1      # the .deb and the .rpm, signed
-pwsh packaging/sign-sums.ps1                # minisign over SHA256SUMS; needs packaging/inillucent.pub
-bash tools/release-verify-linux.sh --version 0.1.4   # from WSL
-pwsh packaging/publish-site.ps1 -Version 0.1.4 -Stage  # on the site, not yet linked
-```
+- **Every downloader checks the checksum.** `install.ps1`, `install.sh`, the Go
+  `cmd/inillucent-install` and the PHP `bin/inillucent-install` read the release's `SHA256SUMS` from
+  inillucent.com and refuse an archive that does not match.
+- **Every installer writes to the user's own folders.** `install.ps1` writes to
+  `%LOCALAPPDATA%\Programs\inillucent` and the user `PATH`. `install.sh` unpacks into
+  `~/.local/share/inillucent` and links the programs into `~/.local/bin`. Neither asks for
+  administrator rights. The macOS `.pkg` is the exception: it installs to `/usr/local` and asks for
+  the administrator password.
 
-`0.1.4` throughout this section is an example. Pass the version being cut.
-**0.1.0 was withdrawn** — `PUBLISHING.md` says why — so that one is never a
-version to pass here.
+## What this machine cannot check
 
-The five targets `release-all.ps1` needs are named in `rust-toolchain.toml`,
-which is what installs them; the two Apple ones were missing from that list until
-this was fixed, so on a machine holding only the pinned toolchain the default run
-stopped at its macOS step with `error[E0463]: can't find crate for std`.
-
-`packaging/macos/release-macos.ps1` runs on its own too, for a macOS-only
-rebuild, and it prints at the end which checks it ran and which four it could
-not. The four it cannot run are the ones that execute a Mach-O, and no tooling
-changes that — see "What cannot be checked here" below.
-
-**The Mac path still works and is still in the repository.**
-`packaging/macos/release-macos.sh` produces the same four artifacts on a Mac,
-and `packaging/fetch-macos-artifacts.ps1` still collects and verifies them. A
-machine with a Mac available loses nothing; a machine without one is no longer
-stopped.
-
-Then, on any Mac, against the bytes the site is now serving:
+This Windows machine builds, signs, notarises and publishes every target, macOS and Linux included.
+It cannot run a Mach-O or Installer.app. Apple's notary service is the check that stands in: it
+unpacks the submission, checks every Mach-O in it, and rejects an unsigned binary, a missing hardened
+runtime, a missing timestamp or a package it cannot parse. To run the published macOS build, use
+`packaging/macos/verify-macos.sh` on any Mac:
 
 ```sh
-curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.2
+curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 1.0.29
 ```
 
-and only once that passes:
+## Where to go next
 
-```powershell
-pwsh packaging/publish-site.ps1 -Version 0.1.2 -Link
-```
-
-The order is the point. A download link that points at an artifact nobody has
-run is worse than no link, so the artifacts are staged where the verifier can
-reach them before anything on the site mentions them.
-
-**The distribution point is inillucent.com.** Both GitHub repositories are
-private, and a private repository's release assets are private too: an
-unauthenticated request for one answers 404, which was checked with no credential
-of any kind. So GitHub carries nothing a user downloads. It used to
-be the transport that carried the macOS artifacts from the MacBook to the Windows
-box; there is nothing to carry now, because the machine that builds
-them is the machine that publishes them.
-
-One route does not survive that: `go install` resolves through
-`proxy.golang.org`, which clones the repository with no credential and gets a
-404, so the Go package cannot be installed by anybody. `node tools/check-public-urls.mjs`
-reports every link in the shipped packages that a signed-out reader cannot open,
-and `packaging/mirror-github.ps1` builds the public mirror commit for a release.
-`PUBLISHING.md` has the decision that goes with them.
-
-## The two rules every installer here follows
-
-**Verify the checksum.** Every downloader - `install.ps1`, `install.sh`, the Go
-`cmd/inillucent`, the PHP `bin/inillucent-install` - reads the release's own
-`SHA256SUMS` and refuses an archive that does not match. A downloader that skips
-this has turned a truncated or tampered transfer into an installed program, and
-it is four lines to not do that.
-
-**Never install outside the user's own space unless asked.** `install.ps1` writes
-to `%LOCALAPPDATA%\Programs\inillucent` and the user `PATH`; `install.sh` writes
-to `~/.local`. Neither needs elevation and neither touches a machine-wide
-location. The macOS `.pkg` is the exception, because a `.pkg` installs to
-`/usr/local` and asks for the password itself.
-
-## What is not automated, and why
-
-- **Running a macOS binary.** Everything else about a macOS build is checked
-  from Windows - the architectures, the signature, the hardened runtime, the
-  timestamp, and the package's own structure - but whether it *runs* cannot be,
-  and neither can whether Gatekeeper accepts it. Two things stand in for that.
-  Apple's notary service unpacks the submission, walks every Mach-O in it and
-  rejects an unsigned binary, a missing hardened runtime, a missing timestamp or
-  a package it cannot parse, so an `Accepted` is a statement by Apple about the
-  exact bytes submitted. And `packaging/macos/verify-macos.sh` still exists, runs
-  against the published bytes, and is a one-line check on any Mac that can be
-  borrowed.
-- **The registry uploads.** Every registry needs an interactive login: a browser,
-  an OAuth redirect, and for PyPI a mandatory second factor. That is deliberate on
-  their part and it is what stops somebody else publishing under your name.
-  `PUBLISHING.md` records where each one stands.
-- **A Linux `manylinux` wheel.** PyPI refuses a plain `linux_x86_64` wheel; the
-  Linux one has to be built in a `manylinux` container. `packages/python/build.py`
-  says so rather than uploading something that will be rejected after the fact.
-
-What *used* to be here, and is not any more: cross-compiling and signing. Both
-are automated now. `cargo-zigbuild` builds every Linux target on the Windows box
-with a chosen glibc floor of 2.28, and the macOS half is a single command on the
-same machine.
+- [`PUBLISHING.md`](PUBLISHING.md): each destination in detail, and how to repair one route.
+- [`macos/README.md`](macos/README.md): the Apple certificates and notary key, set up once.
+- [`windows/README.md`](windows/README.md): the Windows installer, and what an MSI would take.

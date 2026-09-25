@@ -1,5 +1,7 @@
 // Turns the probe's results into the numbers the comparison document quotes.
-const r = require(require('path').join(require('./paths.js').OUT, 'results.json'));
+// `run.js` writes `{ commit, recordedAt, cases }`; an older run wrote the bare array.
+const recorded = require(require('path').join(require('./paths.js').OUT, 'results.json'));
+const r = Array.isArray(recorded) ? recorded : recorded.cases;
 
 const byArea = {};
 for (const x of r) {

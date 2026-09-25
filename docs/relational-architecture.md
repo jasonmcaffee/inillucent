@@ -1,739 +1,700 @@
 # How the relational engine works
 
-This is the SQL half of inillucent: the storage, the transactions, the log, the recovery and the
-execution that sit under `CREATE TABLE` and `SELECT`. [Architecture](architecture.md) is the other
-half, the retrieval engine, and it is a separate subject with a separate page because the two share
-a file and almost nothing else.
+This page describes the SQL half of inillucent: how rows are stored, how a transaction commits, what
+the log holds, what happens on the next open after a crash, and what a checkpoint, a backup and
+`--root` do. [Architecture](architecture.md) describes the other half, the retrieval engine.
+[Architecture in one page](architecture-overview.md) is a shorter version of both.
 
-It is written for someone who has to reason about the engine rather than only use it — an operator
-deciding what a crash can cost them, or an engineer changing it. Every invariant below names the
-test group that checks it, because an invariant nothing checks is a description of what somebody
-intended.
+The page is for two readers. One is an operator who needs to know what a crash can cost. The other
+is an engineer who is about to change the engine. Neither needs to have built a database before.
+Each rule on this page names the test that checks it.
+
+## Terms used on this page
+
+| Term | What it means here |
+|---|---|
+| **Page** | The fixed size block the database file is divided into. Every read and write moves whole pages. The default is 32,768 bytes. |
+| **Frame** | One slot in the buffer pool. A frame holds one page. |
+| **Buffer pool** | The pages the engine keeps in memory, so a read does not go to the disk. `PRAGMA cache_size` sets its size. |
+| **Pin** | Holding a page in its frame while code reads it, so the buffer pool cannot evict that page during the read. |
+| **B+tree** | The structure a table or an index is stored in. Rows sit only in the bottom pages, and the pages above hold keys and page numbers. |
+| **Leaf** | A page at the bottom of a B+tree. Leaves hold the rows. |
+| **WAL** | The write ahead log. Records are appended to it before the database file changes. In inillucent it exists in every journal mode, in files named `<database>-wal.NNNNNNNNNN`. |
+| **LSN** | Log sequence number: the byte position of a record in the log. Every page stores the LSN of the last record applied to it. |
+| **Redo** | Applying a log record to a page during recovery, so the page gets a change the file did not have yet. |
+| **Undo** | Putting back what a transaction changed when it rolls back. |
+| **Checkpoint** | Writing the changed pages from memory into the database file, then deleting the log that is no longer needed. The engine code calls this a fold. |
+| **fsync** | The operating system call that makes written bytes reach the disk. It is the slow part of a commit. |
+| **Snapshot** | The state of the database at one moment. A reader with a snapshot sees the same rows for the whole of its transaction. |
+| **Group commit** | Several commits that share one log write and one fsync. |
+| **Journal mode** | `PRAGMA journal_mode`. In inillucent it chooses how a checkpoint is protected against a crash. It does not change where a commit goes: a commit always goes to the log. |
+
+[The glossary](glossary.md) has these terms and more, one sentence each.
+
+## Defaults
+
+These are the values a new connection starts with. Each was read from the source and printed by
+`PRAGMA <name>` against the 1.0.29 release build.
+
+| Setting | Default | Where the source sets it |
+|---|---|---|
+| `page_size` | `32768` bytes. `PRAGMA page_size = N` and `VACUUM` do not change it. The engine API `Database::open_at` can create a file with 8192, 16384 or 65536 byte pages | `PAGE_SIZE` in `crates/inillucent-engine/src/connect.rs`, `PageSize::DEFAULT` in `crates/inillucent-pool/src/page.rs` |
+| `cache_size` | `-131072`, which is 131,072 KiB: 4,096 frames of 32 KiB, or 128 MiB | `DEFAULT_FRAMES` in `crates/inillucent-engine/src/lib.rs` |
+| largest `cache_size` | 262,144 frames. A larger request fails with the status `too_big` | the `CacheSize` row in `crates/inillucent-base/src/limits.rs` |
+| `journal_mode` | `delete` | `Pragmas::fresh`, and the `journal_mode` handler in `crates/inillucent-engine/src/pragma/tuning.rs` |
+| `synchronous` | `2`, which is `FULL` | `Synchronous` in `crates/inillucent-wal/src/writer.rs` |
+| `busy_timeout` | `5000` milliseconds | `DEFAULT_BUSY_MILLIS` in `crates/inillucent-pool/src/file.rs` |
+| `locking_mode` | `normal` | the `locking_mode` handler in `crates/inillucent-engine/src/pragma/tuning.rs` |
+
+Run the same check yourself:
+
+```sh
+inillucent create demo.rdb
+inillucent --db demo.rdb query "PRAGMA page_size"      # 32768
+inillucent --db demo.rdb query "PRAGMA cache_size"     # -131072
+inillucent --db demo.rdb query "PRAGMA journal_mode"   # delete
+inillucent --db demo.rdb query "PRAGMA synchronous"    # 2
+inillucent --db demo.rdb query "PRAGMA busy_timeout"   # 5000
+inillucent --db demo.rdb query "PRAGMA locking_mode"   # normal
+```
 
 ---
-
-Words used here and not explained here - page, frame, pin, B+tree, leaf, WAL, LSN, checkpoint,
-affinity, collation - are in [the glossary](glossary.md), one sentence each.
-[Architecture in one page](architecture-overview.md) is the shorter version of this document with
-the retrieval half beside it.
 
 ## 1. How the parts fit together
 
 ```mermaid
 flowchart TB
-    SQL["SQL text"] --> Lexer["lexer + parser<br/>inillucent-sql"]
-    Lexer --> Binder["binder<br/>names to columns, over a catalog snapshot"]
-    Binder --> Planner["planner<br/>access paths, join order"]
-    Planner --> Exec["vectorised executor<br/>inillucent-exec"]
-    Exec --> Txn["transactions<br/>inillucent-txn"]
-    Txn --> Tree["B+trees<br/>inillucent-tree"]
-    Txn --> Wal["redo log<br/>inillucent-wal"]
-    Tree --> Pool["buffer pool<br/>inillucent-pool"]
-    Wal --> Vfs["the file system<br/>inillucent-vfs"]
-    Pool --> Vfs
-    Catalog["catalog<br/>inillucent-catalog"] --> Binder
-    Tree --> Catalog
+    SQL["SQL text"] --> Parse["Parse, bind and plan<br/>inillucent-sql"]
+    Catalog["Table and index definitions<br/>inillucent-catalog"] --> Parse
+    Parse --> Exec["Run the plan in batches<br/>inillucent-exec"]
+    Exec --> Engine["Locks, transactions, checkpoints<br/>inillucent-engine"]
+    Engine --> Tree["B+trees<br/>inillucent-tree"]
+    Engine --> Wal["The log<br/>inillucent-wal"]
+    Tree --> Pool["Buffer pool<br/>inillucent-pool"]
+    Tree --> Wal
+    Pool --> Vfs["Files, locks, clocks<br/>inillucent-vfs"]
+    Wal --> Vfs
 ```
 
-The direction of every arrow is checked. `docs/invariants/layering.toml` declares which crate may
-depend on which, and `cargo test -p inillucent-compat --test policy` walks the workspace manifests
-and fails on an edge that is not declared. That is what makes the picture above a fact rather than a
-drawing.
+A statement moves down this picture in five steps.
 
-Two arrows go the other way from the obvious arrangement:
+1. **Parse.** `inillucent-sql` turns the text into a syntax tree. It reads no file and needs no
+   catalog. A parse error carries a byte offset into the statement.
+2. **Bind.** Names become columns, checked against a snapshot of the catalog. The binder decides
+   here whether the statement reads or writes. `--readonly` refuses on that decision, so
+   `SELECT 1; DROP TABLE t` is refused and a `SELECT` that contains the word "delete" is not.
+3. **Plan.** The planner picks an access path and a join order. `EXPLAIN QUERY PLAN` prints its
+   choice.
+4. **Compile.** The plan becomes a chain of operators. The compiled form is cached by statement text,
+   so preparing the same text again is a lookup.
+5. **Run.** Batches of column values flow up the chain. A statement runs to the end on its first
+   step and keeps the rows it produced. That is why `total` in a result is an exact count.
 
-- **The log does not depend on the pool.** A record would then be able to carry a `PageId`, and an
-  edge from the log to the crate that owns pages says the opposite of what the write-ahead rule
-  says: the log is written *before* any page is. A record carries a page's number as a `u64`, and
-  the pool is *told* a durable LSN and refuses to write a page whose LSN is at or above it.
-- **The parser is below the catalog.** A catalog cannot be built without a parser — it parses the
-  `CREATE` text it stores — but a parse does not need a catalog. So the binder is written against
-  an immutable catalog *view*, performs no I/O, and says so in its types.
+**Checked by:** the `engine` and `differential` test tiers. The `differential` tier runs the same SQL
+through inillucent and a pinned SQLite 3.53.4 and compares the answers.
 
 ---
 
 ## 2. Who owns what
 
-| layer | crate | what it knows | what it must not know |
+Each crate knows about the layer below it and nothing above it.
+
+| Layer | Crate | What it knows | What it must not know |
 |---|---|---|---|
 | file system | `inillucent-vfs` | files, locks, clocks, randomness | anything above it |
-| buffer pool | `inillucent-pool` | frames, page headers, the free map, blob extents | what a column is called |
-| B+trees | `inillucent-tree` | pages, keys, byte records, collations | what a column is called |
-| redo log | `inillucent-wal` | segments, the record codec, group commit, the recovery scan | pages, trees |
-| transactions | `inillucent-txn` | snapshots, the writer slot, undo, savepoints, the commit gate | SQL |
-| SQL front end | `inillucent-sql` | lexing, parsing, binding, planning | I/O |
+| buffer pool | `inillucent-pool` | frames, page headers, the free map, values stored outside a page, the rollback journal | what a column is called |
+| log | `inillucent-wal` | log segments, the record format, group commit, the recovery scan | pages and trees |
+| B+trees | `inillucent-tree` | pages, keys, row bytes, collations | what a column is called |
+| transactions | `inillucent-txn` | snapshots, the writer slot, undo, savepoints | SQL |
+| SQL front end | `inillucent-sql` | parsing, binding, planning | files |
 | execution | `inillucent-exec` | operators, batches, expressions | names |
-| catalog | `inillucent-catalog` | `sqlite_schema`, roots, declared types | plans |
-| the database | `inillucent-engine` | all of the above, assembled into something a caller opens | — |
+| catalog | `inillucent-catalog` | `sqlite_schema`, root pages, declared types | plans |
+| the database | `inillucent-engine` | all of the above, assembled into a database a caller opens | nothing is above it inside the engine |
 
-**`inillucent-vfs` is the only crate in the workspace that touches a file.** That is not tidiness:
-it is what lets a deterministic simulator replace the disk without any layer above noticing, which
-is how the crash and fault campaigns inject a failure at a chosen write or sync. It is also where
-`--root` confinement is enforced (§8), for the same reason — one choke point rather than a list of
-call sites somebody has to remember to extend.
+Three rules follow from this table.
 
-**Checked by:** `cargo test -p inillucent-compat --test policy`, which fails on an undeclared
-dependency edge, an unformatted governed crate, an `unsafe` block outside the operating-system
-boundary, and a module with no stated invariant.
+- **`inillucent-vfs` is the only crate that touches a file.** A test can therefore replace the disk
+  with a simulated one, and the crash tests use that to fail a chosen write or sync. `--root` is
+  enforced in `inillucent-vfs` for the same reason (section 8).
+- **The log does not depend on the buffer pool.** A log record stores a page number as a plain
+  `u64`. The pool is told the highest LSN that is safe on disk, and it refuses to write a page whose
+  LSN is at or above that number. The log therefore reaches the disk before any page it describes.
+- **The parser sits below the catalog.** The catalog uses the parser to read the `CREATE` text it
+  stores. A parse needs no catalog, so the binder works against a read only view of the catalog and
+  does no file access.
+
+**Checked by:** `docs/invariants/layering.toml` lists which crate may depend on which.
+`cargo test -p inillucent-compat --test policy` reads every crate's manifest and fails on a
+dependency the file does not allow. The same test fails on an unformatted crate, on `unsafe` code
+outside the operating system layer, and on a module that does not state its invariant.
 
 ---
 
-## 3. A statement, from text to rows
+## 3. Storage: pages and the buffer pool
 
-1. **Lex and parse.** No catalog, no I/O. A parse failure carries a byte offset into the statement.
-2. **Bind.** Names resolve to columns against an immutable catalog snapshot. This is where a
-   statement is classified as reading or writing — which is what `--readonly` refuses on, rather
-   than a scan of the text, so `SELECT … ; DROP TABLE …` does not slip past and a `SELECT`
-   containing the word "delete" is not refused.
-3. **Plan.** Access paths and join order. `EXPLAIN QUERY PLAN` prints what it chose.
-4. **Compile.** The plan becomes an operator chain. Compiled forms are cached by statement text, so
-   preparing the same statement again is a hash lookup.
-5. **Execute.** Batches of columns flow up the chain. A pipeline breaker — a sort, a hash join
-   build, an aggregate — collects rows and emits batches again through one function, which is the
-   one place a transpose happens and the one place a request's budget is counted (§7).
+A database is one file of equal sized pages. Page 0 and page 1 are the two copies of the meta page,
+which records the page size, the catalog's root page, the free map and the log position of the last
+checkpoint. The format version is at byte 8 of the meta page (section 6). Every other page belongs to
+a B+tree, to the free map, or to a value too large to fit in its leaf.
 
-**Statements materialise.** A statement runs whole on its first step and then walks the rows it
-produced. That is why `total` in a result is *exact* rather than an estimate: it was counted, not
-guessed, which is what lets a grid say "1-200 of 4,317" honestly. It is also why the row and byte
-budgets in §7 are the shape they are.
+Every page carries a checksum and the LSN of the last log record applied to it. A page whose
+checksum fails is reported as damage. Recovery also treats a page whose checksum fails as a page
+with no LSN, so every log record for that page is applied again.
 
-**Checked by:** the `engine` and `differential` tiers — `target/debug/inillucent-testrun --tier
-differential` grades 416 cases against a pinned SQLite 3.53.4, in both directions.
+### The buffer pool
+
+The buffer pool holds pages in frames. A frame's memory is taken the first time the frame is used,
+so a large `cache_size` costs little until pages are read into it.
+
+| What you want | What to run |
+|---|---|
+| See the pool size | `PRAGMA cache_size`. A negative number is KiB, a positive number is pages |
+| Make the pool larger | `PRAGMA cache_size = -524288` for 512 MiB |
+| Make the pool smaller | a smaller `cache_size`. The pool keeps the memory it has and uses fewer frames |
+| See hits, misses and evictions | `.stats` in `inillucent-shell` |
+
+`PRAGMA cache_size` above 262,144 frames fails with `too_big`. At 32 KiB pages that ceiling is
+8 GiB.
+
+A changed page stays in its frame until a checkpoint writes it out. A transaction can change more
+pages than the pool holds. The pool then writes some of that transaction's pages to the file early.
+That early write is protected by a rollback journal, so a crash before the commit can put the old
+page back. In `wal` mode the journal file is still created for this case.
 
 ---
 
 ## 4. Transactions and isolation
 
-`inillucent-txn`, the transaction manager, implements one writer at a time, many readers and
-snapshot isolation: a reader takes a snapshot and sees the database as it was at that instant for the
-length of its transaction, and a writer takes the writer slot and publishes before-images into a
-version log so readers can still see what they started with.
+inillucent allows one writer at a time for each file. Other processes can read the file between
+writes.
 
-**What a connection of the shipped engine gets is the first half of that and not the second.**
-`ImportedDatabase` holds the log directly rather than going through the transaction manager, and it
-takes the file's EXCLUSIVE lock for the length of a write. So one writer at a time holds across
-processes, and a reader of another process waits for that writer rather than reading a snapshot past
-it - there is no shared-memory index through which a reader could find the log. A reader that will
-not wait is refused with `busy` after `PRAGMA busy_timeout`. `docs/roadmap.md` has the protocol that
-would make the second half true across processes as well.
+| Setting | What it does |
+|---|---|
+| `locking_mode = normal` (default) | a statement takes the file lock when it starts and releases it when it ends. A read takes a shared lock. A write takes an exclusive lock. An open transaction keeps the lock from its first write to its `COMMIT` |
+| `locking_mode = exclusive` | the connection keeps the lock until it closes. No other process can use the file |
+| `busy_timeout` | how long a statement waits for a lock another process holds. After 5000 milliseconds by default, the statement fails with the status `busy` |
 
-The version log is collected on a threshold rather than after every commit, because collecting walks
-the whole log and doing it per commit would be quadratic in the images a batch publishes.
+A reader in another process waits while a writer holds the exclusive lock. It does not read an older
+snapshot past that writer. `inillucent-txn` contains a snapshot implementation, and the shipped
+engine does not use it between processes. There is no shared memory index a reader in another
+process could use to find the log, so the engine holds the file lock instead. [The roadmap](roadmap.md) describes the change that would let a
+reader of another process read a snapshot while a writer works.
 
-**`DETACH` is refused inside a transaction**, and that is a rule rather than a limitation being
-worked around: schemas are numbered in attachment order, an open transaction's participant set is
-recorded by those numbers, and removing one from the middle would renumber a set that is already
-being counted.
+When a connection takes the lock, it checks whether another process changed the file or the log
+since it last looked. If either moved, it drops its cached pages and replays the log from the file's
+last checkpoint before it reads anything.
 
-**Checked by:** `inillucent-txn`'s own `transactions` and `durability` suites, the
-`multi_database_commit` and `multi_database_participants` suites, and
-`crates/inillucent-model` — an executable model of the transactional semantics whose dependency
-list is one crate long *on purpose*: a reference implementation that linked the engine could share
-a bug with it, and the two agreeing would then be evidence of nothing.
+`ROLLBACK` is done from the log. It works the same way in every journal mode, including `off`.
+
+Two statements are refused inside an open transaction:
+
+| Statement | Error |
+|---|---|
+| `DETACH` | `cannot DETACH database within transaction` |
+| `VACUUM` | `cannot VACUUM from within a transaction` |
+
+`DETACH` is refused because a transaction records the files it touches by their attachment number,
+and removing one would renumber the others. `VACUUM` is refused because it reads committed rows,
+and an open transaction has not committed.
+
+A transaction that writes to more than one attached file is decided by a super journal outside those
+files. Each file's log holds a vote. Recovery reads the super journal to learn whether the vote
+became a commit.
+
+**Checked by:** `inillucent-txn`'s own `transactions` and `durability` suites, and the
+`multi_database_commit` and `multi_database_participants` suites in `inillucent-compat`. The model in
+`crates/inillucent-model` is a second, separate implementation of the transaction rules. It depends
+on one crate only, so it cannot share a bug with the engine.
 
 ---
 
 ## 5. The log, and what a crash costs
 
-Write-ahead: the log record is durable before the page it describes is written. The rule is tied
-together in `inillucent-txn` rather than in either the pool or the log, because it is the only thing
-that holds a file and a log at the same time — it calls `Pool::set_durable_lsn` after every sync of
-the log and never before one, and neither of the other two knows the other exists.
+### What a commit does
 
-Recovery scans from the meta page's `checkpoint_lsn` and replays forward. Three properties hold, and
-each is a place a plausible implementation goes wrong:
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Engine as inillucent-engine
+    participant Log as Log file
+    participant Pool as Buffer pool
+    participant File as Database file
+    App->>Engine: COMMIT
+    Engine->>Log: append row changes and a commit record
+    Engine->>Log: write and fsync
+    Log-->>Engine: durable up to this LSN
+    Engine->>Pool: pages below this LSN may now be written
+    Engine-->>App: ok
+    Note over Pool,File: Later, at a checkpoint
+    Pool->>File: write the changed pages
+```
 
-1. **Replay is idempotent.** A page carries the LSN of the last record applied to it, so a record
-   the page already has is skipped. Recovery can therefore run twice.
-2. **A record for a page that no longer exists is skipped rather than applied**, because the page
-   may have been freed and the file truncated.
-3. **A stamp that cannot have come from this log is refused rather than obeyed.** Property 1 is only
-   sound while a page's stamp is a position in *this* stream. A page stamped by a stream that was
-   abandoned reads as "already has it" for every record, so every later write to it would be
-   discarded with no error at all.
+The rule is **write ahead**: a log record reaches the disk before the page it describes. A commit
+appends its row changes and a commit record to the log, then writes and syncs the log. The changed
+pages stay in the buffer pool. A later checkpoint writes them into the database file. Until then an
+acknowledged commit exists only in the log, and the log is enough to rebuild it.
 
-**The free map is replayed in log order.** This is the one that bit a real corpus. Recovery used to
-collect `AllocPage` records into one list and `FreePage` records into another and apply the frees
-last, so a page **freed and then allocated again inside the replayed range** came back marked free
-while it was live — and the next allocation was handed a page something else already owned. It is
-silent at write time: the statement that takes the page reports success, and nothing is wrong until
-something reads a row whose value lived there. A free-map bit carries no LSN, so nothing below
-recovery can catch a wrong answer about it. This is fixed.
+`inillucent-engine` connects the two halves. After every sync of the log it tells the buffer pool the
+new durable LSN. The buffer pool refuses to write a page whose LSN is at or above that number.
 
-**A journal is not gone until the directory says so.** This one corrupted a database that had
-already committed cleanly, and it was found by pointing the old engine's crash campaigns at this one
-for the first time. Every connection opens in `DELETE` journal mode for a moment before
-`PRAGMA journal_mode = wal` switches it, and that moment creates a rollback journal.
-`Journal::finish()`'s `Delete` arm then dropped the file handle and unlinked the file **without
-syncing either**: the pre-images that same checkpoint's flush had just written sat unsynced in the
-device's write-behind cache, and the unlink passed `sync_dir: false`, so the directory entry removal
-was not durable either. A power loss in that window leaves the directory still naming a journal that
-looks perfectly hot and whose last bytes are torn - and the next cold open's `replay_hot_journal`
-puts that garbled pre-image back over a good page. The result is `database disk image is malformed`
-on a database whose commit had completed, which reads like a recovery failure and is not one. This
-is fixed: the journal's own bytes are synced before the handle goes, and the unlink syncs the
-directory.
+**Group commit.** Several connections that commit at the same moment share one log write and one
+fsync. The first committer writes and syncs the log for all of them. The others wait until their own
+records are on disk. A single connection does one write and one sync for each commit under
+`synchronous = FULL`.
 
-**Then the same campaigns were run in `TRUNCATE` and `PERSIST` mode, which nothing had ever done,
-and found three more - and closing the gap that hid them found a fourth in `wal`.** Every one could
-destroy a database that the power loss itself had left whole, so they are written out here rather
-than summarised.
+**A failed write stops the log.** If a log write or sync fails, the log keeps the error and every
+later call returns it. The engine then refuses to start new work, because a log with a gap in its
+durable records cannot be trusted.
 
-**The journal was never synced before a page was overwritten.** `Pool::checkpoint` sealed the
-journal at its head. That is before `flush` has saved a single pre-image, because pre-images are
-saved by the writeback loop `flush` runs next - so the seal synced an empty file, and every
-pre-image the checkpoint wrote afterwards was still in the file's buffers while the same loop
-overwrote the pages those pre-images belonged to. `flush` now takes two passes under a rollback
-journal: save every pre-image, sync once, then write the pages. A checkpoint of a thousand pages
-still pays for one sync, and `writeback` asks for the sync per page only because the page evictor
-reaches it with no flush around it.
+The log is stored in segment files beside the database: `app.rdb-wal.0000000001`,
+`app.rdb-wal.0000000002`, and so on. A segment holds up to 64 MiB before the log moves to the next
+one. A checkpoint deletes the segments it no longer needs. After a clean close, one small segment
+file stays beside the database.
 
-**The journal had no checksums, so recovery wrote torn bytes over a good database.** At the cut
-point where the campaign failed, the database file was correct - page 3 stored the checksum
-`b59f5196` and computed `b59f5196` - and the `database disk image is malformed` the test reported
-had been manufactured by recovery, out of a journal whose seventeen sectors the crash model had left
-Torn, Garbage and Dropped. There was nothing in the format that could tell a replay that a
-pre-image was not the bytes somebody wrote. Every record now carries a CRC over the transaction's
-nonce, the page id and the image; the header carries one over itself; and `replay_hot_journal` stops
-at the first record that fails. That restores everything the journal owes, because a record is only
-unverifiable if it was written after the last sync, and a page is only overwritten after the sync
-covering its own pre-image - so a failing record names a page the crash never reached, as does every
-record appended after it. The nonce is what stops `PERSIST` mode's leftover records from a previous
-transaction passing this one's check. The magic is `RDBJRNL2`; a journal an older build left behind
-is removed rather than replayed.
+### `PRAGMA synchronous`: what a crash can lose
 
-**The two meta pages were the only pages a checkpoint overwrote without a pre-image.** With the
-first two fixed the campaigns reached cut point 47 and recovered a database with no tables in it.
-The journal had correctly put the data pages back to before the checkpoint, and the meta page still
-read `generation 5, checkpoint_lsn 17160` - a checkpoint that never finished. Redo believed that
-number, started above it, and skipped the very records that would have re-applied what the journal
-had undone. The catalog's own root page was one of the pages the journal put back, which is why the
-tables went. The shadow meta page does not protect against this: `checkpoint` writes the *same*
-image to both slots, so the second one is a second chance for the new record to survive rather than
-an older copy to fall back on. A checkpoint now journals `META_PAGE` and `SHADOW_PAGE` and syncs
-before writing them, so the record that claims a checkpoint happened is undone by the same mechanism
-as the pages it describes.
+| `synchronous` | When the log is synced | A crash of the process | A power loss |
+|---|---|---|---|
+| `2`, `FULL` (default) | on every commit | loses nothing that was acknowledged | loses nothing that was acknowledged |
+| `1`, `NORMAL` | when 64 MiB of log has built up, before a checkpoint, and when a statement that wrote releases the file lock | loses nothing that was acknowledged | may lose the most recent commits, and does not damage the database |
+| `0`, `OFF` | never | the source makes no promise | may lose commits and may damage the database |
 
-`Journal::finish` also synced at `SyncMode::Normal` in its `truncate` and `persist` arms. What makes
-a journal stop being hot in those two modes is a change to the journal file itself, and `Normal` is
-the level that is allowed not to reach the media - so until it lands, the next open still finds
-pre-images naming a database whose commit already completed. Both are `Full` now, which is what the
-`delete` arm does.
+`PRAGMA synchronous = 3` (`EXTRA`) is accepted and behaves as `FULL`.
 
-**A write-ahead log does not remove the need for a rollback journal, and that is a consequence of
-this log being logical.** With the campaigns above reaching further into the checkpoint, `wal_crash.rs`
-and `search_crash.rs` both failed at cut 32 - different files, different workloads, the same call. A
-checkpoint writes pages into the data file *in place*. Once a page's content is below the recorded
-checkpoint point, the records that built it are redundant and their segments are retired, so the log
-no longer describes it; a page the checkpoint half wrote before a power loss is then content nothing
-can rebuild. The meta record was correct - it still named the previous checkpoint - and the log still
-held every record above it. Recovery failed on the one page neither could supply:
-`page 3 checksum fe9063aa is not the computed f53956bb`.
+These rules come from `NORMAL_SYNC_BYTES` and the `Synchronous` type in
+`crates/inillucent-wal/src/writer.rs`. Under `NORMAL` a commit is acknowledged when its record has
+been written to the operating system. The operating system keeps those bytes when the process dies.
+A power loss can drop them.
 
-SQLite is not exposed to this for a structural reason: its log holds whole page images and a
-checkpoint is a copy, so an interrupted one is simply redone. Here a connection in `wal` takes a
-`delete` journal (`journal_for` in `crates/inillucent-engine/src/engine/locks.rs`), which holds the pre-images
-for the duration of a checkpoint and removes the file once the checkpoint's meta record is durable.
-That is the cost the default mode already pays, and it makes an interrupted checkpoint undoable in
-every mode rather than in three of the five. `off` is the one mode that gets nothing, because that
-is what it asks for.
+### Recovery on open
 
-All four are fixed now, and the evidence is checked in: `tests/crash/truncate-full-crash.txt`
-and `tests/crash/persist-full-crash.txt` record 101 cut points each, every one recovering to the old
-database or the new one, with no detected damage at any of them. The files are seeded, so a diff on
-them is a change in what the engine does under failure.
+```mermaid
+flowchart TB
+    A["Open the file"] --> B{"Is a journal left<br/>from a checkpoint?"}
+    B -- yes --> C["Put the old page images back"]
+    B -- no --> D["Read the meta page:<br/>the LSN of the last checkpoint"]
+    C --> D
+    D --> E["Scan the log from that LSN"]
+    E --> F["Apply each committed record<br/>to pages that do not have it yet"]
+    F --> G["Discard transactions<br/>with no commit record"]
+    G --> H["Replay page allocations and frees<br/>in log order"]
+    H --> I["Cut the log after<br/>its last valid record"]
+    I --> J["Read the catalog and<br/>accept statements"]
+```
+
+Recovery runs on every open, before anything reads a page. It runs the same way for the main
+database and for every file `ATTACH` opens. When recovery replayed committed transactions, the command
+line prints a line such as this one:
+
+```text
+recovered the log: 3 records scanned, 2 applied, 1 transactions committed, 0 discarded.
+```
+
+Four rules make recovery safe:
+
+1. **Replay can run twice.** A page stores the LSN of the last record applied to it, so a record the
+   page already has is skipped.
+2. **A record for a page that no longer exists is skipped.** The page may have been freed and the
+   file made shorter.
+3. **A page stamped with an LSN this log cannot have written is refused.** Such a page would skip
+   every later record, and those writes would be lost with no error.
+4. **Allocations and frees are replayed in log order.** A page that was freed and then allocated
+   again inside the replayed range must come back allocated. If all frees were replayed last, a live
+   page would be marked free, and the next allocation would give it to a second owner.
+
+A read only connection replays the log into its own memory and writes nothing to the disk. If a read
+only connection finds a journal left by an interrupted checkpoint, it refuses to open, because
+putting the old pages back is a write.
 
 **Checked by:** `crates/inillucent-compat/tests/new_engine_free_map_recovery.rs`,
-`new_engine_recovery_shapes.rs`, `wal_crash.rs`, `multi_database_crash.rs`, and the `durability`
-tier's fault campaigns, which crash at a chosen sync and then read back what the *file* holds.
-Those campaigns drove the retired engine until it was deleted; re-pointing them at this one is
-what found the journal defect above, and `new_engine_recovery_shapes.rs` did not, because it crashes
-at one fixed point rather than at every cut of a commit.
+`new_engine_recovery_shapes.rs`, `wal_crash.rs`, `multi_database_crash.rs`, and the `durability` tier.
+The `durability` tier stops a simulated machine at a chosen write or sync, then reads back what the
+file holds.
+
+### Checkpoints
+
+A checkpoint writes the changed pages from the buffer pool into the database file, records the new
+recovery point in the meta page, and deletes the log segments that are no longer needed.
+
+```mermaid
+flowchart TB
+    A["Sync the log"] --> B{"Journal mode"}
+    B -- "wal" --> C["Append the new image of each page<br/>to the log, then sync"]
+    B -- "delete, truncate, persist" --> D["Save the old image of each page<br/>to the journal, then sync"]
+    B -- "memory, off" --> E["No protection"]
+    C --> F["Write the pages into<br/>the database file"]
+    D --> F
+    E --> F
+    F --> G["Write the meta page:<br/>the new recovery LSN"]
+    G --> H["Finish the journal"]
+    H --> I["Delete log segments<br/>below the recovery LSN"]
+```
+
+A checkpoint runs at four moments:
+
+| When | What starts it |
+|---|---|
+| The log has grown by 4 MiB since the last checkpoint | a statement that wrote, as it releases the file lock. The number is `RECLAIM_BYTES` in `crates/inillucent-engine/src/checkpoint.rs` |
+| The connection closes | the connection holds pages the file does not have, or a journal with old page images in it |
+| Somebody asks | `PRAGMA wal_checkpoint`, `inillucent checkpoint`, `VACUUM`, `inillucent backup`, an integrity check, or the driver's `checkpoint` |
+| The journal mode or the locking mode changes | `PRAGMA journal_mode` or `PRAGMA locking_mode` |
+
+A checkpoint writes pages in place. If the power fails halfway, some pages hold new bytes and some
+hold old bytes. The log alone cannot always repair that, because most log records hold row changes
+and not whole pages. The journal mode decides what protects the checkpoint:
+
+| `journal_mode` | What protects a checkpoint | After the checkpoint | After a crash during a checkpoint |
+|---|---|---|---|
+| `delete` (default) | old page images in `<database>-journal`, synced before any page is written | the journal file is deleted, and the directory is synced | the old images are put back, then recovery replays the log |
+| `truncate` | the same journal | the journal is cut to zero bytes | the same as `delete` |
+| `persist` | the same journal | the journal's header is zeroed | the same as `delete` |
+| `wal` | the new image of every page, appended to the log and synced before any page is written | nothing to finish | recovery installs the page images from the log |
+| `memory` | nothing | nothing to finish | a half written checkpoint stays half written |
+| `off` | nothing | nothing to finish | the same as `memory` |
+
+In `wal` mode a `<database>-journal` file is still created when a transaction's pages outgrow the
+buffer pool (section 3). Writing an uncommitted page early needs an old image to undo it, and a log
+of new images cannot undo.
+
+`inillucent` and `inillucent-shell` turn on `PRAGMA defensive`. Under `PRAGMA defensive`,
+`PRAGMA journal_mode = off` is refused, and the pragma answers with the mode already in force.
+
+The journal has a checksum on its header and on every record. Recovery stops at the first record
+that fails its checksum. A record can fail only if it was written after the journal's last sync, and
+no page is overwritten before the sync that covers its old image. So every record from the failure
+onward names a page the checkpoint had not reached. Each record also carries the transaction's
+nonce, so `persist` mode cannot replay a record left from an earlier transaction. The two meta pages
+are journaled like any other page, so an interrupted checkpoint cannot leave a meta page that names
+a checkpoint which never finished.
+
+### The evidence
+
+The crash campaigns stop a simulated machine at every write and every sync of a workload, then
+recover and compare the result. Each campaign runs from a fixed seed and writes its result into
+`tests/crash/`. A change to one of these files is a change in what the engine does under failure.
+
+| File in `tests/crash/` | What it records |
+|---|---|
+| `delete-full-crash.txt` | 94 cut points, 56 acknowledged commits, no detected damage, nothing lost |
+| `truncate-full-crash.txt` | 166 cut points, 55 acknowledged commits, no detected damage, nothing lost |
+| `persist-full-crash.txt` | 166 cut points, 55 acknowledged commits, no detected damage, nothing lost |
+| `delete-full-checkpoint-crash.txt` | 55 cut points inside a checkpoint, every one recovered to the committed state |
+| `truncate-full-checkpoint-crash.txt` | 54 cut points inside a checkpoint, every one recovered to the committed state |
+| `persist-full-checkpoint-crash.txt` | 54 cut points inside a checkpoint, every one recovered to the committed state |
+| `wal-commit.tsv` | 32 cut points in `wal` mode: 29 recovered the old state, 3 the new state, none damaged |
+| `wal-checkpoint.tsv` | 62 cut points in a `wal` checkpoint: 29 old, 33 new, none damaged |
+
+**Checked by:** `crates/inillucent-compat/tests/durability.rs` and `wal_crash.rs` write those files.
+`crash_reports.rs` fails when a campaign reports fewer cut points than the number a person accepted.
+`new_engine_log_retire.rs` checks that a checkpoint deletes the log it no longer needs.
 
 ---
 
-## 5a. What a file's format version promises
+## 6. What a file's format version promises
 
-The first eight bytes of a database are `RDB2` and four zero bytes, and the four bytes after them
-are the **format version**, which this build writes as `2`. It reads `2` and `1`.
+The first eight bytes of a database are `RDB2` and four zero bytes. The next four bytes are the
+**format version**. This build writes format `2` and reads formats `1` and `2`. The number is covered
+by the meta page's checksum, so a hand edited version fails the checksum.
 
-The rule it stands for:
+| Rule | What it means |
+|---|---|
+| A point release reads every file an earlier point release of the same minor version wrote | a bug fix never changes the format version |
+| A change to the layout of a page, a record or the header raises the format version | that is a minor version, and it comes with a migration |
+| A build that meets a higher version refuses the file by name | the error is `this database is format version N and this build reads version 2; upgrade inillucent to open it`, with the status `unsupported`. The command line exits 3 |
+| A version below 1 is reported as damage | there is no format 0, so a zero means the header was overwritten |
 
-- **A point release reads every file an earlier point release of the same minor version wrote.**
-  `0.1.4` opens a `0.1.0` file. The version does not move for a bug fix, and a release that changed
-  the layout of a page, a record or the header without moving it would be a release that could not
-  say which files it can read.
-- **A change to that layout raises the number, and that is a minor version.** Where the new build
-  can read the old layout it does, as it does format 1 (below); where it cannot, the migration is
-  `inillucent-migrate`, which reads the older file and writes a new one rather than rewriting it in
-  place, because an upgrade in place is a rewrite that a crash can catch halfway.
-- **A build that meets a higher number says so rather than reading the file as damage.** The refusal
-  is `this database is format version N and this build reads version 2; upgrade inillucent to open
-  it`, it carries the status `unsupported`, and the command line exits 3 - the same answer every
-  other "this build has not got that" gives. A number below 1 is reported as corruption, because
-  there is no earlier format: a zero there is a header that has been overwritten.
+A migration is `inillucent-migrate`, which reads the older file and writes a new one. It does not
+rewrite the file in place, because a crash could stop a rewrite halfway.
 
-### Format 2: what changed, and how a format 1 file still opens
+### Format 2, and how a format 1 file still opens
 
-Two things in a page changed, and a build of format 1 can read neither:
+Format 2 changed two things in a page:
 
-- **A leaf's delta area has a directory.** The delta area holds the rows written to a leaf since it
-  was last packed. In format 1 it was a run of rows in arrival order, capped at 32 and scanned on
-  every lookup. In format 2 it opens with a directory of two-byte entries in key order, a lookup is
-  a binary search, and the area is as large as the free gap - which is what stopped an index leaf of
-  thousands of rows compacting after every 32 writes. `crates/inillucent-tree/src/leaf/delta.rs`
-  has the layout.
-- **A page's checksum covers its LSN.** Format 1's covered bytes 12 onward and left the eight-byte
-  LSN out, so a flipped bit there was a page that read as valid while telling recovery the wrong
-  thing about which log records it held. `crates/inillucent-pool/src/page.rs` has the rule.
+- **A leaf's delta area has a directory.** The delta area holds rows written to a leaf since it was
+  last packed. Format 2 starts it with a list of two byte entries in key order, so a lookup is a
+  binary search, and the area can use the leaf's whole free space. The layout is in
+  `crates/inillucent-tree/src/leaf/delta.rs`.
+- **A page's checksum covers its LSN.** In format 1 a flipped bit in the LSN went undetected. The
+  rule is in `crates/inillucent-pool/src/page.rs`.
 
-**This build reads format 1, page by page.** A leaf carries a flag, `LEAF_DELTA_DIRECTORY`, that
-says which layout its delta area is in, and a page's checksum is accepted under either rule. A leaf
-format 1 wrote is read as it is and **written by format 1's rules until a compaction or a split
-rewrites it**, and that rewrite is logged with the page's image. The reason is recovery: it replays
-the log onto the pages the file holds, and for a file an earlier release wrote those are format 1
-pages, so a replay has to follow the rules the log was written under to land on the same bytes. The
-file's own number becomes 2 the next time this build writes the meta record, which a checkpoint
-does. `tests/interop/` holds a file from every release, and `release_format.rs` reads each one,
-writes to it, crashes, and recovers.
+This build reads a format 1 file page by page. A leaf carries the flag `LEAF_DELTA_DIRECTORY` that
+says which layout its delta area uses, and a checksum is accepted under either rule. A format 1 leaf
+keeps format 1's rules until a compaction or a split rewrites it. That rule exists because recovery
+replays the log onto the pages the file holds, and it must produce the same bytes the log was written
+against. The file's own version becomes 2 at the next checkpoint.
 
-**No release before this one reads a format 2 file, and each of them refuses it.** 0.1.5, 0.1.6
-and 0.1.7 answer `Error [unsupported]: this database is format version 2 and this build reads
-version 1; upgrade inillucent to open it`. 0.1.1, 0.1.2 and 0.1.3 predate that refusal and answer
-`database disk image is malformed: neither meta page is readable`. None of them reads the file and
-answers from it. `release_format_history.rs` asserts both, against the released binaries.
+Releases 0.1.5, 0.1.6 and 0.1.7 refuse a format 2 file with
+`this database is format version 2 and this build reads version 1; upgrade inillucent to open it`.
+Releases 0.1.1, 0.1.2 and 0.1.3 answer `database disk image is malformed: neither meta page is
+readable`. None of them reads the file.
 
-The number lives at byte 8 of the meta page, which is covered by the meta record's checksum, so a
-file whose version has been edited by hand fails the checksum rather than opening.
+### Values stored outside a page
 
-### What an extent reference's class bits are, and why the number did not move
+A value too large for its leaf is stored on other pages. The leaf keeps a sixteen byte **extent
+reference**: a page number and a length. Two bits above the page number, `CLASS_STATED` and
+`CLASS_TEXT`, say whether the value is text or a blob when the column's declared type would give the
+wrong answer. A column declared with no type, as in `CREATE TABLE t (a)`, is such a case.
 
-An **extent reference** is the sixteen bytes a leaf holds for a value stored outside its page: a
-page number and a length. It also carries, in the two bits above the page number,
-what the value reads back as - `CLASS_STATED`, and beside it `CLASS_TEXT`. Without them the column's
-declaration was the only thing that could say whether the bytes were text or a blob, so a column
-that would say the wrong thing could not have a value outside its page at all: `CREATE TABLE t (a)`
-is BLOB affinity, a text in it stayed inline however long it was, and at the default 32,768 byte
-page a text of about 32 KB could not be stored.
+Every other reference is written exactly as before. A build older than the class bits reads a stated
+reference as a page number above 2^62, fails to fetch it, and reports an error. It never returns the
+bytes with the wrong type. `ExtentClass` in `crates/inillucent-pool/src/extent.rs` holds the
+encoding. `extent_class_for` and `extent_datum` in `crates/inillucent-tree/src/leaf/layout.rs` write
+and read it.
 
-**The format version stays 1, and the rule above is why it can.** A reference states its class only
-when the column's own answer would be wrong. Every other reference - a text in a column declared
-`TEXT`, bytes in one declared `BLOB` - is encoded as the same sixteen bytes it always was. So:
+### Layouts inside the file
 
-- **A build from before this reads every file an earlier build wrote, unchanged**, because no file
-  an earlier build wrote contains a reference with these bits set: the only values that produce one
-  are values an earlier build refused to store.
-- **A build from before this that is handed a file written by this one** meets a stated reference as
-  a page number above 2^62. It is not a page any file has, the fetch fails, and it reports the
-  failure. It does not answer.
-- **That last point is why the bits are in the page word and not the length word.** The length word
-  has spare bits too - above the 48-bit length and below the packed-into-a-shared-page flag - and a
-  build from before this would read the page and the length out of such a reference correctly and
-  hand the bytes back labelled by the column. For exactly the values these bits exist for, that is
-  the wrong label on the right bytes: a text coming back as a blob, with nothing to say so.
+The format version covers pages, records and the header. It does not cover what a virtual table
+stores in its shadow tables. Those layouts carry their own numbers:
 
-A file this build writes is therefore readable by an earlier one everywhere an earlier one could
-have written it, and refused rather than misread everywhere it could not. `ExtentClass` in
-`crates/inillucent-pool/src/extent.rs` holds the encoding; `extent_class_for` and `extent_datum` in
-`crates/inillucent-tree/src/leaf/layout.rs` are the writer's and the reader's halves of the rule,
-written beside each other because a disagreement between them is a wrong value rather than an error.
-
-### The layouts inside the file, and what they promise separately
-
-The format version at byte 8 covers the pages, the records and the header. It does **not** cover
-what a virtual table keeps inside its own shadow tables, and treating it as though it did is what
-made the one compatibility break this project has had invisible.
-
-The break: the FTS5 index layout changed in 0.1.2. `%_idx`'s third column used to hold an integer
-naming the `%_data` row a term's doclist lived in, and now it holds the doclist itself. Nothing
-about the page format moved, so the format version correctly stayed at 1 - and 0.1.1 opens a file a
-later build wrote, reads its tables, reads its `WITHOUT ROWID` entries, reads a blob stored over a
-page, reads the row that exists only in the log, reads `SELECT count(*) FROM note_fts` as 5 and
-`SELECT rowid, title FROM note_fts` as all five rows. The only thing it gets wrong is
-`WHERE note_fts MATCH 'segment'`, which comes back as **no rows at all**: it read the doclist blob
-as a page number, found no such page, and a term with no doclist is a term in no documents.
-
-That is the worst answer a compatibility break can give. An empty result set is a legitimate answer
-to a search, so an application has nothing to tell it apart from "there are no matching documents".
-0.1.1 is published and its answer can never be fixed. What changed is the next one.
-
-**Every durable layout in the file now names itself, and a reader that meets one it has not got
-refuses with the status `unsupported` and names the release that wrote it.** Three places, three
-records:
-
-| what | where the number is | what a newer number does |
+| Layout | Where its number is | What a newer number does |
 |---|---|---|
-| the pages, records and header | byte 8 of the meta page, `crates/inillucent-pool/src/meta.rs` | the database will not open: `this database is format version N and this build reads version 2; upgrade inillucent to open it` |
-| an FTS5 index | a `%_data` row, `crates/inillucent-ext/src/vtab/fts5/layout.rs` | the database opens and the table's rows read; `MATCH`, any write, and `fts5vocab` refuse with `the full-text index on T is in layout N, written by inillucent X.Y.Z, and this build reads layouts up to 2` |
-| an `inillucent_search` index | the `format` row of `%_config`, `crates/inillucent-search/src/options.rs` | the database opens; every read and every write of the table refuses with `the table is in format N, written by inillucent X.Y.Z, and this build reads formats 1 and 2` |
+| pages, records and header | byte 8 of the meta page, `crates/inillucent-pool/src/meta.rs` | the database does not open |
+| an FTS5 index | a `%_data` row, `crates/inillucent-ext/src/vtab/fts5/layout.rs` | the database opens and the table's rows read. `MATCH`, any write, and `fts5vocab` fail with `the full-text index on T is in layout N, written by inillucent X.Y.Z, and this build reads layouts up to 2` |
+| an `inillucent_search` index | the `format` row of `%_config`, `crates/inillucent-search/src/options.rs` | the database opens. Every read and write of the table fails with `the table is in format N, written by inillucent X.Y.Z, and this build reads formats 1 and 2` |
 
-There are two numbers for a search table because there are two shapes of one. A table that declares
-no facet column stores `1`, which is what every build has always written and every build reads. A
-table that declares one stores `2`, so a build that does not know the word refuses it by name
-instead of reading the facet's value as ordinary indexed text and answering a ranking the table was
-not written to answer. Raising the one number would have refused every table already on disk, which
-is a wider refusal than the change deserves.
+All three refusals carry the status `unsupported`, so the command line exits 3. An application can
+then tell "upgrade and try again" apart from a wrong query and from an empty result.
 
-All three carry `unsupported`, so the command line exits 3 and a driver reports the status
-`unsupported` - the same answer every other "this engine has not built that" gives, and the reason
-an application can tell "upgrade and try again" from "your query is wrong", and either of those from
-"there are no matching rows".
+A search table with no facet column stores format `1`. A search table with a facet column stores
+format `2`, so a build that does not know facets refuses that table by name.
 
-The two virtual table records refuse the *table* rather than the *file*, and that is deliberate: a
-database has to open before the table in it can be dropped, and a database holding one index a
-reader cannot use is still a database whose other tables it can read perfectly well.
+A missing FTS5 layout record means "a layout this build can read". Files written before the record
+existed have none, and they open. The record is written by `CREATE VIRTUAL TABLE`, `rebuild` and
+`delete-all`. An ordinary insert does not write it, because a file written by 0.1.2 through 0.1.7 can
+hold rows in both FTS5 layouts. `term_value` in `crates/inillucent-ext/src/vtab/fts5/index.rs`
+reads such a file one row at a time.
 
-**A missing record means "some layout up to and including this build's", and is read rather than
-refused.** Every file published before the change that made every durable layout name itself has no FTS5 layout record, and a reader that
-refused them would refuse every database in existence. The FTS5 record is written at
-`CREATE VIRTUAL TABLE` and again by `rebuild` and `delete-all` - the two places the whole index is
-written from scratch - and deliberately **not** by an ordinary insert, because a file 0.1.2 through
-0.1.7 wrote may hold rows in both layouts at once and a record stamped on the next write would be
-claiming something the file cannot support. Those mixed files are read by the per-row rule in
-`fts5/index.rs::term_value`, which decides from the value's own type.
+Release 0.1.1 is the one published build that misreads a later file. It answers
+`WHERE note_fts MATCH 'segment'` with no rows on a file whose FTS5 index a later build wrote. Every
+other query on that file answers correctly in 0.1.1.
 
-### The promise, in four sentences
-
-- **A point release reads every file an earlier point release of the same minor version wrote**, and
-  every layout inside it.
-- **A build reads a file written by any earlier build, or refuses it by name.** There is no version
-  this project has dropped: the file format version was 1 from the first release until a later
-  release made it 2, and this build reads both. How far back that is *checked* is 0.1.1, the oldest release
-  with a fixture in `tests/interop/` - 0.1.0 was withdrawn the day after it was published and nobody
-  is running it.
-- **A build reads a file written by a later build where the later build changed nothing, and refuses
-  it by name where it did.** That is the direction the records above exist for, and it is the
-  direction that costs somebody their afternoon: an application that upgrades one machine and not
-  another has both builds pointed at the same file.
-- **A layout change is a minor version with a documented migration**, and the migration is
-  `inillucent-migrate` reading the older file and writing a new one, rather than an upgrade in place
-  that a crash can catch halfway.
-
-### What holds the promise
-
-`crates/inillucent-compat/tests/release_format_history.rs` runs every published release's own
-downloaded binary against a database this build just wrote, and asks it `tests/interop/verify.sql`
-and `tests/interop/retrieval.sql`. `tests/interop/<version>/` holds a database each release's own
-binary wrote, which the current build is asked the same questions of. The 0.1.1 `MATCH` difference
-is a row in that file's `KNOWN_GAPS`, asserted to **still happen** - a published binary's answer can
-never be fixed, so a change that made 0.1.1 read the new index turns the suite red and gets the row
-deleted. `crates/inillucent-compat/tests/format_refusal.rs` manufactures a record from a build that
-does not exist and checks each refusal, including through the command line's exit code.
+**Checked by:** `crates/inillucent-compat/tests/release_format_history.rs` runs every published
+release's own binary against a file this build wrote. The 0.1.1 `MATCH` answer is a row in its
+`KNOWN_GAPS` list. `tests/interop/<version>/` holds a file each release wrote, and
+`release_format.rs` opens each one, writes to it, crashes, and recovers. `format_refusal.rs` builds a
+record from a future build and checks each refusal, including the command line's exit code.
 
 ---
 
-## 6. Backup, restore and copies
+## 7. Backup, `VACUUM` and integrity checks
 
-- **`VACUUM`** is a *logical* rebuild, the same shape SQLite's own `sqlite3RunVacuum` takes: the
-  schema is replayed by running its `CREATE` statements again, the rows are copied back in through
-  the ordinary write path, and the result is written beside the database and **renamed** over it -
-  a single directory-entry update a crash cannot catch halfway, where the byte copy this used to do
-  could be interrupted at any offset. See `crates/inillucent-engine/src/rebuild.rs`.
-- **`VACUUM INTO`** writes a compacted copy the same way - by rebuilding rather than copying bytes,
-  because a byte copy reproduces the free pages and half-empty leaves it was asked to remove. It
-  never overwrites, which is what makes it safe in a backup script.
-- **Neither may run inside an explicit transaction.** A rebuild reads a schema and its rows, and a
-  transaction still open has neither committed.
-- Both paths are confined by `--root` (§8).
-- **Both act on the connection's own `Vfs`**, every step of the way: the rebuilt file is created
-  through it, the swap is `Vfs::rename`, the old log segments are deleted through it, and both
-  reopens carry the same handle. An application that supplies an encrypting or in-memory `Vfs` gets
-  a `VACUUM` that stays inside it.
-- **`Vfs::rename` is on the trait for this.** It is documented as an atomic replace of the target;
-  `OsVfs` is `std::fs::rename` plus the directory flush Unix needs and Windows does not, `MemoryVfs`
-  moves one entry of its directory map, and `SimVfs` delegates with a failpoint so a campaign can
-  cut inside it. The segments are removed by generating their names from the database's own name
-  rather than by listing the directory, because `inillucent_wal::segment::segment_name` makes the
-  name a function of the base path and a sequence number - so no listing method was needed on the
-  trait.
-- **This was not always true.** Until the review before the
-  public release caught this, the rebuild used `std::fs` directly and `vacuum_in_place` reopened with `ImportedDatabase::open`,
-  which constructs a fresh `OsVfs`. A connection on any other `Vfs` therefore got one of two
-  things from `VACUUM` or `PRAGMA incremental_vacuum`: a failure to find its own database, or - if a
-  real file happened to exist at the path string - a silent move onto the operating system's file
-  system for the rest of the session. `crates/inillucent-compat/tests/vacuum_on_vfs.rs` is the test
-  that says it cannot happen again, and `vacuum_crash.rs` is the crash campaign that became
-  possible: it runs on `SimVfs` like every other one, and one of its cases cuts the machine inside
-  the rename.
+| Command | What it does |
+|---|---|
+| `inillucent backup <file>` | runs a checkpoint, copies the database file to `<file>`, then opens the copy and checks every tree in it. A file already at `<file>` is replaced |
+| `inillucent restore <file>` | points this session at `<file>`. It changes no file. To replace a database, copy the backup over it |
+| `VACUUM` | rebuilds the database: it runs the stored `CREATE` statements again, copies every row back through the normal write path, writes the result beside the database, and renames it over the database |
+| `VACUUM INTO '<file>'` | writes a compacted copy the same way. It refuses a file that already exists, with `output file already exists` |
+| `inillucent checkpoint` | runs `PRAGMA wal_checkpoint`. Run it before you copy a database file by hand |
 
-`PRAGMA integrity_check` reads the file three times over, and the three find different things:
+A rename replaces a directory entry in one step, so a crash leaves either the old file or the new
+one. `VACUUM` and `VACUUM INTO` both fail inside an open transaction. `--root` confines both
+(section 8).
 
-- **every tree on its own** - each leaf parses, keys increase within a leaf and across the sibling
-  chain, every interior separator is the first key of the child it precedes, and the sibling chain
-  reaches as many leaves as the interior levels do;
-- **every page against every other page, and against the free map** - a page two trees both reach,
-  a page a tree reaches that the free map calls free, and a page the free map calls allocated that
-  no tree reaches;
-- **every index against its table** - a duplicate under one key in a `UNIQUE` index, a row whose
-  entry is missing, an entry naming a row the table does not hold.
+`VACUUM` does all its file work through the connection's own `Vfs`: it creates the new file, renames
+it with `Vfs::rename`, and deletes the old log segments through the same `Vfs`. An application that
+supplies an encrypting or in memory `Vfs` therefore gets a `VACUUM` that stays inside it. The code is
+in `crates/inillucent-engine/src/rebuild.rs`.
 
-**The page pass is there because the other two cannot see a page two tables both own.** Each tree
-is a well formed tree and neither is an index of the other, so both of them pass over a file where
-`SELECT count(*) FROM p` answers with `q`'s rows. That state loses rows durably and without a
-symptom at the time, and `PRAGMA integrity_check` called it `ok` until this check was added.
+**Checked by:** `crates/inillucent-compat/tests/vacuum_on_vfs.rs`, and `vacuum_crash.rs`, which
+crashes a simulated machine inside the rename.
 
-**The third of those is a leak - dead space rather than lost data - and it reached the pragma only
-later, when a fix made a dropped tree, an abandoned `CREATE` and a `REINDEX` all give their pages
-back**, because until then the engine left that state behind itself in two places, both measured
-earlier, when the integrity check was extended to account for every page. A rolled-back `CREATE TABLE` or `CREATE INDEX` kept its tree's root page: the
-undo is row-level, so nothing gave the allocation back. And `DROP TABLE` kept every page the table's
-out-of-line values sat on, because `release_tree` gave back the interior pages and the leaves and
-`paged::free_extent` is reached only from the tree's own write paths. `DELETE FROM t` before the drop
-gave that space back, and so did `VACUUM`.
+### `PRAGMA integrity_check` and `PRAGMA quick_check`
 
-Both are closed. An open transaction now records every tree it builds, and abandoning it gives those
-pages back to the in-memory free map - no log record, because an allocation that was never committed
-is one recovery never replays. And the list a commit drains now carries a dropped tree's out-of-line
-values as the references their leaves held, so the commit calls `paged::free_extent` for each: a
-value written as a run of whole pages takes its pages with it, and a value packed onto a page shared
-with other trees clears its slot and gives the page back only when the last live slot on it goes.
+| Pass | What it finds | `quick_check` | `integrity_check` |
+|---|---|---|---|
+| every tree on its own | a leaf that does not parse, keys out of order, a separator that does not match its child, a sibling chain that skips a leaf | yes | yes |
+| every page against every other page and the free map | a page two trees both reach, a page a tree reaches that the free map calls free, a page marked allocated that no tree reaches | yes | yes |
+| every index against its table | a duplicate in a `UNIQUE` index, a row with no index entry, an index entry for a row that is not there | no | yes |
 
-Neither fix moves that boundary. A drop's frees still happen at the commit and
-not at the statement, and a build's pages are released only on the path where there is going to be
-no commit. `ImportedDatabase::report_leaked_pages` is still there as a public entry point, because a
-leak is now the one state of the three that no statement produces - so showing the arm one means
-damaging a file on purpose.
+The page pass finds a page that two tables share. Each tree looks correct on its own in that case,
+so only the page pass can report it.
 
-**Wiring the arm to the pragma immediately found a third leak, which is the argument for having
-built the walk at all.** `REINDEX` rebuilds an index into a freshly allocated tree under a *new*
-handle and rewrites the catalog row to name it, and nothing released the tree it replaced: one
-tree's worth of pages per rebuild. Releasing it then turned up what the leak had been hiding.
-`rewrite` replaces a catalog entry and leaves the recorded *handle* alone - correct for every other
-caller, because they rewrite a row that goes on naming the tree it already named - so after a
-`REINDEX` the connection went on reading the index it had just replaced, and only a reopen moved it
-onto the new one. The rows agreed, so there was no symptom; the leaked page was the only trace. That
-is the same shape as the earlier bug where a dropped page could be freed before its transaction
-committed, and it is why a page that nothing reaches is worth reporting even
-though it loses no data.
+A page that is allocated and that no tree reaches is lost space. No data is lost with it. No
+statement leaves such a page behind: a dropped table, a `CREATE` that rolled back, and a `REINDEX`
+all give their pages back.
 
-**`PRAGMA quick_check` reads every tree and accounts for every page, and leaves out the index
-pass.** The two pragmas used to be one pass under two names, because there was no cheaper variant to
-offer. The obvious candidate for the cheaper one was to drop the page pass, and counting it said
-otherwise: over a table of sixty out-of-line values the whole page walk cost 4 page fetches on top
-of 133. It reads a tree's interior pages and its leaves, and it takes an out-of-line value's pages
-from the reference in the leaf it is already holding rather than by reading the value. The index
-pass is the expensive one - it walks each index and the table it is on and merges them - so that is
-what `quick_check` leaves out.
-
-The pinned SQLite draws its line in the same place: its `quick_check` omits index content against
-table content, `UNIQUE`, `CHECK` and `NOT NULL`, and still accounts for every page of the file.
-
-**Neither is a proof that a database opens**: the case study above records a file that answered `ok`
-and could not be opened, because the damage was in the log rather than in the file. If you are
-checking a database you are about to rely on, open it.
+Both checks read and never repair. Neither proves the database opens, because damage in the log is
+outside the file they read. To check a database before you rely on it, open it.
 
 ---
 
-## 7. What one request may spend
+## 8. Limits on one request, and `--root`
 
-`inillucent_base::budget` bounds rows, bytes and time, and carries the flag a cancel sets. It is read
-at two points, and the two answer different questions:
+### What one request may spend
 
-- **every batch a result collects** — this bounds what a caller is handed;
-- **every leaf of a scan** — this bounds what the engine *does on the way there*, so a `SELECT`
-  whose `WHERE` rejects everything after scanning a hundred million rows still stops. A row ceiling
-  alone would let that run to the end and then report zero rows.
+`inillucent_base::budget` limits the rows, the bytes and the time one request may use, and holds the
+flag `cancel` sets. The engine checks the budget at two points:
 
-**Unbounded by default, and that is deliberate.** An application that has linked the engine into its
-own process is not protecting itself from itself. A *server* handing a database to somebody else is
-the case that needs a bound, which is why `inillucent-mcp` asks for one and the command line does
-not: 10,000 rows, `limit=0` refused by name, a 1 MiB request line, an 8 MiB reply and a 60-second
-deadline.
+- every batch a result collects, which limits what the caller receives;
+- every leaf a scan reads, which limits the work done on the way. A `SELECT` whose `WHERE` rejects
+  every row still stops.
 
-`cancel` sets the flag from any thread; the statement fails `interrupted` and the connection stays
-usable. `inillucent capabilities` reports it as **partial**, and the limit it is reporting is *when*
-rather than whether: a single operator part-way through one indivisible piece of work finishes it
-first.
+| Program | Rows scanned | Row bytes | Time | Rows one call returns | Request and reply size |
+|---|---|---|---|---|---|
+| a Rust application, a driver, `inillucent`, `inillucent-shell` | no limit | no limit | no limit | no limit | no limit |
+| `inillucent-mcp` | 10,000,000 | 256 MiB | 60 seconds | 10,000. `limit=0` is refused by name. The default is 200 | a request line up to 1 MiB, a reply up to 8 MiB |
 
-**Checked by:** `crates/inillucent-compat/tests/budgets.rs`, which drives the shipped MCP binary
-over JSON-RPC — including a case asserting the command line has *no* ceiling, without which the
-others would pass for a change that put the ceiling everywhere.
+An application that links the engine has no reason to limit itself. A server that hands a database to
+an agent does, so only `inillucent-mcp` sets limits. The numbers are `Limits::served` in
+`crates/inillucent-base/src/budget.rs` and `MAX_ROWS`, `MAX_REQUEST_BYTES` and `MAX_RESPONSE_BYTES`
+in `crates/inillucent-cli/src/mcp.rs`.
 
----
+`cancel` sets its flag from any thread. The statement fails with the status `interrupted`, and the
+connection stays usable. `inillucent capabilities` reports `cancel` as `partial`, because an operator
+finishes the piece of work it is in before it sees the flag.
 
-## 8. Confinement
+**Checked by:** `crates/inillucent-compat/tests/budgets.rs`, which drives the shipped
+`inillucent-mcp` over `JSON-RPC`. One case checks that the command line has no limit, so a change
+that put the limit everywhere fails.
 
-`--root DIR` states that no file outside `DIR` is opened on behalf of a request. It is enforced in
-`inillucent-vfs`, which is the only thing that opens a file, so `ATTACH DATABASE`, `VACUUM INTO`,
-`backup`, `restore`, `import`, `export`, the database named on the command line and every file
-operation added later are covered by one decision.
+### `--root` confinement
 
-**The check resolves the path rather than reading it.** Every component is followed through the file
-system as it is appended, so a Windows junction or a Unix symbolic link below the root is replaced
-by what it points at before the check happens, and `..` pops the *resolved* path rather than the
-text. A path that does not exist yet stops at its deepest existing ancestor, which is what lets the
-same service authorise a file about to be created.
+```sh
+inillucent --root /srv/data --db /srv/data/app.rdb backup /tmp/copy.rdb
+# Error [invalid_state]: "/tmp/copy.rdb" resolves to /tmp/copy.rdb, which is outside /srv/data,
+# which this server is confined to.
+```
 
-**Checked by:** `crates/inillucent-compat/tests/confinement.rs`, which drives the shipped binaries
-and first proves the escape route works *without* `--root` — so the refusal is the confinement
-working rather than a junction the platform silently did not make.
+`--root DIR` means no file outside `DIR` is opened for a request. `inillucent-vfs` enforces it, and
+`inillucent-vfs` is the only crate that opens files. So `ATTACH DATABASE`, `VACUUM INTO`, `backup`,
+`restore`, `import`, `export` and the database named with `--db` all follow the same rule.
+
+The check resolves the real path. Each part of the path is followed through the file system, so a
+Windows junction or a Unix symbolic link inside the root is replaced by its target before the
+check. `..` removes the last part of the resolved path. A path that does not exist yet is checked up
+to its deepest existing parent, so a file about to be created can be allowed.
+
+**Checked by:** `crates/inillucent-compat/tests/confinement.rs`, which drives the shipped programs.
+It first shows that each escape works without `--root`, so a refusal proves the confinement works.
 
 ---
 
 ## 9. Extensions and virtual tables
 
-A module is handed the roots of its shadow tables by the host that already resolved them. It never
-resolves a name and never opens a transaction of its own, which is what keeps FTS5 and the R-Tree —
-databases inside a database, whose indexes live in ordinary tables — from needing to reach the
-catalog or the session.
+The host hands a virtual table module the root pages of its shadow tables. The module never looks up
+a name and never opens a transaction of its own. FTS5 and the R-Tree keep their indexes in ordinary
+tables, and this rule keeps them away from the catalog and the session.
 
-`inillucent-search` is registered one layer higher than the other modules, at the connection, because
-`Registry::with_builtins` sits two crates below the retrieval engine and registering it there would
-drag a vector index into every database that only wanted SQL.
+`inillucent_search` is registered at the connection, one layer above the other modules.
+`Registry::with_builtins` sits two crates below the retrieval engine, and registering it there would
+link a vector index into every database.
 
-**Checked by:** `fts5.rs`, `rtree.rs`, `vtab.rs`, `new_engine_vtab.rs` and `new_engine_vtab_stream.rs`.
+**Checked by:** `fts5.rs`, `rtree.rs`, `vtab.rs`, `new_engine_vtab.rs` and
+`new_engine_vtab_stream.rs`.
 
 ---
 
 ## 10. Keeping a vector index current
 
-A `inillucent_search` table keeps its index in five shadow tables. `%_content` holds the rows,
-`%_delta` is a log of what changed, `%_gen` holds published generations of the built index, `%_state`
-names which generation is current and how far it covers, and `%_config` records the declaration.
+An `inillucent_search` table keeps its index in five shadow tables:
 
-`%_content` holds one column per declared column, facets among them, so a facet costs a stored value
-per row and nothing else. What a facet changes is the build: its value goes into the index as an
-attribute of the row rather than into the text, which is what lets a search constrain it before it
-ranks. `%_config` records which columns those are, by name, so a reopen agrees with the build.
+| Shadow table | What it holds |
+|---|---|
+| `%_content` | the rows, one column per declared column, facets included |
+| `%_delta` | a log of the rows that changed since the index was last built |
+| `%_gen` | the published generations of the built index |
+| `%_state` | which generation is current and how far it covers |
+| `%_config` | the declaration, including which columns are facets |
 
-Four things happen to that index, and they cost different amounts.
+A facet's value goes into the index as an attribute of the row, so a search can filter on it before
+it ranks.
 
-**A write appends.** An `INSERT`, `UPDATE` or `DELETE` writes the row and one delta row. It does not
-touch the graph at all.
+Four operations touch the index, and each costs a different amount:
 
-**A query merges.** It loads the current generation, applies the delta rows above what that
-generation covers, and answers from the one index that results. BM25 scores are relative to a corpus,
-so a hit scored against the generation and a hit scored against a five row delta are two numbers on
-two scales and cannot be ordered together; merging first is the only version of this that gives a
-correct ranking. The merged index is cached on the connection and keyed by the exact delta entries
-that produced it, so a second query at the same snapshot costs nothing.
+| Operation | What it does |
+|---|---|
+| a write | an `INSERT`, `UPDATE` or `DELETE` writes the row and one delta row. It does not touch the HNSW graph |
+| a query | loads the current generation, applies the delta rows it does not cover, and answers from the merged index. BM25 scores depend on the whole corpus, so the delta must be merged before ranking. The merged index is cached on the connection for the same delta entries |
+| a commit that folds | when the delta log passes its limit, the commit inserts each pending entry into the current generation and publishes the result as the next generation. The graph work is one insert per delta entry |
+| `compact` or `rebuild` | `INSERT INTO docs(docs) VALUES('compact')` reads every row and builds a new graph. It removes the chunks earlier folds marked as deleted. It runs inside the caller's transaction like any other write |
 
-**A commit folds.** When the delta log has passed its threshold, the committing transaction loads the
-current generation, inserts each pending entry into it, and publishes the result as the next
-generation. **The graph work is one insert per delta entry**, not one per row in the table.
+### The settings
 
-**`compact` and `rebuild` build.** `INSERT INTO docs(docs) VALUES('compact')` reads every row and
-inserts every chunk into a fresh graph, which is how the chunks a fold tombstoned leave the index.
-The command is an ordinary write, so it lands atomically in the caller's transaction like any other.
+| Declaration | What it does | What it costs |
+|---|---|---|
+| no `compact` clause | the delta log folds at 1,024 entries (`COMPACT_FLOOR` in `crates/inillucent-search/src/options.rs`) | a fold builds a segment from its own batch and writes nothing else, so a commit's cost does not grow with the table |
+| `compact = N` | the delta log folds at `N` entries | a larger `N` means fewer, larger segments: less work at query time, more work in the commit that folds |
+| `compact = 0` | nothing folds automatically | the delta log grows without limit, and every query reads all of it until `compact` runs. A bulk load wants this, and the migration declares it |
+| `threads = N` | a fold and a build use `N` cores | `threads = 1` keeps the engine on one core and makes a fold about `N` times slower |
+| `mode = 'approximate'` (the default) | a vector search walks the HNSW graph | recall depends on the graph |
+| `mode = 'exact'` | a vector search compares every row | recall is 1.000, and a fold cannot change an answer |
 
-The commit path used to do the single-pass build. One ordinary `INSERT` could therefore pay
-a whole-corpus graph construction — nine and a half minutes over 598,560 chunks — inside a
-transaction the application could neither schedule nor interrupt.
+### What folding costs
 
-### What the two cost
-
-`inillucent-foldgate` runs both behaviours side by side: same corpus, same vectors, same commit
-boundaries, same generation sizes, one row per transaction, each arm in its own process. The `build`
-arm is the original single-pass behaviour, reproduced by declaring `compact = 0` and issuing the `compact`
-command at exactly the commits where the `fold` arm folds.
-
-40,000 documents, 64 dimensions, `mode = 'approximate'`, one row per transaction, on a
-24 core Windows machine:
+`inillucent-foldgate` runs two arms on the same corpus, vectors and commit boundaries, one row per
+transaction, each arm in its own process. The `fold` arm folds. The `build` arm declares
+`compact = 0` and runs `compact` at the commits where `fold` folds, which is the older behavior. The
+run below used 40,000 documents of 64 dimensions, `mode = 'approximate'`, on a 24 core Windows
+machine. It was recorded on this page on 9 September 2026.
 
 | | fold | build |
 |---|---:|---:|
 | chunks inserted into the graph, whole run | 35,579 | 255,989 |
-| chunks inserted by the worst single publish | 4,447 | 35,579 |
+| chunks inserted by the largest single publish | 4,447 | 35,579 |
 | generations published | 19 | 19 |
-| commit latency, median | 5.0 ms | 5.3 ms |
-| commit latency, 99th percentile | 17.1 ms | 17.2 ms |
-| commit latency, worst | 5,189.0 ms | 4,085.1 ms |
-| recall at ten, against the exhaustive scan | 0.704 | 0.637 |
-| peak resident memory | 180.9 MiB | 196.4 MiB |
+| commit time, median | 5.0 ms | 5.3 ms |
+| commit time, 99th percentile | 17.1 ms | 17.2 ms |
+| commit time, slowest | 5,189.0 ms | 4,085.1 ms |
+| recall at ten, against an exact scan | 0.704 | 0.637 |
+| peak memory | 180.9 MiB | 196.4 MiB |
 | database file | 204.6 MiB | 204.6 MiB |
 | reopen and answer the query set | 2,875.6 ms | 3,015.4 ms |
-| concurrent reads served | 14,700 at 5.2 ms median | 17,912 at 5.0 ms median |
-| concurrent reads refused | 0 | 0 |
+| reads served by a second connection during the run | 14,700 at 5.2 ms median | 17,912 at 5.0 ms median |
+| reads refused | 0 | 0 |
 
-Both arms answered the query set identically after being closed and opened again, with a reader on a
-second connection running throughout.
+Both arms answered the query set the same way after a close and a reopen. Folding did 7.2 times less
+graph work over the run, and its largest publish was 8.0 times smaller. The slowest commit was
+slower with folding, because a fold reads and decodes the generation it folds into before it writes
+the new one. The median and 99th percentile commits were the same or faster.
 
-The graph rows are what the change is about: folding does 7.2x less graph work over the run,
-and its worst single publish is 8.0x smaller. Recall did not pay for it — 0.704 against
-0.637 over 24 query vectors, so the folded graph answered at least as well as the one
-built in a single pass — and peak memory is lower, because a fold never holds every row's chunk and
-vector beside the index it is building.
-
-**One number went the wrong way, and it is the worst commit.** 5,189.0 ms against 4,085.1 ms.
-Publishing a generation is proportional to the corpus whichever way the graph was made: both arms
-serialise the whole index and write it, and a fold additionally reads and deserialises the generation
-it is folding into. At this corpus size those bytes are most of that commit, and the deserialise costs
-more than the 8.0x fewer graph inserts save. The median commit is 5.0 ms against
-5.3 ms and the 99th percentile is 17.1 ms against 17.2 ms, so it is the single
-publishing commit that is slower, not ordinary writes.
-
-The gap narrows as the corpus grows — at 12,000 documents it was 1,215 ms against 881 ms, and at
-40,000 it is 5,189.0 ms against 4,085.1 ms — because graph construction grows faster than a byte copy
-did. **Segmented generations closed the gap**, and the paragraph below says what they cost
-instead.
-
-### The supported operating range
-
-| declaration | what it does | what it costs |
-|---|---|---|
-| no `compact` clause | the delta log is **1,024 entries, a constant** | a commit's cost no longer grows with the table: a flush builds a segment out of its own batch and writes nothing else |
-| `compact = N` | the delta log is pinned at `N` entries | the graph work per flush is pinned at `N` inserts. Raising it trades more work per flush for fewer segments to fold at query time; lowering it does the opposite |
-| `compact = 0` | nothing is published automatically | the delta log grows without limit, and every query pays the whole log until `compact` is run. This is what a bulk load wants, and it is what the migration declares |
-| `threads = N` | a fold and a build use `N` cores | `threads = 1` keeps the engine on one core, which is what the rest of it does, and makes a fold roughly `N` times slower |
-| `mode = 'exact'` (the default) | every vector search compares every candidate | recall is 1.000 by construction and folding cannot change an answer. `mode = 'approximate'` is what makes a vector search use the graph, and what a corpus past a few tens of thousands of rows wants |
-
-**Choosing `N`.** A flush builds a segment out of its own batch and writes nothing else, so `N` is
-how much work one flush does rather than how much of the file it rewrites. Raising it means fewer,
-larger segments — less to fold at query time, more work in the commit that flushes. Lowering it means
-the opposite. Leave it alone unless one of those two is what you are short of.
-
-**The default stopped being a share of the table.** It was `max(1024, rows / 8)`, and the
-reason was sound at the time: a flush rewrote the whole base generation, so flushing often was
-expensive and the trigger had to grow with the table to keep a write's amortised cost independent of
-its size. Segments removed that premise — and while the trigger was still proportional to the table,
-**so was the batch each flush built**, which is exactly the cost segments exist to remove. Measured on
-100,000 documents, one row per commit, with segments in place: the median commit went from 0.152 ms to
-**0.032 ms** and the 99th percentile from 0.923 ms to **0.097 ms** when the trigger became the
-constant 1,024.
+Segmented generations then made the default fold limit a constant 1,024 entries. Measured on
+100,000 documents, one row per commit, the median commit went from 0.152 ms to 0.032 ms and the
+99th percentile from 0.923 ms to 0.097 ms. That run was recorded on this page on 13 September 2026.
 
 ### What an application can read back
 
-`%_state` is an ordinary table and these are ordinary rows:
+`%_state` is an ordinary table:
 
-| key | what it says |
+| Key | What it says |
 |---|---|
 | `rows` | live rows in `%_content` |
-| `chunks` | chunks in the current generation, live and tombstoned |
-| `inserted` | chunks the last generation build inserted into the graph |
-| `folds` | folds this generation lineage has taken; zero after a `compact` or `rebuild` |
+| `chunks` | chunks in the current generation, live and deleted |
+| `inserted` | chunks the last build inserted into the graph |
+| `folds` | folds since the last `compact` or `rebuild` |
 | `generation` | which generation is current |
-| `covered` | the highest delta sequence that generation already contains |
+| `covered` | the highest delta sequence the current generation contains |
 
-`chunks` minus `rows` is how many chunks the graph still holds that no live row points at. An update
-tombstones the old chunk and appends a new one, and only a single-pass build removes the old one. A
-large difference, or a large `folds`, is what says a `compact` is due.
+`chunks` minus `rows` is how many chunks the graph holds that no live row points at. An update marks
+the old chunk deleted and adds a new one, and only `compact` or `rebuild` removes the old one. When
+that difference or `folds` is large, run `compact`.
 
 ### What a failure leaves
 
-Publishing a generation is a sequence of ordinary writes inside the caller's transaction, so a crash
-anywhere in it leaves the old generation named by the old state rows and the delta log untouched —
-the same index, reachable by exactly the same reads. The superseded generation's rows stay in the
-file until `drop-old-generations` is run, because a snapshot opened before the swap is still reading
-them.
+Publishing a generation is a set of ordinary writes inside the caller's transaction. A crash during
+a publish leaves the old generation current and the delta log unchanged. The replaced generation's
+rows stay in the file until `drop-old-generations` runs, because a snapshot opened before the switch
+may still read them.
 
-A generation that cannot be read back is an error the query reports, and `rebuild` is the recovery:
-`%_content` is the authoritative copy of every row, so the index can always be built again from the
-database alone. `integrity-check` compares the recorded row count against the rows, checks
-every vector's width, and names any delta entry whose row is not there.
+If a generation cannot be read back, the query fails with an error, and `rebuild` repairs it.
+`%_content` holds every row, so the index can always be built again from the database alone.
+`integrity-check` compares the recorded row count with the rows, checks every vector's width, and
+names any delta entry whose row is missing.
 
 **Checked by:** `search.rs`, `search_crash.rs`, `vector.rs`, `new_engine_search.rs`, the graph's own
-cases in `crates/inillucent-core/src/hnsw.rs`, and `inillucent-foldgate` for the numbers.
+tests in `crates/inillucent-core/src/hnsw.rs`, and `inillucent-foldgate` for the numbers.
 
 ---
 
-## 11. Where to look next
+## 11. Where to go next
 
-| question | page |
+| Question | Page |
 |---|---|
-| which SQL runs, and what differs from SQLite | [SQL support](sql.md) |
-| how fast, and on what | [Performance](performance.md) |
-| the 416 measured cases | [Feature comparison](feature-comparison.md) |
-| the retrieval engine | [Architecture](architecture.md) |
-| what a crate may link | [Dependency policy](dependency-policy.md) |
-| what is not built yet | [Roadmap](roadmap.md) |
-| the crates, one by one | [Repository](repository.md) |
+| Which SQL runs, and what differs from SQLite? | [SQL support](sql.md) |
+| What does each pragma do? | [Pragmas](pragmas.md) |
+| How fast is it, and on what machine? | [Performance](performance.md) |
+| What do the 416 measured cases show? | [Feature comparison](feature-comparison.md) |
+| How does the retrieval engine work? | [Architecture](architecture.md) |
+| What may a crate link? | [Dependency policy](dependency-policy.md) |
+| What is not built yet? | [Roadmap](roadmap.md) |
+| What is each crate for? | [Repository](repository.md) |
+| What does a term mean? | [Glossary](glossary.md) |
