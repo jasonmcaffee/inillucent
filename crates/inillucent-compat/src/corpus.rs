@@ -91,8 +91,22 @@ pub fn fixture_path(name: &str) -> PathBuf {
 /// binary running twenty threads against one file hits that far more often
 /// than an application does.
 pub fn open_fixture(name: &str) -> DbResult<(OsVfs, Pager)> {
+    open_fixture_in(&corpus_dir(), name)
+}
+
+/// Opens a fixture read-only from a directory other than the corpus.
+///
+/// For a test that needs a folder no other process writes to. Other suites
+/// import the tracked fixtures, and an import used to write its rebuilt
+/// `<fixture>.rdb` into `compat/fixtures`, so a test that hashes that folder
+/// could see another process's file change while it read. Reading a private
+/// copy of the corpus gives that test a folder only it touches.
+///
+/// @param directory - the folder holding the fixture
+/// @param name - the fixture's file name
+pub fn open_fixture_in(directory: &Path, name: &str) -> DbResult<(OsVfs, Pager)> {
     let vfs = OsVfs::new();
-    let path = DbPath::new(fixture_path(name));
+    let path = DbPath::new(directory.join(name));
     let mut pager = Pager::open_read_only(&vfs, &path, PagerOptions::default())?;
     for attempt in 0..200u32 {
         match pager.begin_read() {

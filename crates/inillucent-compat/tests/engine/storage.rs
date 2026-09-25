@@ -688,15 +688,48 @@ fn every_malformed_fixture_is_refused() {
     }
 }
 
+/// Copies the SQLite files of the corpus into a folder only this test uses,
+/// and returns that folder.
+///
+/// **The test reads a copy because `compat/fixtures` is shared.** Other suites
+/// import the tracked fixtures, and each import writes and deletes files of its
+/// own. The nightly of 2026-09-25 failed here because `engine::sql`, running in
+/// another process, rebuilt `basic-p1024-utf8.db.rdb` in `compat/fixtures`
+/// between this test's two hashes of that folder. Nothing this test read had
+/// changed. Only the `.db` files and the manifest are copied, since those are
+/// the corpus; an `.rdb` another suite is writing may be half written.
+fn private_corpus() -> std::path::PathBuf {
+    let directory = std::env::temp_dir().join(format!(
+        "inillucent-storage-readonly-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    for entry in std::fs::read_dir(corpus::corpus_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if path.is_file() && (name.ends_with(".db") || name == "manifest.toml") {
+            std::fs::copy(&path, directory.join(&name)).unwrap();
+        }
+    }
+    directory
+}
+
 /// Reading a database must change no byte of it, no byte of any sibling file,
 /// and must create no journal, WAL, or shared-memory file.
 #[test]
 fn reading_changes_nothing_on_disk() {
-    let directory = corpus::corpus_dir();
+    let directory = private_corpus();
     let before = corpus::directory_snapshot(&directory).unwrap();
+    assert!(
+        before
+            .iter()
+            .any(|(name, _, _)| name == "basic-p1024-utf8.db"),
+        "the private copy holds the corpus"
+    );
 
     for fixture in valid_fixtures() {
-        let (_vfs, mut pager) = corpus::open_fixture(fixture.name).unwrap();
+        let (_vfs, mut pager) = corpus::open_fixture_in(&directory, fixture.name).unwrap();
         let _ = corpus::scan_database(&mut pager).unwrap();
         let _ = check::check_database(&mut pager, CheckLevel::Integrity).unwrap();
         pager.end_read().unwrap();
@@ -718,6 +751,7 @@ fn reading_changes_nothing_on_disk() {
             "reading left {name} behind"
         );
     }
+    let _ = std::fs::remove_dir_all(&directory);
 }
 
 /// A full traversal must return every pin it took, and leave the lock where it

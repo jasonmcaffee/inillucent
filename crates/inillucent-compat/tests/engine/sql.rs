@@ -11,7 +11,8 @@
 //! correct - it is not this engine's format. `import` is the one route a
 //! SQLite file reaches this engine by, reading it through
 //! `inillucent-sqlite-reader` and rebuilding it as PAX trees beside the source,
-//! `<source>.rdb`, so the fixture itself is still never written to. Every plan
+//! `<source>.rdb`. The source is a copy in this process's scratch folder (see
+//! `stage`), so neither the fixture nor its folder is written to. Every plan
 //! string these tests used to check for a bytecode opcode name -
 //! `SeekRowid`, `OpenIndex` - now checks for the operator chain's own prose,
 //! `SEARCH t USING INTEGER PRIMARY KEY (rowid=?)` and `USING ... INDEX`,
@@ -30,6 +31,27 @@ use inillucent_tree::datum::OwnedDatum;
 /// Returns the path of a shipped fixture.
 fn fixture(name: &str) -> PathBuf {
     workspace_root().join("compat/fixtures").join(name)
+}
+
+/// Copies a shipped fixture into this process's scratch folder and returns the
+/// copy.
+///
+/// **The import runs on the copy, never in `compat/fixtures`.** An import writes
+/// `<source>.rdb` beside its source. Done in place, that put a build product in
+/// a tracked folder, and `engine::storage::reading_changes_nothing_on_disk`
+/// hashes that folder from another process: the nightly of 2026-09-25 failed
+/// when this suite rebuilt `basic-p1024-utf8.db.rdb` between that test's two
+/// hashes. The folder is named for the process, so two runs of this binary do
+/// not share it either.
+///
+/// @param name - the fixture's file name
+fn stage(name: &str) -> PathBuf {
+    let directory =
+        std::env::temp_dir().join(format!("inillucent-engine-sql-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("the scratch folder is made");
+    let staged = directory.join(name);
+    std::fs::copy(fixture(name), &staged).expect("the fixture is staged");
+    staged
 }
 
 /// Imports a fixture exactly once for the whole test binary and returns the
@@ -58,7 +80,7 @@ fn imported_path(name: &str) -> PathBuf {
     if let Some(path) = cache.get(name) {
         return path.clone();
     }
-    let source = fixture(name);
+    let source = stage(name);
     let target = PathBuf::from(format!("{}.rdb", source.display()));
     let _ = std::fs::remove_file(&target);
     let database = Database::import(&source).expect("the fixture imports");

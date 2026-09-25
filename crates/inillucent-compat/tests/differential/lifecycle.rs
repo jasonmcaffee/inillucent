@@ -54,10 +54,19 @@ fn fixture() -> PathBuf {
 /// parallel, since libtest runs `#[test]`s on their own threads) would have
 /// raced rewriting the same file. Importing once, behind a `OnceLock`, and
 /// handing every test a plain `Database::open` on the result avoids that.
+///
+/// **The import runs on a copy in this process's scratch folder.** Imported in
+/// place, it wrote `select-corpus.db.rdb` into `compat/fixtures`, a tracked
+/// folder that `engine::storage` checks for changes from another process.
 fn imported_path() -> &'static PathBuf {
     static IMPORTED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     IMPORTED.get_or_init(|| {
-        Database::import(fixture())
+        let directory =
+            std::env::temp_dir().join(format!("inillucent-lifecycle-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("the scratch folder is made");
+        let staged = directory.join("select-corpus.db");
+        std::fs::copy(fixture(), &staged).expect("the fixture is staged");
+        Database::import(staged)
             .expect("the fixture imports")
             .path()
             .to_path_buf()
