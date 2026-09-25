@@ -55,14 +55,25 @@ env:
   # A runner has a network, so the HTTP client's test fetches the real files
   # the installer fetches instead of skipping.
   INILLUCENT_NETWORK_TESTS: 1
+  # The suite builds every crate in several feature sets, and
+  # `gates_fail_closed` builds the runner's whole selection a second time in a
+  # directory of its own. With full debug information that came to 126 GB on
+  # Linux, and the first Linux run of the suite stopped with "No space left on
+  # device". Line tables keep a file and line number in every backtrace, which
+  # is all a failure report here reads.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
 
 jobs:
   suite:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # The oracle build, the fixtures and 220 targets. The default 360 is enough
-    # today and would hide a suite that started taking twice as long.
-    timeout-minutes: 120
+    # The oracle build, the fixtures and 231 targets. The first Windows run to
+    # reach the suite took 98 minutes end to end, 77 of them in the suite, so
+    # 120 left too little room. The default 360 would hide a suite that started
+    # taking twice as long.
+    timeout-minutes: 150
     strategy:
       # Both operating systems always run. `fail-fast` would cancel Linux the
       # moment Windows went red, and "does it work on Linux" is the question
@@ -89,6 +100,19 @@ jobs:
             absent: --absent onnx --absent nikaya --absent previous-release
 
     steps:
+      # A Linux runner starts with about 20 GB free, and the suite needs more
+      # than that even with line tables only. These are SDKs the image ships
+      # and nothing here uses: .NET, Android, Haskell, CodeQL and the cached
+      # tool versions. Removing them frees about 30 GB.
+      - name: free disk space
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost
+          df -h /
+
       - uses: actions/checkout@v4
 
       # The toolchain is pinned in `rust-toolchain.toml` and rustup honours it,

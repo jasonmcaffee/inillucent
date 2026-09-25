@@ -326,7 +326,17 @@ fn place_asan_runtime(out: &Path) -> bool {
 }
 
 /// Returns the batch file that puts a C compiler on the path, on Windows.
+///
+/// Asked of `vswhere` first, the way `inillucent-testrun` finds the MSVC
+/// environment. The GitHub Windows image has Visual Studio 2026 at
+/// `Microsoft Visual Studio/18/Enterprise`, which the fixed list of 2022
+/// folders below did not name, so this suite skipped there with "no usable C
+/// compiler" on a machine that had one. The list stays for a machine whose
+/// installer has no `vswhere`.
 fn vcvars() -> Option<PathBuf> {
+    if let Some(found) = vcvars_from_vswhere() {
+        return Some(found);
+    }
     for root in [
         "C:/Program Files/Microsoft Visual Studio/2022/Community",
         "C:/Program Files/Microsoft Visual Studio/2022/Professional",
@@ -339,6 +349,39 @@ fn vcvars() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Asks `vswhere` for the newest Visual Studio with the C++ tools and returns
+/// its `vcvars64.bat`, or `None` when there is no `vswhere` or no such install.
+fn vcvars_from_vswhere() -> Option<PathBuf> {
+    let vswhere = PathBuf::from(std::env::var("ProgramFiles(x86)").ok()?)
+        .join("Microsoft Visual Studio/Installer/vswhere.exe");
+    if !vswhere.is_file() {
+        return None;
+    }
+    let found = Command::new(&vswhere)
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ])
+        .output()
+        .ok()?;
+    let install = String::from_utf8_lossy(&found.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if install.is_empty() {
+        return None;
+    }
+    let candidate = PathBuf::from(install).join("VC/Auxiliary/Build/vcvars64.bat");
+    candidate.is_file().then_some(candidate)
 }
 
 /// Compiles a C program from `tests/c` against the header and links it to a

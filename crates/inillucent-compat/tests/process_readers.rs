@@ -202,6 +202,30 @@ struct Seen {
     broken: Vec<String>,
     /// Whether the reader ever saw a row at all.
     saw_a_row: bool,
+    /// How the reader exited and what it wrote to standard error.
+    ///
+    /// Read only for a failure message. The first GitHub Windows run had all
+    /// four readers answer nothing at the sqlite-page arm, and the message
+    /// could not say why, because nothing read their standard error.
+    said: String,
+}
+
+/// Reads a child's standard error on a thread of its own.
+///
+/// On a thread because the grading loop reads standard output to its end
+/// first, and a reader that filled its standard error pipe meanwhile would
+/// stop and never close standard output.
+///
+/// @param child - the reader
+fn standard_error(child: &mut Child) -> std::thread::JoinHandle<String> {
+    let pipe = child.stderr.take();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(mut pipe) = pipe {
+            let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
+        }
+        text
+    })
 }
 
 /// Reads a reader's output and grades every answer.
@@ -212,12 +236,15 @@ fn graded(mut child: Child, who: usize) -> Seen {
     let Some(output) = child.stdout.take() else {
         panic!("reader {who} has no output");
     };
+    let errors = standard_error(&mut child);
     let mut seen = Seen {
         answers: 0,
         furthest: 0,
         broken: Vec::new(),
         saw_a_row: false,
+        said: String::new(),
     };
+    let mut unread: Vec<String> = Vec::new();
     let mut highest_so_far = 0u64;
     for line in BufReader::new(output).lines().map_while(Result::ok) {
         let numbers: Vec<u64> = line
@@ -226,6 +253,9 @@ fn graded(mut child: Child, who: usize) -> Seen {
             .filter_map(|part| part.trim().parse::<u64>().ok())
             .collect();
         let [count, highest, distinct, lowest] = numbers.as_slice() else {
+            if unread.len() < 5 {
+                unread.push(line);
+            }
             continue;
         };
         seen.answers = seen.answers.saturating_add(1);
@@ -259,7 +289,12 @@ fn graded(mut child: Child, who: usize) -> Seen {
         }
         highest_so_far = *highest;
     }
-    let _ = child.wait();
+    let status = child.wait();
+    let stderr = errors.join().unwrap_or_default();
+    seen.said = format!(
+        "reader {who} exited {status:?}; other output {unread:?}; standard error {:?}",
+        stderr.chars().take(400).collect::<String>()
+    );
     seen
 }
 
@@ -294,8 +329,10 @@ fn readers_beside_a_writer_see_only_prefixes(arm: &Arm) {
     let mut total_answers = 0usize;
     let mut saw_rows = 0usize;
     let mut furthest = 0u64;
+    let mut readers_said: Vec<String> = Vec::new();
     for (who, reader) in readers.into_iter().enumerate() {
         let seen = graded(reader, who);
+        readers_said.push(seen.said);
         total_answers = total_answers.saturating_add(seen.answers);
         if seen.saw_a_row {
             saw_rows = saw_rows.saturating_add(1);
@@ -329,14 +366,17 @@ fn readers_beside_a_writer_see_only_prefixes(arm: &Arm) {
     assert!(
         total_answers >= reads,
         "the four readers answered {total_answers} times between them at the {} arm, against \
-         {reads} asks each - so they were not reading while the writer wrote",
-        arm.name
+         {reads} asks each - so they were not reading while the writer wrote:\n  {}",
+        arm.name,
+        readers_said.join("\n  ")
     );
     assert_eq!(
-        saw_rows, READERS,
+        saw_rows,
+        READERS,
         "only {saw_rows} of {READERS} readers ever saw a row at the {} arm, so the rest graded \
-         an empty table",
-        arm.name
+         an empty table:\n  {}",
+        arm.name,
+        readers_said.join("\n  ")
     );
     assert!(
         furthest > 0,

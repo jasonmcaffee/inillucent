@@ -2219,6 +2219,14 @@ covers = ["inillucent-compat"]
 # what it needs is those three interpreters. A machine missing one skips with
 # that interpreter named, which is what `--strict` counts.
 requires = ["node", "go", "php"]
+# The rust and python records are not written by this suite. They come from
+# `inillucent-driver::conformance` and `inillucent-driver-capi::python_conformance`,
+# which are targets of their own in the same run, so a parallel run could grade
+# this suite before either had written anything. On a machine that keeps
+# `_agent_output/` a record from an earlier run hid that. In a fresh clone the
+# first GitHub Windows run failed with "these runners have produced no record"
+# for both. Running this one target after the rest makes the order certain.
+alone = true
 
 # The escape ledger's guard (task-2036). It resolves every `held_by` entry in
 # `tests/escapes.toml` against the tree, so a row that claims a test holds a
