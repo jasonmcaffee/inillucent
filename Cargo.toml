@@ -83,7 +83,7 @@ doc_lazy_continuation = "allow"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [workspace.package]
-version = "0.1.9"
+version = "1.0.29"
 repository = "https://github.com/Black-Rainbow-Labs/Inillucent"
 readme = "README.md"
 edition = "2021"
@@ -116,42 +116,42 @@ rust-version = "1.88"
 # First-party crates. Every internal edge is declared here so that the layering
 # test in inillucent-compat can read one table instead of walking the file system.
 # ---------------------------------------------------------------------------
-inillucent-alloc = { path = "crates/inillucent-alloc", version = "0.1.0" }
-inillucent-base = { path = "crates/inillucent-base", version = "0.1.0" }
-inillucent-vfs = { path = "crates/inillucent-vfs", version = "0.1.0" }
+inillucent-alloc = { path = "crates/inillucent-alloc", version = "1.0.29" }
+inillucent-base = { path = "crates/inillucent-base", version = "1.0.29" }
+inillucent-vfs = { path = "crates/inillucent-vfs", version = "1.0.29" }
 # **No version, deliberately.** `inillucent-sim` is `publish = false` and is a dev-dependency of
 # `inillucent-pool`, `-txn` and `-wal`, which are published. Cargo strips a dev-dependency that
 # carries no version requirement when it packages a crate; with one, it looks the crate up on
 # crates.io and `cargo publish --workspace` stops at "no matching package named `inillucent-sim`".
 inillucent-sim = { path = "crates/inillucent-sim" }
-inillucent-value = { path = "crates/inillucent-value", version = "0.1.0" }
-inillucent-pool = { path = "crates/inillucent-pool", version = "0.1.0" }
-inillucent-wal = { path = "crates/inillucent-wal", version = "0.1.0" }
-inillucent-tree = { path = "crates/inillucent-tree", version = "0.1.0" }
-inillucent-txn = { path = "crates/inillucent-txn", version = "0.1.0" }
-inillucent-model = { path = "crates/inillucent-model", version = "0.1.0" }
-inillucent-sqlite-reader = { path = "crates/inillucent-sqlite-reader", version = "0.1.0" }
-inillucent-scalar = { path = "crates/inillucent-scalar", version = "0.1.0" }
-inillucent-exec = { path = "crates/inillucent-exec", version = "0.1.0" }
-inillucent-engine = { path = "crates/inillucent-engine", version = "0.1.0" }
-inillucent-storage = { path = "crates/inillucent-storage", version = "0.1.0" }
-inillucent-transaction = { path = "crates/inillucent-transaction", version = "0.1.0" }
-inillucent-catalog = { path = "crates/inillucent-catalog", version = "0.1.0" }
-inillucent-sql = { path = "crates/inillucent-sql", version = "0.1.0" }
-inillucent-ext = { path = "crates/inillucent-ext", version = "0.1.0" }
-inillucent = { path = "crates/inillucent", version = "0.1.0" }
-inillucent-core = { path = "crates/inillucent-core", version = "0.1.0" }
-inillucent-cli = { path = "crates/inillucent-cli", version = "0.1.0" }
-inillucent-search = { path = "crates/inillucent-search", version = "0.1.0" }
-inillucent-migrate = { path = "crates/inillucent-migrate", version = "0.1.0" }
-inillucent-remote = { path = "crates/inillucent-remote", version = "0.1.0" }
+inillucent-value = { path = "crates/inillucent-value", version = "1.0.29" }
+inillucent-pool = { path = "crates/inillucent-pool", version = "1.0.29" }
+inillucent-wal = { path = "crates/inillucent-wal", version = "1.0.29" }
+inillucent-tree = { path = "crates/inillucent-tree", version = "1.0.29" }
+inillucent-txn = { path = "crates/inillucent-txn", version = "1.0.29" }
+inillucent-model = { path = "crates/inillucent-model", version = "1.0.29" }
+inillucent-sqlite-reader = { path = "crates/inillucent-sqlite-reader", version = "1.0.29" }
+inillucent-scalar = { path = "crates/inillucent-scalar", version = "1.0.29" }
+inillucent-exec = { path = "crates/inillucent-exec", version = "1.0.29" }
+inillucent-engine = { path = "crates/inillucent-engine", version = "1.0.29" }
+inillucent-storage = { path = "crates/inillucent-storage", version = "1.0.29" }
+inillucent-transaction = { path = "crates/inillucent-transaction", version = "1.0.29" }
+inillucent-catalog = { path = "crates/inillucent-catalog", version = "1.0.29" }
+inillucent-sql = { path = "crates/inillucent-sql", version = "1.0.29" }
+inillucent-ext = { path = "crates/inillucent-ext", version = "1.0.29" }
+inillucent = { path = "crates/inillucent", version = "1.0.29" }
+inillucent-core = { path = "crates/inillucent-core", version = "1.0.29" }
+inillucent-cli = { path = "crates/inillucent-cli", version = "1.0.29" }
+inillucent-search = { path = "crates/inillucent-search", version = "1.0.29" }
+inillucent-migrate = { path = "crates/inillucent-migrate", version = "1.0.29" }
+inillucent-remote = { path = "crates/inillucent-remote", version = "1.0.29" }
 # **No version, for the reason `inillucent-sim` above has none.** `inillucent-compat` is
 # `publish = false` and is now a dev-dependency of `inillucent`, which is published: cargo
 # strips a dev-dependency with no version requirement when it packages a crate, and with one
 # it would look this crate up on crates.io and stop.
 inillucent-compat = { path = "crates/inillucent-compat" }
-inillucent-driver = { path = "drivers/inillucent-driver", version = "0.1.0" }
-inillucent-driver-capi = { path = "drivers/inillucent-driver-capi", version = "0.1.0" }
+inillucent-driver = { path = "drivers/inillucent-driver", version = "1.0.29" }
+inillucent-driver-capi = { path = "drivers/inillucent-driver-capi", version = "1.0.29" }
 
 # ---------------------------------------------------------------------------
 # Third-party dependencies. docs/dependency-policy.md records why each one is
