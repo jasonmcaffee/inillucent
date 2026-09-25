@@ -128,15 +128,11 @@ impl Parser<'_> {
         let target = self.parse_from_term(JoinKind::Comma, false, JoinConstraint::None)?;
         self.expect_keyword(Keyword::SET)?;
         let assignments = self.parse_assignments()?;
+        // The whole FROM grammar a SELECT takes, joins and all: SQLite
+        // accepts `UPDATE t SET ... FROM a JOIN b ON ...`, and this parsed a
+        // comma list only, so `JOIN` was a syntax error.
         let from = if self.eat_keyword(Keyword::FROM)? {
-            let mut terms = Vec::new();
-            loop {
-                terms.push(self.parse_from_term(JoinKind::Comma, false, JoinConstraint::None)?);
-                if !self.eat(Punctuator::Comma)? {
-                    break;
-                }
-            }
-            terms
+            self.parse_from_clause()?
         } else {
             Vec::new()
         };

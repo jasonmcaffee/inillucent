@@ -110,9 +110,70 @@ pub(crate) struct WriteView<'a> {
     pub(crate) covering: &'a HashMap<u32, Vec<u32>>,
     /// What this connection has registered - `docs/roadmap.md` item 13.
     pub(crate) registry: &'a inillucent_ext::registry::Registry,
+    /// The virtual tables this connection has connected, so a statement
+    /// running inside the write can read one.
+    pub(crate) modules: &'a HashMap<Vec<u8>, crate::vtab::Connected>,
+    /// The connection's settings, for the limits and the `LIKE` rule a
+    /// module's scan is run under.
+    pub(crate) pragmas: &'a Pragmas,
+    /// The schema a module that introspects is handed.
+    pub(crate) schema_catalog: &'a inillucent_sql::catalog_view::StaticCatalog,
+    /// The trigger bodies' writes to virtual tables, in the order they fired.
+    ///
+    /// Made by the engine after the write hands the trees back; see
+    /// `WriteTarget::defer_module_write`.
+    pub(crate) deferred: Vec<inillucent_exec::dml::ModuleWrite>,
 }
 
 impl WriteView<'_> {
+    /// Runs a module's scan for a statement inside the write.
+    ///
+    /// The same scan the connection runs, reached through what the view
+    /// holds; see `crate::vtab::ScanReach`. The tables the connection answers
+    /// from its own state - the `pragma_*` functions and the four that describe
+    /// statements - are refused by name, because the view does not hold it.
+    ///
+    /// @param table - the FROM term's table
+    /// @param path - the access path the planner chose
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param needed - which of the term's columns the query reads
+    /// @param supplied - a lateral join's values, one per offered constraint
+    /// @param downstream - where the rows go
+    fn scan_inside(
+        &self,
+        table: &TableInfo,
+        path: &inillucent_sql::plan::AccessPath,
+        params: &Params,
+        needed: &inillucent_sql::bind::ColumnUse,
+        supplied: &[inillucent_tree::datum::OwnedDatum],
+        downstream: &mut dyn inillucent_exec::ops::Sink,
+    ) -> DbResult<bool> {
+        let answered_by_connection = table.folded.starts_with(b"pragma_")
+            || matches!(
+                table.folded.as_slice(),
+                b"bytecode" | b"tables_used" | b"sqlite_stmt" | b"completion"
+            );
+        if answered_by_connection {
+            let name = String::from_utf8_lossy(&table.name).into_owned();
+            return Err(refusal(format!(
+                "{name} cannot be read by a statement that runs inside a write, such as a \
+                 trigger body or a subquery in an UPDATE's SET"
+            ))
+            .with_unsupported(format!("reading {name} inside a write")));
+        }
+        let reach = crate::vtab::ScanReach {
+            modules: self.modules,
+            registry: self.registry,
+            pool: self.database.pool(),
+            trees: &*self.trees,
+            limits: self.pragmas.limits(),
+            catalog: self.schema_catalog,
+            folding: self,
+            case_sensitive_like: self.pragmas.case_sensitive_like(),
+        };
+        crate::vtab::scan_module(&reach, table, path, params, needed, supplied, downstream)
+    }
+
     /// Returns which schema a tree handle belongs to; `MAIN` when it is
     /// `main`'s.
     ///
@@ -177,6 +238,11 @@ impl WriteTarget for WriteView<'_> {
     fn captures(&self, root: u32) -> bool {
         self.indexed.contains_key(&root)
     }
+
+    fn defer_module_write(&mut self, write: inillucent_exec::dml::ModuleWrite) -> DbResult<()> {
+        self.deferred.push(write);
+        Ok(())
+    }
 }
 
 /// The write's own view of the trees, read as a planned query reads them.
@@ -188,10 +254,10 @@ impl WriteTarget for WriteView<'_> {
 /// planner - and so the ordinary index probe - rather than a scan written a
 /// second time inside the write path.
 ///
-/// A module's rows are the one thing it cannot answer: a virtual table's rows
-/// come from the module, the module is registered on the connection, and the
-/// connection is exactly what a write has split apart. A trigger body over a
-/// virtual table is refused by name rather than answered with nothing.
+/// A module's rows are read through the fields the view holds beside the
+/// trees, which are all a module's scan reads: see `crate::vtab::ScanReach`.
+/// A trigger body can therefore read an FTS5 table, and an `UPDATE` can set a
+/// column from `(SELECT ... FROM json_each(...))`.
 impl TreeCatalog for WriteView<'_> {
     fn pool_for(&self, root: u32) -> Option<&Pool> {
         let at = self.schema_of(root);
@@ -228,11 +294,24 @@ impl TreeCatalog for WriteView<'_> {
         needed: &inillucent_sql::bind::ColumnUse,
         downstream: &mut dyn inillucent_exec::ops::Sink,
     ) -> DbResult<bool> {
-        let _ = (path, params, needed, downstream);
-        Err(refusal(format!(
-            "a trigger body reads {}, which is a virtual table",
-            String::from_utf8_lossy(&table.name)
-        )))
+        self.scan_inside(table, path, params, needed, &[], downstream)
+    }
+
+    fn virtual_rows_supplied(
+        &self,
+        table: &TableInfo,
+        path: &inillucent_sql::plan::AccessPath,
+        params: &Params,
+        needed: &inillucent_sql::bind::ColumnUse,
+        supplied: &[inillucent_tree::datum::OwnedDatum],
+    ) -> DbResult<Option<Vec<Vec<inillucent_tree::datum::OwnedDatum>>>> {
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut sink = inillucent_exec::ops::CollectInto::new(std::rc::Rc::clone(&collected));
+        if !self.scan_inside(table, path, params, needed, supplied, &mut sink)? {
+            return Ok(None);
+        }
+        let rows = collected.borrow().clone();
+        Ok(Some(rows))
     }
 
     // `docs/roadmap.md` item 13.

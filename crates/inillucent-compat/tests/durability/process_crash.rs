@@ -396,8 +396,11 @@ fn a_killed_writer_leaves_every_acknowledged_transaction_whole() {
             reported.stdout
         );
         let said = field(&object, "text").and_then(text_of).unwrap_or_default();
+        // Either sentence: "recovered the log" when the kill left a
+        // transaction with no commit record to discard, and "replayed the
+        // log" when every transaction in the log had committed.
         assert!(
-            said.contains("recovered the log"),
+            said.contains("recovered the log") || said.contains("replayed the log"),
             "cut {cut}: the text form does not mention the recovery:\n{said}"
         );
 

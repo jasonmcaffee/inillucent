@@ -634,6 +634,45 @@ impl<'a> Binder<'a> {
         bound
     }
 
+    /// Binds an `UPDATE ... FROM` clause, after the target.
+    ///
+    /// Returns the terms the clause adds and the constraints its table-valued
+    /// functions' arguments became, which belong in the statement's `WHERE`.
+    ///
+    /// **A table-valued function's arguments are constraints on its hidden
+    /// columns**, which `bind_table_arguments` leaves for the statement's
+    /// `WHERE`. A `SELECT` adds them there; the `UPDATE` did not, so `UPDATE
+    /// todo SET position = j.key FROM json_each('[3,1,2]') AS j WHERE todo.id =
+    /// j.value` ran `json_each` with no document, found no rows and reported
+    /// success with nothing changed.
+    ///
+    /// **The terms this block owns, not every source bound since.** A derived
+    /// table binds its own inner terms into the same list, and taking
+    /// everything bound after the target made them top level terms of the
+    /// `UPDATE` as well: `FROM (SELECT id, pos FROM ord) AS p` joined `ord`
+    /// again, beside `p`, so every row was found once per row of `ord` and the
+    /// statement reported 9 changes for 3.
+    ///
+    /// @param from - the clause's terms, in written order
+    fn bind_update_from(
+        &mut self,
+        from: &[ast::FromTermId],
+    ) -> Result<(Vec<crate::bind::BoundSource>, Vec<BoundExpr>), ParseError> {
+        let before = self.sources.len();
+        for term in from {
+            self.bind_from_term(*term)?;
+        }
+        self.desugar_join_constraints(from)?;
+        let arguments = core::mem::take(&mut self.pending_constraints);
+        let joined: Vec<crate::bind::BoundSource> = self
+            .scope()
+            .iter()
+            .filter(|id| **id >= before)
+            .filter_map(|id| self.sources.get(*id).cloned())
+            .collect();
+        Ok((joined, arguments))
+    }
+
     /// Binds an `UPDATE` with its CTEs already in scope.
     fn bind_update_body(&mut self, update: &ast::Update) -> Result<BoundUpdate, ParseError> {
         if let Some(refusal) = order_without_limit(update.limited_at, update.limit, "UPDATE") {
@@ -645,12 +684,7 @@ impl<'a> Binder<'a> {
         // the lowest source number and every reference to an unqualified column
         // resolves to it first - which is SQLite's rule and the reason
         // `UPDATE t SET v = v + 1 FROM s` means the target's `v`.
-        let before = self.sources.len();
-        for term in &update.from {
-            self.bind_from_term(*term)?;
-        }
-        let joined: Vec<crate::bind::BoundSource> =
-            self.sources.get(before..).unwrap_or(&[]).to_vec();
+        let (joined, arguments) = self.bind_update_from(&update.from)?;
         let mut assignments = Vec::new();
         for (names, value) in &update.assignments {
             let bound = self.bind_expr(*value)?;
@@ -711,10 +745,16 @@ impl<'a> Binder<'a> {
         // ahead of them, because `column` says nothing for it and the order
         // only has to be stable.
         assignments.sort_by_key(|assignment| (assignment.rowid, assignment.column));
-        let filter = match update.filter {
+        let mut filter = match update.filter {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
         };
+        for constraint in arguments {
+            filter = Some(match filter.take() {
+                Some(existing) => BoundExpr::And(Box::new(existing), Box::new(constraint)),
+                None => constraint,
+            });
+        }
         let generated = self.bind_stored_generated(&table)?;
         let checks = self.bind_checks(&table)?;
         let not_null_defaults = self.bind_not_null_defaults(&table)?;

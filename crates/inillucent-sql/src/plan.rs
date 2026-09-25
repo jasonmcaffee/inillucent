@@ -859,7 +859,17 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
             match source.table.module.clone() {
                 Some(_) => choose_path(level, &ids, source, &select, &terms, &mut consumed, levers),
                 None => {
-                    let on_terms = outer_terms(source);
+                    // **Only a `LEFT` term may seek on its `ON`.** A `RIGHT`
+                    // or `FULL` term keeps the rows of its own that matched
+                    // nothing, and only a side read whole can know which
+                    // those are: `list l RIGHT JOIN todo t ON t.list_id =
+                    // l.id` with an index on `list_id` probed `todo` per list
+                    // and never produced the todo whose list does not exist.
+                    let on_terms = if source.join == JoinKind::Left {
+                        outer_terms(source)
+                    } else {
+                        Vec::new()
+                    };
                     let mut on_consumed = vec![false; on_terms.len()];
                     let chosen = choose_path(
                         level,

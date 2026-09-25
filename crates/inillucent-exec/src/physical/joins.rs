@@ -273,6 +273,52 @@ pub(crate) fn build_nested<'t>(
     {
         return build_materialised_join(plan, catalog, space, params, stage, index, downstream);
     }
+    let probe = ProbeStage {
+        stage,
+        index,
+        kind: join_kind_of(source_term.join),
+    };
+    build_index_probe(plan, catalog, space, params, &probe, downstream)
+}
+/// One inner stage to build as an index nested loop, and the kind to build it
+/// with.
+///
+/// A struct rather than three more arguments, so [`build_index_probe`] stays
+/// under the workspace's parameter count.
+struct ProbeStage<'a> {
+    /// The inner stage.
+    stage: &'a PreparedStage,
+    /// The stage's position.
+    index: usize,
+    /// The join kind the operator is built with.
+    kind: JoinKind,
+}
+/// Builds one inner stage as an index nested loop of a given kind.
+///
+/// The part of [`build_nested`] that runs once the shape is decided. It is its
+/// own function because [`build_probed_outer`] builds the stages of a left
+/// join's term as *inner* joins and tests the `ON` above them, and the kind is
+/// the only thing that differs.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees come from
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param probe - the stage, its position and the kind to build it with
+/// @param downstream - what to push joined rows into
+fn build_index_probe<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    space: &Space<'_>,
+    params: &Params,
+    probe: &ProbeStage<'_>,
+    downstream: Box<dyn Sink + 't>,
+) -> DbResult<Box<dyn Sink + 't>> {
+    let ProbeStage { stage, index, kind } = *probe;
+    let source_term = plan
+        .sources
+        .get(stage.term)
+        .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
     let tree = catalog
         .tree(stage.root)
         .ok_or_else(|| misuse(format!("no tree imported for root page {}", stage.root)))?;
@@ -336,7 +382,7 @@ pub(crate) fn build_nested<'t>(
         // A null-extended index row probes the table with a NULL identity and
         // finds nothing; an `Inner` lookup would drop it, which would lose the
         // very row the outer join produced it for.
-        join_kind_of(source_term.join),
+        kind,
         tree,
         // **This stage's pool, not the pipeline's.** The inner side of an index
         // nested loop is where a join across two databases reaches the second
@@ -347,6 +393,126 @@ pub(crate) fn build_nested<'t>(
         compiled,
         Projection::all(stage.width),
         full_key,
+        downstream,
+    )))
+}
+/// Returns the first stage of a left join term that has to be probed and then
+/// tested, when `index` is that term's last stage.
+///
+/// **The term the planner sought by part of its `ON`.** `plan_select_with`
+/// lets an outer term's `ON` equalities choose an index, and says
+/// `on_enforced` only when the seek consumed every conjunct. When it did not,
+/// the seek still stands, and neither [`build_nested`] shape can run it: the
+/// index nested loop has nowhere to test the rest of the `ON`, and the
+/// materialised join reads one stage while a non covering seek is two. So a
+/// `LEFT` term with a seek and a condition the seek did not consume is built
+/// by [`build_probed_outer`], across all its stages at once.
+///
+/// A `RIGHT` or `FULL` term never reaches here with a seek: the planner reads
+/// those whole, because only a materialised side can remember which of its
+/// rows matched.
+///
+/// @param plan - the planner's output
+/// @param stages - every prepared stage, outermost first
+/// @param index - the stage the chain builder is at
+pub(crate) fn probed_outer_first(
+    plan: &PhysicalPlan,
+    stages: &[PreparedStage],
+    index: usize,
+) -> Option<usize> {
+    let stage = stages.get(index)?;
+    let term = plan.sources.get(stage.term)?;
+    let sought = matches!(
+        term.path,
+        AccessPath::IndexSeek { .. } | AccessPath::RowidSeek { .. }
+    );
+    if term.join != inillucent_sql::ast::JoinKind::Left
+        || term.on_enforced
+        || term.on.is_none()
+        || !sought
+        || stage.kind == AccessKind::Materialised
+    {
+        return None;
+    }
+    // The last stage of the term, so the whole term is built in one step.
+    if stages
+        .get(index.saturating_add(1))
+        .is_some_and(|next| next.term == stage.term)
+    {
+        return None;
+    }
+    let mut first = index;
+    while first > 1
+        && stages
+            .get(first.saturating_sub(1))
+            .is_some_and(|before| before.term == stage.term)
+    {
+        first = first.saturating_sub(1);
+    }
+    Some(first)
+}
+/// Builds a left join term as its stages joined as inner joins, then its `ON`,
+/// answered one outer row at a time.
+///
+/// See [`crate::join::ProbedOuterJoin`] for why this shape exists.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees come from
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param stages - every prepared stage, outermost first
+/// @param term - the term's first stage to its last
+/// @param downstream - what to push joined rows into
+pub(crate) fn build_probed_outer<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    space: &Space<'_>,
+    params: &Params,
+    stages: &[PreparedStage],
+    term: std::ops::RangeInclusive<usize>,
+    downstream: Box<dyn Sink + 't>,
+) -> DbResult<Box<dyn Sink + 't>> {
+    let (first, last) = (*term.start(), *term.end());
+    let opening = stages
+        .get(first)
+        .ok_or_else(|| misuse("a left join term with no first stage"))?;
+    let closing = stages
+        .get(last)
+        .ok_or_else(|| misuse("a left join term with no last stage"))?;
+    let source_term = plan
+        .sources
+        .get(closing.term)
+        .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
+    let condition = source_term
+        .on
+        .as_ref()
+        .ok_or_else(|| misuse("a probed left join with no ON condition"))?;
+    let end = closing.offset.saturating_add(closing.width);
+    let joined_types: Vec<StaticType> = space
+        .types
+        .get(..end)
+        .map(<[StaticType]>::to_vec)
+        .unwrap_or_else(|| space.types.to_vec());
+    let translated = translate_scan(condition, space, params)?;
+    let test = compile(&translated, &joined_types)?;
+    let found = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let collect = Box::new(CollectInto::new(std::rc::Rc::clone(&found)));
+    let mut probe: Box<dyn Sink + 't> = Box::new(crate::ops::Filter::new(test, collect));
+    for index in (first..=last).rev() {
+        let stage = stages
+            .get(index)
+            .ok_or_else(|| misuse("a stage vanished while building"))?;
+        let inner = ProbeStage {
+            stage,
+            index,
+            kind: JoinKind::Inner,
+        };
+        probe = build_index_probe(plan, catalog, space, params, &inner, probe)?;
+    }
+    Ok(Box::new(crate::join::ProbedOuterJoin::new(
+        probe,
+        found,
+        end.saturating_sub(opening.offset),
         downstream,
     )))
 }
@@ -450,7 +616,7 @@ fn build_lateral_join<'t>(
         .sources
         .get(stage.term)
         .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
-    let AccessPath::VirtualScan { offer, chosen, .. } = &source_term.path else {
+    let AccessPath::VirtualScan { offer, .. } = &source_term.path else {
         return Err(misuse("a lateral join over a term that is not a module"));
     };
     let outer_types: Vec<StaticType> = space
@@ -458,19 +624,18 @@ fn build_lateral_join<'t>(
         .get(..stage.offset)
         .map(<[StaticType]>::to_vec)
         .unwrap_or_default();
-    // **In the order the module asked for them.** `best_index` chose which
-    // offered constraints feed `filter` and in what order; the values handed
-    // down have to arrive in that order, because the module reads them
-    // positionally.
-    let order: Vec<usize> = match chosen {
-        Some(choice) => choice.arguments.clone(),
-        None => (0..offer.len()).collect(),
-    };
-    let mut arguments = Vec::with_capacity(order.len());
-    for position in order {
-        let Some(constraint) = offer.get(position) else {
-            continue;
-        };
+    // **One value per offered constraint, in the order of the offer.** The
+    // engine picks the ones `best_index` claimed out of this list for
+    // `filter`, and tests the rest against each row the module produces. This
+    // used to be only the claimed values, in claimed order, while the recheck
+    // read the list by offer position: `FROM todo, json_each('[3,1,2]') AS j
+    // WHERE todo.id = j.value` offers the document and `value = todo.id`,
+    // `json_each` claims only the document, and the recheck of `value` read a
+    // position the list did not have. Every row of the join then came back
+    // with the module's columns NULL, and an `UPDATE ... FROM json_each`
+    // changed nothing.
+    let mut arguments = Vec::with_capacity(offer.len());
+    for constraint in offer {
         let translated = translate_scan(&constraint.value, space, params)?;
         arguments.push(compile(&translated, &outer_types)?);
     }
@@ -655,7 +820,15 @@ pub(crate) fn materialise_stage(
             // yet` for a shape the executor could already run. `run_compound`
             // is what the top level uses for exactly this plan, and a
             // materialised term wants what it produces: the rows, once.
-            if inner.compounds.is_empty() {
+            // **A windowed query is run as one too**, for the same reason: a
+            // window function inside a derived table, a CTE or a view was
+            // refused as "a window function reaching the pipeline builder",
+            // while the same query at the top level ran. Ranking in an inner
+            // query and filtering in an outer one is how "the rank of one row"
+            // and "the top N per group" are written.
+            if !inner.select.windows.is_empty() {
+                Ok(crate::windowpass::run_windowed(inner, catalog, params)?.0)
+            } else if inner.compounds.is_empty() {
                 let prepared = prepare(inner, catalog, ForcePlan::default())?;
                 Ok(run_prepared(inner, catalog, &prepared, params)?.0)
             } else {

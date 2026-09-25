@@ -115,7 +115,7 @@ pub(crate) use joins::{
     build_nested, is_scan_prefix, iterative_candidates, materialise_stage, order_equivalents,
     output_is_sorted_by, projected_prefix, reads_a_column, reads_a_parameter, skip_scan_applies,
 };
-pub(crate) use joins::{has_equi_key, join_kind_of};
+pub(crate) use joins::{build_probed_outer, has_equi_key, join_kind_of, probed_outer_first};
 pub(crate) use run::distinct_collations;
 pub(crate) use run::row_offset;
 pub(crate) use stages::{

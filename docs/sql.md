@@ -49,7 +49,7 @@ The probe is `tools/feature-probe/`. Many of its cases are also checked in as te
 direction, fails the build.
 
 The 416 cases are a list somebody wrote. Some constructs are outside that list, and inillucent
-refuses 17 of them by name. They are listed in [What is refused](#what-is-refused).
+refuses 16 of them by name. They are listed in [What is refused](#what-is-refused).
 
 ### Counted against SQLite's own lists
 
@@ -259,7 +259,6 @@ exit code 3.
 | `ATTACH ... KEY` | `ATTACH 'x.db' AS k KEY 'secret'` | `ATTACH` without `KEY`. inillucent has no encryption |
 | a row value `IN` a subquery | `(a, b) IN (SELECT x, y FROM s)` | `EXISTS (SELECT 1 FROM s WHERE x = a AND y = b)` |
 | an expression in `LIMIT` or `OFFSET` | `LIMIT 1 + 1` | a constant or a bound parameter |
-| a window function inside a table subquery in `FROM` | `SELECT * FROM (SELECT row_number() OVER () FROM t)` | the same query as a common table expression |
 | a partial index as an `ON CONFLICT` target | `ON CONFLICT(b) WHERE b > 0` | a full unique index |
 | an expression as an `ON CONFLICT` target | `ON CONFLICT(lower(a))` | a stored column with a unique index |
 | a correlated `IN` subquery with `GROUP BY`, `LIMIT` or a compound query | `a IN (SELECT a FROM t i WHERE i.id = o.id LIMIT 1)` | `EXISTS` with the condition written out |

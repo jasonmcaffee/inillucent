@@ -285,6 +285,10 @@ time. SQLite calls this serialized mode.
 that thread over a channel. The cost is one thread per shared database and one channel round trip
 per statement. `inillucent-driver` keeps `#![forbid(unsafe_code)]`.
 
+Every statement runs in one session, so the handles behave as one SQLite connection: a temporary
+table or trigger, an `ATTACH`, a connection pragma and `total_changes()` last from one statement to
+the next, whichever thread ran it.
+
 A transaction belongs to the database, and any statement run between `BEGIN` and `COMMIT` joins
 that transaction. So `SharedTransaction` holds the database's turn from `BEGIN` until the
 transaction commits or rolls back, and every other thread waits for the whole transaction.

@@ -283,12 +283,23 @@ flowchart TB
 ```
 
 Recovery runs on every open, before anything reads a page. It runs the same way for the main
-database and for every file `ATTACH` opens. When recovery replayed committed transactions, the command
-line prints a line such as this one:
+database and for every file `ATTACH` opens. When the log held committed transactions that the file
+did not have yet, the command line prints a line such as this one:
 
 ```text
-recovered the log: 3 records scanned, 2 applied, 1 transactions committed, 0 discarded.
+replayed the log: 1 committed transactions were in the log and not yet in the database file (3 records scanned, 2 applied). A connection that still has the file open, or one that ended before a checkpoint, wrote them.
 ```
+
+That is the normal state while another process has the database open and has not checkpointed, so
+the line says nothing about damage. When the log also held a transaction with no commit record, which
+is what a process killed in the middle of a transaction leaves, the line starts with `recovered the
+log` and counts the transactions it discarded:
+
+```text
+recovered the log: 3 records scanned, 2 applied, 1 transactions committed, 1 discarded.
+```
+
+With `--output json`, both cases carry the same `recovered` member with the five counts.
 
 Four rules make recovery safe:
 

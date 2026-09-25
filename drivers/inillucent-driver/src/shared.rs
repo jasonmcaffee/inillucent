@@ -499,6 +499,15 @@ fn own(
             return;
         }
     };
+    // **One session for the life of the database, not one per statement.** A
+    // shared database is one logical connection that several threads take
+    // turns on, the way SQLite's serialized mode is, and a session is what
+    // `temp`, `ATTACH`, the connection pragmas and `total_changes()` belong
+    // to. A new session per job lost all of them between statements: a
+    // `CREATE TEMP TRIGGER` was accepted and never fired, because the insert
+    // that should have fired it ran in a session that had no such trigger,
+    // and `total_changes()` answered 0 after every write.
+    let session = database.session().session();
     while let Ok(job) = jobs.recv() {
         match job {
             Job::Query {
@@ -507,7 +516,7 @@ fn own(
                 limit,
                 reply,
             } => {
-                let answered = database.session().query(&sql, &params, limit);
+                let answered = database.session_as(session).query(&sql, &params, limit);
                 if reply.send(answered).is_err() {
                     // The caller gave up waiting. Nothing to report to, and the
                     // statement has already run, so carry on with the next.
@@ -515,7 +524,7 @@ fn own(
                 }
             }
             Job::Batch { sql, reply } => {
-                let answered = database.session().execute_batch(&sql);
+                let answered = database.session_as(session).execute_batch(&sql);
                 if reply.send(answered).is_err() {
                     continue;
                 }

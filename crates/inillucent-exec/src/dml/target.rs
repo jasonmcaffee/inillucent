@@ -252,6 +252,61 @@ pub trait WriteTarget {
     fn captures(&self, _root: u32) -> bool {
         false
     }
+
+    /// Takes a trigger body's write to a virtual table, to be made after the
+    /// write this target is holding.
+    ///
+    /// **A module's write needs the connection, and a write has split the
+    /// connection apart.** The module is registered on the connection and its
+    /// shadow tables are written through a log the connection builds, while
+    /// this target holds the trees mutably for the statement that fired the
+    /// trigger. So the body's statement is kept, with its `OLD` and `NEW`
+    /// already substituted, and the engine runs it once the trees are handed
+    /// back, inside the same transaction, before the commit. A failure there
+    /// undoes the statement that fired the trigger, as a failure inside the
+    /// body would. This is how `CREATE TRIGGER ... AFTER INSERT ON todo BEGIN
+    /// INSERT INTO f (rowid, title) VALUES (NEW.id, NEW.title); END`, the
+    /// standard way to keep an FTS5 table in step with its content table,
+    /// works.
+    ///
+    /// The default refuses, for a target that has no connection to hand the
+    /// write to.
+    ///
+    /// @param write - the substituted statement and what it needs to run
+    fn defer_module_write(&mut self, write: ModuleWrite) -> DbResult<()> {
+        let _ = write;
+        crate::physical::unsupported("a trigger body that writes a virtual table, from here")
+    }
+}
+
+/// A trigger body's write to a virtual table, held until the trees are free.
+///
+/// See [`WriteTarget::defer_module_write`].
+#[derive(Debug)]
+pub enum ModuleWrite {
+    /// An `INSERT`, with the rows a `SELECT` source already produced.
+    Insert {
+        /// The statement, with `OLD` and `NEW` substituted.
+        statement: inillucent_sql::dml::BoundInsert,
+        /// The values it reads.
+        params: crate::physical::Params,
+        /// The rows of an `INSERT ... SELECT`, read inside the write.
+        selected: Option<Vec<Vec<inillucent_tree::datum::OwnedDatum>>>,
+    },
+    /// An `UPDATE`, whose rows are found when it runs.
+    Update {
+        /// The statement, with `OLD` and `NEW` substituted.
+        statement: inillucent_sql::dml::BoundUpdate,
+        /// The values it reads.
+        params: crate::physical::Params,
+    },
+    /// A `DELETE`, whose rows are found when it runs.
+    Delete {
+        /// The statement, with `OLD` and `NEW` substituted.
+        statement: inillucent_sql::dml::BoundDelete,
+        /// The values it reads.
+        params: crate::physical::Params,
+    },
 }
 /// The synthetic column space a write's expressions are translated against.
 ///

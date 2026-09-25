@@ -463,6 +463,7 @@ mod tests {
                         distinct: None,
                         filter: None,
                         order_by: Vec::new(),
+                        collation: inillucent_value::collation::Collation::Binary,
                     },
                     AggregateSpec {
                         kind: AggregateKind::Sum,
@@ -471,6 +472,7 @@ mod tests {
                         distinct: None,
                         filter: None,
                         order_by: Vec::new(),
+                        collation: inillucent_value::collation::Collation::Binary,
                     },
                 ],
                 Box::new(Collect::new()),

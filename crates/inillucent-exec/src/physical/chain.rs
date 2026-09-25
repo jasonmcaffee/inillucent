@@ -1386,7 +1386,41 @@ fn build_chain<'t>(
             chain,
         ));
     }
-    for index in (1..prepared.stages.len()).rev() {
+    let mut index = prepared.stages.len();
+    while index > 1 {
+        index = index.saturating_sub(1);
+        // A left join term sought by only part of its `ON` is built across
+        // all its stages at once; see `probed_outer_first`.
+        if let Some(first) = probed_outer_first(plan, &prepared.stages, index) {
+            chain = build_probed_outer(
+                plan,
+                catalog,
+                space,
+                params,
+                &prepared.stages,
+                first..=index,
+                chain,
+            )?;
+            for held in (first..=index).rev() {
+                if let Some(stage) = prepared.stages.get(held) {
+                    operators.add(|| {
+                        format!(
+                            "{} tree {}{}",
+                            stage.kind.describe(),
+                            stage.root,
+                            if stage.is_lookup {
+                                " (rowid lookup)"
+                            } else {
+                                ""
+                            }
+                        )
+                    });
+                }
+            }
+            operators.add(|| "LEFT JOIN TESTING ON PER OUTER ROW".to_string());
+            index = first;
+            continue;
+        }
         let stage = prepared
             .stages
             .get(index)

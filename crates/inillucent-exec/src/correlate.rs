@@ -375,6 +375,7 @@ fn prepare_blocks(
                 "a correlated subquery reading a column the joined row does not carry",
             );
         }
+        forget_parameterised(&mut block, &owned);
         // Prepared here, once, which is the whole of section 4.3.1: the plan
         // and the schema decide the structural choice and neither depends on
         // the outer row.
@@ -390,6 +391,38 @@ fn prepare_blocks(
         });
     }
     Ok(prepared)
+}
+
+/// Takes the outer terms a block no longer reads off every correlation list in
+/// it.
+///
+/// **The rewrite above has made them parameters, at every depth.** A derived
+/// table inside the block still listed the outer term it read, so the planner
+/// marked it correlated, and a correlated derived table as the block's first
+/// term was refused: `SELECT (SELECT json_group_array(name) FROM (SELECT g.name
+/// FROM todo_tag tt JOIN tag g ON g.id = tt.tag_id WHERE tt.todo_id = t.id
+/// ORDER BY g.name)) FROM todo t` answered "a correlated subquery as the
+/// outermost term". Once `t.id` is a parameter the derived table reads nothing
+/// outside the block, and it runs once per outer row like the rest of it.
+///
+/// @param block - the rewritten block
+/// @param owned - the source numbers the block and everything in it own
+fn forget_parameterised(block: &mut BoundSelect, owned: &[usize]) {
+    block.correlations.retain(|id| owned.contains(id));
+    for source in &mut block.sources {
+        match &mut source.rows {
+            SourceRows::Subquery(inner) => forget_parameterised(inner, owned),
+            SourceRows::Recursive(body) => {
+                for (_, arm) in body.seeds.iter_mut().chain(body.steps.iter_mut()) {
+                    forget_parameterised(arm, owned);
+                }
+            }
+            SourceRows::Table | SourceRows::RecursiveSelf { .. } => {}
+        }
+    }
+    for (_, arm) in &mut block.compounds {
+        forget_parameterised(arm, owned);
+    }
 }
 
 /// Returns the statement-wide source numbers a block's own FROM terms have.

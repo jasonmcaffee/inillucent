@@ -420,6 +420,9 @@ fn run_body(
     let same_table = |table: &inillucent_sql::catalog_view::TableInfo| {
         recursive && table.folded == trigger.table
     };
+    if let Some(write) = module_write(statement, target, firing, params)? {
+        return target.defer_module_write(write);
+    }
     match statement {
         BoundTriggerStatement::Select(select) => {
             let mut select = (**select).clone();
@@ -495,6 +498,80 @@ fn run_body(
             dml::delete_at(&delete, target, params, &keys, depth)?;
             Ok(())
         }
+    }
+}
+
+/// Returns a body statement that writes a virtual table, ready to be deferred.
+///
+/// `None` for a statement that writes an ordinary table, which the write path
+/// applies at once. A virtual table's write is the module's, and the module is
+/// reached through the connection the write has split apart, so the statement
+/// is substituted and folded here and handed to
+/// [`WriteTarget::defer_module_write`]. An `INSERT ... SELECT` reads its rows
+/// now, while `OLD` and `NEW` and the tables the statement has written so far
+/// are what SQLite would read.
+///
+/// @param statement - the body statement
+/// @param target - the file and its trees
+/// @param firing - the row images and the slots
+/// @param params - the body's own parameters
+fn module_write(
+    statement: &BoundTriggerStatement,
+    target: &dyn WriteTarget,
+    firing: &TriggerFiring<'_>,
+    params: &Params,
+) -> DbResult<Option<dml::ModuleWrite>> {
+    use inillucent_sql::catalog_view::TableKind;
+    let TriggerFiring {
+        rows, slots, rowid, ..
+    } = *firing;
+    match statement {
+        BoundTriggerStatement::Insert(insert) if insert.table.kind == TableKind::Virtual => {
+            let mut insert = (**insert).clone();
+            inillucent_sql::rewrite::rewrite_insert(
+                &mut insert,
+                &mut substitution(rows, slots, rowid),
+            );
+            let (selected, folded) = match &insert.source {
+                inillucent_sql::dml::BoundInsertSource::Select(select) => {
+                    (Some(run_select(select, target, params)?), None)
+                }
+                inillucent_sql::dml::BoundInsertSource::Values(values) => {
+                    let exprs: Vec<&BoundExpr> = values.iter().flatten().collect();
+                    let folded =
+                        crate::subquery::fold_expressions(&exprs, target.catalog(), params)?;
+                    (None, folded)
+                }
+            };
+            Ok(Some(dml::ModuleWrite::Insert {
+                statement: insert,
+                params: folded.unwrap_or_else(|| params.clone()),
+                selected,
+            }))
+        }
+        BoundTriggerStatement::Update(update) if update.table.kind == TableKind::Virtual => {
+            let mut update = (**update).clone();
+            inillucent_sql::rewrite::rewrite_update(
+                &mut update,
+                &mut substitution(rows, slots, rowid),
+            );
+            Ok(Some(dml::ModuleWrite::Update {
+                statement: update,
+                params: params.clone(),
+            }))
+        }
+        BoundTriggerStatement::Delete(delete) if delete.table.kind == TableKind::Virtual => {
+            let mut delete = (**delete).clone();
+            inillucent_sql::rewrite::rewrite_delete(
+                &mut delete,
+                &mut substitution(rows, slots, rowid),
+            );
+            Ok(Some(dml::ModuleWrite::Delete {
+                statement: delete,
+                params: params.clone(),
+            }))
+        }
+        _ => Ok(None),
     }
 }
 

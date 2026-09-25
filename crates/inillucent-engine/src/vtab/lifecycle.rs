@@ -329,6 +329,55 @@ impl crate::ImportedDatabase {
         params: &inillucent_exec::physical::Params,
         selected: Option<&[Vec<inillucent_tree::datum::OwnedDatum>]>,
     ) -> DbResult<Outcome> {
+        let mut changed = 0usize;
+        if let Err(error) = self.insert_rows_into_module(statement, params, selected, &mut changed)
+        {
+            self.record_changes(changed as i64, changed as i64);
+            return Err(error);
+        }
+        // Outside a transaction the statement is its own, so the module flushes
+        // and the log commits here; inside one, `commit_batch` does both.
+        if self.writing.batch().is_none() {
+            self.sync_modules()?;
+            self.seal()?;
+        }
+        // **A module's insert changed rows exactly as much as an ordinary
+        // one.** `changes()`/`total_changes()` read `last_changes`/
+        // `changed_ever`, and nothing on this path used to touch either -
+        // `Outcome::changes` was set correctly and nobody after this call ever
+        // read it, since the SQL-level `changes()` and `total_changes()`
+        // built-ins read the connection's own counters instead. A module has
+        // no triggers of its own, so every row this loop counted is both this
+        // statement's own change and the whole of what it changed.
+        self.record_changes(changed as i64, changed as i64);
+        Ok(Outcome {
+            rows: Vec::new(),
+            names: std::rc::Rc::new(Vec::new()),
+            changes: inillucent_exec::dml::Changes {
+                rows: changed,
+                ..Default::default()
+            },
+        })
+    }
+    /// Hands each row of an insert to the module, counting as it goes.
+    ///
+    /// The loop [`ImportedDatabase::insert_into_module`] and a trigger body's
+    /// deferred `INSERT` share. It neither flushes the module nor records the
+    /// count, because a deferred insert runs inside a statement that does both
+    /// once at its end. The count is written through `changed` so a caller
+    /// still has it when a row fails.
+    ///
+    /// @param statement - the bound insert
+    /// @param params - the values bound for this execution
+    /// @param selected - the rows a `SELECT` source produced, `None` for `VALUES`
+    /// @param changed - how many rows were handed over, advanced per row
+    pub(crate) fn insert_rows_into_module(
+        &mut self,
+        statement: &inillucent_sql::dml::BoundInsert,
+        params: &inillucent_exec::physical::Params,
+        selected: Option<&[Vec<inillucent_tree::datum::OwnedDatum>]>,
+        changed: &mut usize,
+    ) -> DbResult<()> {
         let count = match (&statement.source, selected) {
             (inillucent_sql::dml::BoundInsertSource::Values(values), _) => values.len(),
             (inillucent_sql::dml::BoundInsertSource::Select(_), Some(rows)) => rows.len(),
@@ -342,7 +391,6 @@ impl crate::ImportedDatabase {
             }
         };
         let width = statement.table.columns.len();
-        let mut changed = 0usize;
         for index in 0..count {
             // **Timed per row, because 4.2 ms of `extension.fts.build`'s 8.07
             // was believed to be here and is not (task-2025).** What this arm
@@ -425,35 +473,10 @@ impl crate::ImportedDatabase {
                 stages.values = stages.values.saturating_add(built);
                 stages.whole = stages.whole.saturating_add(whole);
             });
-            if let Err(error) = applied {
-                self.record_changes(changed as i64, changed as i64);
-                return Err(error);
-            }
-            changed = changed.saturating_add(1);
+            applied?;
+            *changed = changed.saturating_add(1);
         }
-        // Outside a transaction the statement is its own, so the module flushes
-        // and the log commits here; inside one, `commit_batch` does both.
-        if self.writing.batch().is_none() {
-            self.sync_modules()?;
-            self.seal()?;
-        }
-        // **A module's insert changed rows exactly as much as an ordinary
-        // one.** `changes()`/`total_changes()` read `last_changes`/
-        // `changed_ever`, and nothing on this path used to touch either -
-        // `Outcome::changes` was set correctly and nobody after this call ever
-        // read it, since the SQL-level `changes()` and `total_changes()`
-        // built-ins read the connection's own counters instead. A module has
-        // no triggers of its own, so every row this loop counted is both this
-        // statement's own change and the whole of what it changed.
-        self.record_changes(changed as i64, changed as i64);
-        Ok(Outcome {
-            rows: Vec::new(),
-            names: std::rc::Rc::new(Vec::new()),
-            changes: inillucent_exec::dml::Changes {
-                rows: changed,
-                ..Default::default()
-            },
-        })
+        Ok(())
     }
     /// Returns the values one row of an insert supplies, in statement order.
     ///

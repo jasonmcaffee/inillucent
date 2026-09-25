@@ -80,7 +80,7 @@ pub(crate) use target::{
     count_row, count_view_row, highest_rowid, key_columns, layout_of, missing_tree, read_row,
     row_exists, sources_for, Borrowed, Stored, Upsert, WriteRequest,
 };
-pub use target::{view_layout, Changes, RowSpace, Trees, WriteTarget};
+pub use target::{view_layout, Changes, ModuleWrite, RowSpace, Trees, WriteTarget};
 pub(crate) use update::{difference, same_key, Difference};
 pub use update::{update, update_at, update_at_cached, update_cached, UpdateSetup};
 

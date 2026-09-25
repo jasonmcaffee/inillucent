@@ -581,6 +581,11 @@ impl Eval for JsonCall {
             self.answer(batch, nth)?.value,
         )))
     }
+
+    fn json_value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<(Computed<'p>, bool)> {
+        let answer = self.answer(batch, nth)?;
+        Ok((Computed::Owned(OwnedDatum::from(answer.value)), answer.json))
+    }
 }
 
 /// Compiles one JSON call and its arguments, keeping the nesting.

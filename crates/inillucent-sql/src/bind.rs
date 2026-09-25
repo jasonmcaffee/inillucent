@@ -2841,7 +2841,10 @@ impl<'a> Binder<'a> {
     /// which the scope turns into the statement-wide source id. A parenthesised
     /// join has already flattened itself into the same list by the time this
     /// runs, so a position is always a real term.
-    fn desugar_join_constraints(&mut self, terms: &[ast::FromTermId]) -> Result<(), ParseError> {
+    pub(crate) fn desugar_join_constraints(
+        &mut self,
+        terms: &[ast::FromTermId],
+    ) -> Result<(), ParseError> {
         let base = self
             .scope()
             .len()

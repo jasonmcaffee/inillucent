@@ -287,7 +287,7 @@ impl Parser<'_> {
     }
 
     /// Parses a FROM clause: a first term followed by joined terms.
-    fn parse_from_clause(&mut self) -> Result<Vec<FromTermId>, ParseError> {
+    pub(super) fn parse_from_clause(&mut self) -> Result<Vec<FromTermId>, ParseError> {
         let mut terms = Vec::new();
         let first = self.parse_from_term(JoinKind::Comma, false, JoinConstraint::None)?;
         terms.push(first);

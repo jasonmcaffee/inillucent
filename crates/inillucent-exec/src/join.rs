@@ -48,9 +48,11 @@
 // path it had, so no call site in the workspace moved.
 mod hash;
 mod loops;
+mod probed;
 mod store;
 pub use hash::*;
 pub use loops::*;
+pub use probed::*;
 pub use store::*;
 pub(crate) use store::{encode_row_key, materialise};
 

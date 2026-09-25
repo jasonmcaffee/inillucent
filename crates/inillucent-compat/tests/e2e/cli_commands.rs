@@ -310,8 +310,9 @@ fn run_reports_a_failing_statement_as_a_failure() {
 /// engine's error. `AGENTS.md` promises that exit code 3 means "this engine
 /// has not built that", so a script can branch on it, and `exec` keeps that
 /// promise. A consumer's probe hit the difference with the same statement run
-/// both ways (task-2120). The statement here is `window_in_derived_table`,
-/// which the capability table declares `no`.
+/// both ways (task-2120). The statement here is `computed_limit`, which the
+/// capability table declares `no`. It was `window_in_derived_table` until that
+/// was built.
 ///
 /// The second half keeps the fix honest: a real typo in a script is still
 /// `syntax` with exit code 1, so the change is not a verb that reports
@@ -321,7 +322,7 @@ fn run_reports_an_unbuilt_construct_as_unsupported() {
     let binary = program("inillucent");
     let database = populated(&binary, "run-unsupported");
     let path = database.to_string_lossy().to_string();
-    let unbuilt = "SELECT n FROM (SELECT row_number() OVER () AS n FROM note)";
+    let unbuilt = "SELECT 1 FROM note LIMIT 1 + 1";
     let refused = run(
         &binary,
         &[

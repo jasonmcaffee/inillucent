@@ -205,8 +205,9 @@ is NULL in a `LEFT JOIN` row with no match. SQLite does the same.
 | `win.named` | Named WINDOW clause reused | same |
 
 `windows_match_the_oracle` in `crates/inillucent-compat/tests/differential/advanced_sql.rs` also compares window
-queries with the reference row for row. A window function inside a derived table in `FROM` is
-refused with exit code 3. Write the same query with a common table expression, which runs.
+queries with the reference row for row. A window function inside a derived table in `FROM`, a common
+table expression or a view runs, so a rank computed in an inner query can be filtered in an outer
+one.
 
 ### INSERT, UPDATE and DELETE
 
@@ -970,7 +971,7 @@ The 26 that answer differently with no arguments:
 
 ## Constructs the probe does not reach
 
-`inillucent capabilities` lists 49 capabilities reported by the engine. 17 of them are `no`: the
+`inillucent capabilities` lists 49 capabilities reported by the engine. 16 of them are `no`: the
 engine refuses the construct with exit code 3. None of these is one of the 416 cases. Most of them
 run in SQLite. One, writing to a view, is refused by SQLite too.
 
@@ -980,7 +981,6 @@ run in SQLite. One, writing to a view, is refused by SQLite too.
 | `row_value_in_subquery` | `(a, b) IN (SELECT x, y FROM s)` |
 | `computed_limit` | an expression in `LIMIT` or `OFFSET`, such as `LIMIT 1 + 1` |
 | `load_extension` | `load_extension()`. There is no C extension interface |
-| `window_in_derived_table` | a window function inside a subquery in `FROM` |
 | `compound_ordered_by_expression` | a compound select ordered by an expression |
 | `multi_column_vector_index` | a vector index over more than one column |
 | `writing_to_a_view` | `INSERT`, `UPDATE` or `DELETE` on a view with no `INSTEAD OF` trigger. SQLite refuses it too |

@@ -233,3 +233,62 @@ fn a_dropped_transaction_rolls_back_and_gives_the_turn_up() {
     drop(database);
     let _ = std::fs::remove_dir_all(path.parent().unwrap_or(&path));
 }
+
+/// A shared database is one session, so what a session holds lasts between
+/// statements.
+///
+/// **Each statement used to run in a session of its own.** A `CREATE TEMP
+/// TRIGGER` was accepted and then never fired, because the `INSERT` that should
+/// have fired it ran in a new session with no such trigger, and
+/// `total_changes()` answered 0 after every write because each question was
+/// asked of a session that had written nothing. SQLite's answers, from the
+/// pinned 3.53.4 shell over the same statements: the trigger writes `second`
+/// into `log`, and `total_changes()` is 2, then 4, then 6.
+#[test]
+fn a_shared_database_keeps_one_session_between_statements() {
+    let path = scratch("one-session");
+    let database = SharedDatabase::open(&path).expect("the database opens");
+    database
+        .execute_batch(
+            "CREATE TABLE todo (id INTEGER PRIMARY KEY, title TEXT); \
+             CREATE TABLE log (id INTEGER PRIMARY KEY, what TEXT)",
+        )
+        .expect("the schema is created");
+    database
+        .execute_batch(
+            "CREATE TEMP TRIGGER t8 AFTER INSERT ON todo BEGIN \
+             INSERT INTO log (what) VALUES (NEW.title); END",
+        )
+        .expect("the temporary trigger is created");
+    database
+        .execute("INSERT INTO todo (title) VALUES ('second')", &[])
+        .expect("the insert runs");
+    let rows = database
+        .query_all("SELECT what FROM log", &[])
+        .expect("the log reads");
+    assert_eq!(
+        rows.value(0, 0),
+        Some(&Value::Text("second".to_string())),
+        "the temporary trigger fired on the next statement"
+    );
+
+    database
+        .execute_batch("CREATE TABLE t (a)")
+        .expect("the table is created");
+    let before = count(&database, "SELECT total_changes()");
+    let inserted = database
+        .execute("INSERT INTO t VALUES (1), (2)", &[])
+        .expect("the insert runs");
+    assert_eq!(inserted, 2);
+    assert_eq!(count(&database, "SELECT total_changes()"), before + 2);
+    database
+        .execute("UPDATE t SET a = a + 1", &[])
+        .expect("the update runs");
+    assert_eq!(count(&database, "SELECT total_changes()"), before + 4);
+    database
+        .execute("UPDATE t SET a = a + 1", &[])
+        .expect("the update runs");
+    assert_eq!(count(&database, "SELECT total_changes()"), before + 6);
+    drop(database);
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch directory"));
+}

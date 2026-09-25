@@ -87,18 +87,10 @@ impl crate::ImportedDatabase {
         keys: &[Vec<OwnedDatum>],
     ) -> DbResult<Outcome> {
         let mut changed = 0usize;
-        for key in keys {
-            let Some(rowid) = key.first() else { continue };
-            if let Err(error) = self.change_module(
-                &statement.table.name,
-                &inillucent_sql::vtab::Change::Delete(
-                    inillucent_value::Value::from(&rowid.borrow()).into_owned()?,
-                ),
-            ) {
-                self.record_changes(changed as i64, changed as i64);
-                return Err(error);
-            }
-            changed = changed.saturating_add(1);
+        if let Err(error) = self.delete_rows_from_module(&statement.table.name, keys, &mut changed)
+        {
+            self.record_changes(changed as i64, changed as i64);
+            return Err(error);
         }
         if self.writing.batch().is_none() {
             self.sync_modules()?;
@@ -114,6 +106,119 @@ impl crate::ImportedDatabase {
                 ..Default::default()
             },
         })
+    }
+
+    /// Tells a module to remove each row by rowid, counting as it goes.
+    ///
+    /// The loop [`ImportedDatabase::delete_from_module`] and a trigger body's
+    /// deferred `DELETE` share. The count is written through `changed` so a
+    /// caller still has it when a row fails.
+    ///
+    /// @param name - the virtual table's name
+    /// @param keys - the rowids, one per row
+    /// @param changed - how many rows were removed, advanced per row
+    pub(crate) fn delete_rows_from_module(
+        &mut self,
+        name: &[u8],
+        keys: &[Vec<OwnedDatum>],
+        changed: &mut usize,
+    ) -> DbResult<()> {
+        for key in keys {
+            let Some(rowid) = key.first() else { continue };
+            self.change_module(
+                name,
+                &inillucent_sql::vtab::Change::Delete(
+                    inillucent_value::Value::from(&rowid.borrow()).into_owned()?,
+                ),
+            )?;
+            *changed = changed.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Makes a statement's deferred writes to virtual tables, in order.
+    ///
+    /// Returns how many rows they changed, for `total_changes()`. See
+    /// `WriteTarget::defer_module_write` for why they wait until here.
+    ///
+    /// @param writes - the substituted statements, in the order they fired
+    pub(crate) fn run_module_writes(
+        &mut self,
+        writes: Vec<inillucent_exec::dml::ModuleWrite>,
+    ) -> DbResult<i64> {
+        let mut total = 0i64;
+        for write in writes {
+            let mut changed = 0usize;
+            match write {
+                inillucent_exec::dml::ModuleWrite::Insert {
+                    statement,
+                    params,
+                    selected,
+                } => {
+                    self.insert_rows_into_module(
+                        &statement,
+                        &params,
+                        selected.as_deref(),
+                        &mut changed,
+                    )?;
+                }
+                inillucent_exec::dml::ModuleWrite::Update { statement, params } => {
+                    let keys = self.module_keys(
+                        &statement.table,
+                        statement.source,
+                        statement.filter.as_ref(),
+                        KeptRows::of(&statement.order_by, &statement.limit, &statement.offset),
+                        &params,
+                    )?;
+                    let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
+                        .assignments
+                        .iter()
+                        .map(|assignment| &assignment.value)
+                        .collect();
+                    let folded =
+                        inillucent_exec::subquery::fold_expressions(&assigned, &*self, &params)?;
+                    changed =
+                        self.update_module(&statement, &keys, folded.as_ref().unwrap_or(&params))?;
+                }
+                inillucent_exec::dml::ModuleWrite::Delete { statement, params } => {
+                    let keys = self.module_keys(
+                        &statement.table,
+                        statement.source,
+                        statement.filter.as_ref(),
+                        KeptRows::of(&statement.order_by, &statement.limit, &statement.offset),
+                        &params,
+                    )?;
+                    self.delete_rows_from_module(&statement.table.name, &keys, &mut changed)?;
+                }
+            }
+            total = total.saturating_add(changed as i64);
+        }
+        Ok(total)
+    }
+
+    /// Returns the rowids a write to a virtual table will change.
+    ///
+    /// The query a typed `UPDATE` or `DELETE` of a virtual table runs, run
+    /// once rather than cached, for a trigger body's deferred write.
+    ///
+    /// @param table - the virtual table
+    /// @param source - the statement-wide number of its FROM term
+    /// @param filter - the `WHERE`
+    /// @param kept - the `ORDER BY`, `LIMIT` and `OFFSET`
+    /// @param params - the values bound to `?1`, `?2`, ...
+    fn module_keys(
+        &self,
+        table: &TableInfo,
+        source: usize,
+        filter: Option<&inillucent_sql::bind::BoundExpr>,
+        kept: KeptRows<'_>,
+        params: &Params,
+    ) -> DbResult<Vec<Vec<OwnedDatum>>> {
+        let mut select = dml::module_keys_query(table, source, filter, kept.limit, kept.offset);
+        select.order_by = kept.order_by.to_vec();
+        let plan = plan_select_with(select, self.pragmas.levers());
+        let prepared = physical::prepare_any(&plan, self)?;
+        Ok(physical::run_any_prepared(&plan, self, &prepared, params)?.0)
     }
 
     /// Runs one already-compiled statement, without settling anything after it.
@@ -811,7 +916,7 @@ impl crate::ImportedDatabase {
             Logs::Many(held)
         };
         let session = self.session_state.session.get();
-        let (applied, wrote, counted) = {
+        let (applied, wrote, counted, deferred) = {
             let mut view = WriteView {
                 database: &mut self.storage.database,
                 attached: &mut self.session_state.attached,
@@ -825,6 +930,10 @@ impl crate::ImportedDatabase {
                 indexed: &self.session_state.vector_indexes,
                 counted: std::cell::Cell::new((0, 0, None)),
                 registry: &self.session_state.registry,
+                modules: &self.session_state.virtual_tables,
+                pragmas: &self.pragmas,
+                schema_catalog: &self.schema.catalog,
+                deferred: Vec::new(),
             };
             // **Not `?`.** A failed statement has writes of its own to put
             // back, and the borrow of the trees has to end before anything can.
@@ -840,7 +949,8 @@ impl crate::ImportedDatabase {
             // a statement that failed partway still wrote, and `OR FAIL` keeps
             // it - so the counters have to see it.
             let counted = view.rows_written();
-            (applied, wrote, counted)
+            let deferred = std::mem::take(&mut view.deferred);
+            (applied, wrote, counted, deferred)
         };
         let changes = match applied {
             Ok(changes) => changes,
@@ -865,6 +975,71 @@ impl crate::ImportedDatabase {
             }
         };
         self.writing.set_touched(self.writing.touched() | wrote);
+        let module_rows = match self.follow_modules(deferred, &changes, autocommit) {
+            Ok(rows) => rows,
+            Err(error) => return Err(self.abandon(error, mark, autocommit, wrote, txn)),
+        };
+        if autocommit {
+            // **Nothing else can abandon what an autocommit statement wrote**,
+            // so the before-images stop being useful here rather than growing
+            // for the life of the connection. Held until now so that everything
+            // above can still be undone, and cleared before the commit so that
+            // a commit which fails leaves nothing behind for the next
+            // statement's mark to sit on top of.
+            self.writing.undo().borrow_mut().clear();
+        }
+        self.remember_rowid(changes.last_rowid);
+        // **Read off the view rather than off `Changes`**, so the success path
+        // and the failure path count the same way and a trigger's rows land in
+        // `total_changes()` where SQLite puts them. A trigger's rows in a
+        // virtual table count there too.
+        self.record_changes(counted.0, counted.1.saturating_add(module_rows));
+        let committed = if autocommit {
+            let participants = self.writing.replace_touched(0);
+            self.commit_across(txn, participants)
+        } else {
+            Ok(())
+        };
+        // **Cleared whether the commit worked or not**, because what comes next
+        // is a different statement either way, and a number left behind here
+        // would be handed to it by `current_txn()`.
+        self.writing.set_statement_txn(None);
+        committed?;
+        Ok(Outcome {
+            rows: changes.returned.clone(),
+            names: std::rc::Rc::new(names),
+            changes,
+        })
+    }
+
+    /// Does the module work a statement's tree writes leave, before the commit.
+    ///
+    /// A trigger body's deferred writes to virtual tables, then the vector
+    /// indexes that follow the tables written, then one `sync` of the modules
+    /// when the statement is its own transaction. Returns how many rows the
+    /// deferred writes changed, for `total_changes()`. The caller abandons the
+    /// statement on an error, so a failure here undoes what the trees took.
+    ///
+    /// @param deferred - the trigger bodies' writes to virtual tables
+    /// @param changes - what the tree writes reported
+    /// @param autocommit - whether the statement is its own transaction
+    fn follow_modules(
+        &mut self,
+        deferred: Vec<inillucent_exec::dml::ModuleWrite>,
+        changes: &Changes,
+        autocommit: bool,
+    ) -> DbResult<i64> {
+        // **A trigger body's writes to a virtual table, now that the trees
+        // are free.** In the order they fired, in this statement's transaction,
+        // and before the commit, so the FTS5 table a trigger keeps in step with
+        // its content table commits and rolls back with it. A failure here
+        // undoes the statement, as a failure inside the body would have.
+        let ran_modules = !deferred.is_empty();
+        let module_rows = if ran_modules {
+            self.run_module_writes(deferred)?
+        } else {
+            0
+        };
         // **Inside the same transaction, and after the trees rather than
         // during them.** The module is registered on the connection and the
         // write borrowed the connection apart, so this is the first moment both
@@ -886,53 +1061,18 @@ impl crate::ImportedDatabase {
         // `examples/rag-agent`. A fold is bounded by what this transaction
         // wrote and returns at once when the log is short, so an ordinary small
         // write pays a `sync` that does nothing.
-        match self.follow_vector_indexes(&changes) {
-            Err(error) => return Err(self.abandon(error, mark, autocommit, wrote, txn)),
-            // **Only outside a batch**, which is the same guard the
-            // `VirtualUpdate` and `VirtualDelete` arms take. `sync_modules`
-            // ends with `commit` on every connected module, and telling a
-            // module its transaction is over while the batch is still open
-            // would throw away what the rest of the batch is still adding to.
-            // Inside a batch, `commit_batch` syncs them once at the end, which
-            // is also cheaper: a thousand-row transaction folds once.
-            Ok(true) if autocommit => {
-                if let Err(error) = self.sync_modules() {
-                    return Err(self.abandon(error, mark, autocommit, wrote, txn));
-                }
-            }
-            Ok(true) => {}
-            Ok(false) => {}
+        let followed = self.follow_vector_indexes(changes)?;
+        // **Only outside a batch**, which is the same guard the
+        // `VirtualUpdate` and `VirtualDelete` arms take. `sync_modules` ends
+        // with `commit` on every connected module, and telling a module its
+        // transaction is over while the batch is still open would throw away
+        // what the rest of the batch is still adding to. Inside a batch,
+        // `commit_batch` syncs them once at the end, which is also cheaper: a
+        // thousand-row transaction folds once.
+        if (followed || ran_modules) && autocommit {
+            self.sync_modules()?;
         }
-        if autocommit {
-            // **Nothing else can abandon what an autocommit statement wrote**,
-            // so the before-images stop being useful here rather than growing
-            // for the life of the connection. Held until now so that everything
-            // above can still be undone, and cleared before the commit so that
-            // a commit which fails leaves nothing behind for the next
-            // statement's mark to sit on top of.
-            self.writing.undo().borrow_mut().clear();
-        }
-        self.remember_rowid(changes.last_rowid);
-        // **Read off the view rather than off `Changes`**, so the success path
-        // and the failure path count the same way and a trigger's rows land in
-        // `total_changes()` where SQLite puts them.
-        self.record_changes(counted.0, counted.1);
-        let committed = if autocommit {
-            let participants = self.writing.replace_touched(0);
-            self.commit_across(txn, participants)
-        } else {
-            Ok(())
-        };
-        // **Cleared whether the commit worked or not**, because what comes next
-        // is a different statement either way, and a number left behind here
-        // would be handed to it by `current_txn()`.
-        self.writing.set_statement_txn(None);
-        committed?;
-        Ok(Outcome {
-            rows: changes.returned.clone(),
-            names: std::rc::Rc::new(names),
-            changes,
-        })
+        Ok(module_rows)
     }
 
     /// Puts back what a failed statement wrote, as its algorithm says.

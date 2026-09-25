@@ -478,15 +478,82 @@ impl ImportedDatabase {
         supplied: &[inillucent_tree::datum::OwnedDatum],
         downstream: &mut dyn inillucent_exec::ops::Sink,
     ) -> DbResult<bool> {
+        let AccessPath::VirtualScan { offer, .. } = path else {
+            return Ok(false);
+        };
+        if let Some(answered) = self.eponymous_rows(table, offer, params, downstream)? {
+            return Ok(answered);
+        }
+        let reach = ScanReach {
+            modules: &self.session_state.virtual_tables,
+            registry: &self.session_state.registry,
+            pool: self.storage.database.pool(),
+            trees: &self.schema.trees,
+            limits: self.pragmas.limits(),
+            catalog: &self.schema.catalog,
+            folding: self,
+            case_sensitive_like: self.pragmas.case_sensitive_like(),
+        };
+        scan_module(&reach, table, path, params, needed, supplied, downstream)
+    }
+}
+
+/// What a module's scan reads, whoever is holding the connection.
+///
+/// **The connection and a write both have these, and only these are needed.**
+/// A scan used to be a method of the connection, and a write splits the
+/// connection apart to hold its trees mutably, so a statement running inside a
+/// write could not read a virtual table at all: a trigger body reading an FTS5
+/// table, and an `UPDATE` whose `SET` holds `(SELECT ... FROM json_each(...))`,
+/// were refused with "a trigger body reads json_each". The write view holds
+/// every field here as a shared borrow beside the trees it writes, so it can
+/// build one of these and run the same scan.
+pub(crate) struct ScanReach<'a> {
+    /// The virtual tables this connection has connected, by folded name.
+    pub(crate) modules: &'a std::collections::HashMap<Vec<u8>, Connected>,
+    /// What an eponymous module is connected from.
+    pub(crate) registry: &'a inillucent_ext::registry::Registry,
+    /// The pool the shadow tables' pages are in.
+    pub(crate) pool: &'a inillucent_pool::Pool,
+    /// The shadow tables, by the identifier the catalog registered them under.
+    pub(crate) trees: &'a std::collections::HashMap<u32, inillucent_tree::PagedTree>,
+    /// The run-time limits a module is handed.
+    pub(crate) limits: &'a std::cell::RefCell<inillucent_base::limits::Limits>,
+    /// The schema a module that introspects is handed.
+    pub(crate) catalog: &'a inillucent_sql::catalog_view::StaticCatalog,
+    /// Where a constraint's value is folded, for a registered function in it.
+    pub(crate) folding: &'a dyn inillucent_exec::physical::TreeCatalog,
+    /// `PRAGMA case_sensitive_like`, for a `LIKE` the module left to recheck.
+    pub(crate) case_sensitive_like: bool,
+}
+
+/// Runs one module's scan, pushing its rows into `downstream`.
+///
+/// `Ok(false)` means the table is neither connected nor an eponymous module.
+///
+/// @param reach - what the scan reads
+/// @param table - the FROM term's table, which names the module's instance
+/// @param path - the access path the planner chose
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param needed - which of the term's columns the query reads
+/// @param supplied - a lateral join's values, one per offered constraint
+/// @param downstream - where the rows go
+pub(crate) fn scan_module(
+    reach: &ScanReach<'_>,
+    table: &inillucent_sql::catalog_view::TableInfo,
+    path: &AccessPath,
+    params: &inillucent_exec::physical::Params,
+    needed: &inillucent_sql::bind::ColumnUse,
+    supplied: &[OwnedDatum],
+    downstream: &mut dyn inillucent_exec::ops::Sink,
+) -> DbResult<bool> {
+    {
         let AccessPath::VirtualScan {
             offer, order_by, ..
         } = path
         else {
             return Ok(false);
         };
-        if let Some(answered) = self.eponymous_rows(table, offer, params, downstream)? {
-            return Ok(answered);
-        }
         // **An eponymous module has nothing in `virtual_tables`**, because
         // nothing ever created it: the name is the table. It is connected here,
         // for this scan, with no arguments - which is all `SeriesModule` and
@@ -496,10 +563,10 @@ impl ImportedDatabase {
         // caching one would mean a map that has to be invalidated when the
         // registry changes.
         let held;
-        let connected = match self.session_state.virtual_tables.get(&table.folded) {
+        let connected = match reach.modules.get(&table.folded) {
             Some(connected) => connected,
             None => {
-                let Some(connected) = self.connect_eponymous(&table.folded)? else {
+                let Some(connected) = connect_eponymous_in(reach.registry, &table.folded)? else {
                     return Ok(false);
                 };
                 held = connected;
@@ -513,7 +580,7 @@ impl ImportedDatabase {
         let plan = FilterPlan {
             index_number: query.index_number,
             index_string: query.index_string.clone(),
-            arguments: filter_arguments(&query, offer, params, supplied, self)?,
+            arguments: filter_arguments(&query, offer, params, supplied, reach.folding)?,
         };
         let width = connected.table.declaration().columns.len();
         let shape = RowShape {
@@ -525,31 +592,34 @@ impl ImportedDatabase {
             // wanted otherwise.
             carries_rowid: needed.rowid || rowid_recheck_needed(offer, &query),
             needed,
-            rechecks: rechecks_of(connected, offer, &query, supplied, params, self)?,
+            rechecks: rechecks_of(connected, offer, &query, supplied, params, reach.folding)?,
         };
         let mut cursor = connected.table.open()?;
         let store = ReadStore {
-            pool: self.storage.database.pool(),
-            trees: &self.schema.trees,
+            pool: reach.pool,
+            trees: reach.trees,
         };
         let mut nowhere = inillucent_ext::vtab::WithStore { store };
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.pragmas.limits().borrow(),
-            catalog: Some(&self.schema.catalog),
+            limits: &reach.limits.borrow(),
+            catalog: Some(reach.catalog),
         };
-        self.drive_cursor(
+        drive_cursor(
             cursor.as_mut(),
             &mut context,
             &plan,
             &shape,
             params,
+            reach.case_sensitive_like,
             downstream,
         )?;
         Ok(true)
     }
+}
 
+impl ImportedDatabase {
     /// Answers the tables whose rows this connection produces itself.
     ///
     /// A `pragma_*` function, the four that describe statements, and the two
@@ -618,35 +688,41 @@ impl ImportedDatabase {
         }
         Ok(None)
     }
+}
 
-    /// Walks the cursor, collecting rows and emitting them a batch at a time.
-    ///
-    /// **A batch at a time, and abandoned when the pipeline says stop.** The
-    /// buffer is one batch rather than the whole answer, which is what makes
-    /// `SELECT value FROM generate_series(1,10) LIMIT 3` return: without it the
-    /// scan ran to 4,294,967,295 rows before the `LIMIT` above it saw a single
-    /// one.
-    ///
-    /// @param cursor - the module's cursor, not yet filtered
-    /// @param context - what the module reaches its storage through
-    /// @param plan - what `best_index` chose, and the argument values
-    /// @param shape - what each row has to carry, and what it is tested against
-    /// @param params - the values bound to `?1`, `?2`, ...
-    /// @param downstream - what to push the produced rows into
-    fn drive_cursor(
-        &self,
-        cursor: &mut dyn inillucent_ext::vtab::VirtualCursor,
-        context: &mut Context<'_>,
-        plan: &FilterPlan,
-        shape: &RowShape<'_>,
-        params: &inillucent_exec::physical::Params,
-        downstream: &mut dyn inillucent_exec::ops::Sink,
-    ) -> DbResult<()> {
+/// Walks the cursor, collecting rows and emitting them a batch at a time.
+///
+/// **A batch at a time, and abandoned when the pipeline says stop.** The
+/// buffer is one batch rather than the whole answer, which is what makes
+/// `SELECT value FROM generate_series(1,10) LIMIT 3` return: without it the
+/// scan ran to 4,294,967,295 rows before the `LIMIT` above it saw a single
+/// one.
+///
+/// A free function rather than a method of the connection, so a write's view
+/// of the trees can run it too; see [`ScanReach`].
+///
+/// @param cursor - the module's cursor, not yet filtered
+/// @param context - what the module reaches its storage through
+/// @param plan - what `best_index` chose, and the argument values
+/// @param shape - what each row has to carry, and what it is tested against
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param case_sensitive_like - `PRAGMA case_sensitive_like`, for a `LIKE` recheck
+/// @param downstream - what to push the produced rows into
+fn drive_cursor(
+    cursor: &mut dyn inillucent_ext::vtab::VirtualCursor,
+    context: &mut Context<'_>,
+    plan: &FilterPlan,
+    shape: &RowShape<'_>,
+    params: &inillucent_exec::physical::Params,
+    case_sensitive_like: bool,
+    downstream: &mut dyn inillucent_exec::ops::Sink,
+) -> DbResult<()> {
+    {
         let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
         cursor.filter(context, plan)?;
         while !cursor.eof() {
             let row = read_row(cursor, context, shape, params)?;
-            if !passes_rechecks(&row, &shape.rechecks, self.pragmas.case_sensitive_like())? {
+            if !passes_rechecks(&row, &shape.rechecks, case_sensitive_like)? {
                 cursor.next(context)?;
                 continue;
             }
@@ -777,7 +853,12 @@ fn filter_arguments(
             )?)?);
         }
     } else {
-        for value in supplied {
+        // One value per offered constraint, in offer order; the module is
+        // handed the ones it claimed, in the order it claimed them.
+        for position in query.argument_order() {
+            let Some(value) = supplied.get(position) else {
+                continue;
+            };
             arguments.push(owned_value(value)?);
         }
     }
@@ -1191,15 +1272,23 @@ impl ImportedDatabase {
         }
         Ok(())
     }
+}
 
-    /// Connects an eponymous module for the length of one scan.
-    ///
-    /// `Ok(None)` means the name is not an eponymous module, which is how a
-    /// caller with no virtual table of that name at all is told so.
-    ///
-    /// @param folded - the module's folded name
-    fn connect_eponymous(&self, folded: &[u8]) -> DbResult<Option<Connected>> {
-        let Some(module) = self.session_state.registry.eponymous(folded) else {
+/// Connects an eponymous module for the length of one scan.
+///
+/// `Ok(None)` means the name is not an eponymous module, which is how a
+/// caller with no virtual table of that name at all is told so. It takes the
+/// registry rather than the connection, so a write's view of the trees can
+/// connect one too; see [`ScanReach`].
+///
+/// @param registry - what the connection has registered
+/// @param folded - the module's folded name
+fn connect_eponymous_in(
+    registry: &inillucent_ext::registry::Registry,
+    folded: &[u8],
+) -> DbResult<Option<Connected>> {
+    {
+        let Some(module) = registry.eponymous(folded) else {
             return Ok(None);
         };
         let arguments = inillucent_sql::vtab::ModuleArguments {

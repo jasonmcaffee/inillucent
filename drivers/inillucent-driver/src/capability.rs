@@ -513,8 +513,8 @@ pub static CAPABILITIES: &[Capability] = &[
     },
     Capability {
         name: "window_in_derived_table",
-        support: Support::No,
-        note: "A window function inside a derived table in FROM is refused; the same query written with a common table expression runs.",
+        support: Support::Yes,
+        note: "A window function inside a derived table in FROM, a common table expression or a view runs, so a rank computed in an inner query can be filtered in an outer one.",
         probe: Probe::Runs {
             setup: &["CREATE TABLE t (a INTEGER)"],
             sql: "SELECT * FROM (SELECT row_number() OVER () AS n FROM t)",

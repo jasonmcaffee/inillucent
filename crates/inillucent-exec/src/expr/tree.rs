@@ -107,6 +107,19 @@ pub trait Eval: Send + Sync {
     fn column(&self) -> Option<usize> {
         None
     }
+
+    /// Evaluates this expression and reports whether the value carries the
+    /// JSON subtype.
+    ///
+    /// Only a JSON function answers yes, and only [`crate::scalar::JsonCall`]
+    /// overrides this. The JSON group aggregates ask it, because they nest a
+    /// value a JSON function produced and quote every other one.
+    ///
+    /// @param batch - the batch being evaluated
+    /// @param nth - the position among the batch's live rows
+    fn json_value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<(Computed<'p>, bool)> {
+        Ok((self.value(batch, nth)?, false))
+    }
 }
 /// What an application-defined scalar does with one row's arguments.
 ///

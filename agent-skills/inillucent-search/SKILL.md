@@ -142,6 +142,10 @@ The query uses FTS5 syntax: bare words must all match, `"a phrase"` matches the 
 `OR` and `NOT` work. The `porter` tokenizer reduces words to their stem, so `run` matches `running`.
 Write `tokenize = 'porter unicode61'` in the `CREATE VIRTUAL TABLE` to use it.
 
+To keep an FTS5 table in step with an ordinary table, write triggers on the ordinary table that
+insert, update and delete the FTS5 rows by rowid. They commit and roll back with the write that
+fired them. `docs/vector-search.md` has the three triggers.
+
 ## Keyword and vector search together: `inillucent_search`
 
 ```sql

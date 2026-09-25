@@ -109,6 +109,7 @@ mod tests {
                         distinct: None,
                         filter: None,
                         order_by: Vec::new(),
+                        collation: Collation::Binary,
                     }],
                     Box::new(Collect::new()),
                 );
@@ -120,6 +121,7 @@ mod tests {
                         distinct: None,
                         filter: None,
                         order_by: Vec::new(),
+                        collation: Collation::Binary,
                     }],
                     Box::new(Collect::new()),
                 );
@@ -159,6 +161,7 @@ mod tests {
                 distinct: None,
                 filter: None,
                 order_by: Vec::new(),
+                collation: Collation::Binary,
             }],
             Box::new(Collect::new()),
         );
@@ -294,6 +297,7 @@ mod tests {
                 distinct: None,
                 filter: None,
                 order_by: Vec::new(),
+                collation: Collation::Binary,
             }],
             Box::new(Collect::new()),
         );
@@ -370,6 +374,7 @@ mod tests {
                             distinct: None,
                             filter: None,
                             order_by: Vec::new(),
+                            collation: Collation::Binary,
                         },
                         AggregateSpec {
                             kind: AggregateKind::Sum,
@@ -380,6 +385,7 @@ mod tests {
                             distinct: None,
                             filter: None,
                             order_by: Vec::new(),
+                            collation: Collation::Binary,
                         },
                     ],
                     Box::new(CollectInto::new(std::rc::Rc::clone(&rows))),

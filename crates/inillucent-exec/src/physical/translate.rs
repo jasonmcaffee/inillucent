@@ -1061,14 +1061,13 @@ pub(crate) fn aggregate_specs(
             }
             None => None,
         };
-        let mut order_by = Vec::with_capacity(call.order_by.len());
-        for term in &call.order_by {
-            let translated = translate_scan(&term.expr, space, params)?;
-            order_by.push((
-                compile(&translated, types)?,
-                term.order == SortOrder::Descending,
-            ));
-        }
+        let order_by = aggregate_order(&call.order_by, space, params, types)?;
+        // `min` and `max` compare under their argument's collation.
+        let collation = call
+            .arguments
+            .first()
+            .map(expression_collation)
+            .unwrap_or(Collation::Binary);
         specs.push(AggregateSpec {
             kind,
             argument,
@@ -1076,6 +1075,7 @@ pub(crate) fn aggregate_specs(
             distinct,
             filter,
             order_by,
+            collation,
         });
     }
     // **The bare columns, after the aggregates and in the same order
@@ -1086,10 +1086,12 @@ pub(crate) fn aggregate_specs(
     for expr in bare_columns(select) {
         let translated = translate_scan(&expr, space, params)?;
         let mut extra = Vec::new();
+        let mut collation = Collation::Binary;
         let wanted = match &witness {
             Some((seen, wanted)) => {
                 let translated = translate_scan(seen, space, params)?;
                 extra.push(compile(&translated, types)?);
+                collation = expression_collation(seen);
                 Some(*wanted)
             }
             None => None,
@@ -1101,9 +1103,40 @@ pub(crate) fn aggregate_specs(
             distinct: None,
             filter: None,
             order_by: Vec::new(),
+            collation,
         });
     }
     Ok(specs)
+}
+/// Compiles an aggregate call's own `ORDER BY`, each key with how it compares.
+///
+/// Each key keeps the collation and the NULL placement the binder resolved for
+/// it, so `group_concat(name, ',' ORDER BY name)` over a `NOCASE` column sorts
+/// the way `SELECT name FROM tag ORDER BY name` does.
+///
+/// @param terms - the call's ordering terms
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param types - the scan's column types
+fn aggregate_order(
+    terms: &[inillucent_sql::bind::BoundOrderTerm],
+    space: &Space<'_>,
+    params: &Params,
+    types: &[StaticType],
+) -> DbResult<Vec<(Box<dyn crate::expr::Eval>, crate::aggregate::SortTerm)>> {
+    let mut order_by = Vec::with_capacity(terms.len());
+    for term in terms {
+        let translated = translate_scan(&term.expr, space, params)?;
+        order_by.push((
+            compile(&translated, types)?,
+            crate::aggregate::SortTerm {
+                descending: term.order == SortOrder::Descending,
+                collation: term.collation,
+                nulls_first: term.nulls == inillucent_sql::ast::NullOrder::First,
+            },
+        ));
+    }
+    Ok(order_by)
 }
 /// Returns a projection that keeps the first `width` columns.
 ///

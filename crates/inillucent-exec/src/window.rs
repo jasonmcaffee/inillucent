@@ -451,6 +451,8 @@ fn aggregate(
 ) -> DbResult<OwnedDatum> {
     let frame = frame_of(rows, call, partition, row);
     let mut accumulator = Accumulator::new(kind);
+    // `min` and `max` over a frame compare the way they do over a group.
+    accumulator.compare_under(call.collation);
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     for member in frame {
         if !passes_filter(rows, call, member) {

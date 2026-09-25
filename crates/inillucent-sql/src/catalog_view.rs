@@ -851,6 +851,28 @@ impl StaticCatalog {
     }
 }
 
+/// Returns the name a schema qualified table name is looked up under.
+///
+/// **`temp.sqlite_schema` and `temp.sqlite_master` are the temporary
+/// catalog**, as SQLite answers them. The temporary catalog is registered only
+/// as `sqlite_temp_schema` and `sqlite_temp_master`, because an unqualified
+/// `sqlite_schema` searches `temp` first and has to mean `main`'s. A qualified
+/// name has no search, so it is mapped here, and after `CREATE TEMP TABLE
+/// scratch (x)` all four names answer `scratch`.
+///
+/// @param database - the qualifier the statement wrote
+/// @param folded - the table's folded name
+fn qualified_catalog_name<'a>(database: &[u8], folded: &'a [u8]) -> &'a [u8] {
+    if !database.eq_ignore_ascii_case(b"temp") {
+        return folded;
+    }
+    match folded {
+        b"sqlite_schema" => b"sqlite_temp_schema",
+        b"sqlite_master" => b"sqlite_temp_master",
+        other => other,
+    }
+}
+
 impl CatalogView for StaticCatalog {
     /// Returns a table as a shared pointer; the trait method's override.
     ///
@@ -863,6 +885,7 @@ impl CatalogView for StaticCatalog {
     ) -> Option<std::rc::Rc<TableInfo>> {
         if let Some(database) = database {
             let index = self.database_index(database)?;
+            let folded = qualified_catalog_name(database, folded);
             return self
                 .tables
                 .iter()
@@ -905,6 +928,7 @@ impl CatalogView for StaticCatalog {
     fn find_table(&self, database: Option<&[u8]>, folded: &[u8]) -> Option<&TableInfo> {
         if let Some(database) = database {
             let index = self.database_index(database)?;
+            let folded = qualified_catalog_name(database, folded);
             return self
                 .tables
                 .iter()

@@ -177,6 +177,17 @@ impl Percentile {
     }
 }
 
+/// How one key of an aggregate's own `ORDER BY` is compared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SortTerm {
+    /// Whether the key sorts high to low.
+    pub descending: bool,
+    /// The collation the key's text is compared under.
+    pub collation: Collation,
+    /// Whether a NULL key sorts before every other value.
+    pub nulls_first: bool,
+}
+
 /// One aggregate's running state.
 #[derive(Clone, Debug)]
 pub struct Accumulator {
@@ -223,6 +234,11 @@ pub struct Accumulator {
     saw_real: bool,
     /// The extreme value seen, for `min` and `max`.
     extreme: Option<OwnedDatum>,
+    /// The collation `extreme` is chosen under.
+    ///
+    /// The argument's own, as SQLite uses: `max(name)` over a `NOCASE` column
+    /// is `Zebra` and not `outdoor`.
+    ordering: Collation,
     /// The value a bare column has settled on, and the witness that chose it.
     chosen: Option<OwnedDatum>,
     /// Where the sort keys start in a collected row, and their directions.
@@ -232,7 +248,7 @@ pub struct Accumulator {
     /// fold happens at `finish`, in the order the keys give - because
     /// `group_concat(b ORDER BY a DESC)` is a different answer from
     /// `group_concat(b)` and the difference is the order the rows arrive in.
-    sort: Option<(usize, Vec<bool>)>,
+    sort: Option<(usize, Vec<SortTerm>)>,
     /// The rows a JSON group aggregate has collected, in row order.
     ///
     /// One value for the array form and two - label, value - for the object
@@ -240,6 +256,15 @@ pub struct Accumulator {
     /// because the document is built by `inillucent_scalar::json`, which is
     /// where the one implementation of a JSON document lives.
     json_rows: Vec<Vec<inillucent_value::value::Value<'static>>>,
+    /// Which values of each row in `json_rows` carry the JSON subtype, one bit
+    /// per value in written order.
+    ///
+    /// **Kept beside the values because a `Value` has nowhere to put it.**
+    /// `json_group_array(json_object('id', id))` has to nest each object, and
+    /// it can only tell an object from a string that spells one by the mark
+    /// `json_object` put on its answer. Without it every member was quoted:
+    /// `["{\"id\":1}"]` where SQLite answers `[{"id":1}]`.
+    json_marks: Vec<u32>,
     /// The joined text, for `group_concat`.
     joined: String,
     /// Every row of the group, for a registered aggregate and nothing else.
@@ -264,10 +289,12 @@ impl Accumulator {
             chosen: None,
             sort: None,
             json_rows: Vec::new(),
+            json_marks: Vec::new(),
             is_real: false,
             overflowed: false,
             saw_real: false,
             extreme: None,
+            ordering: Collation::Binary,
             joined: String::new(),
             rows: Vec::new(),
         }
@@ -281,6 +308,14 @@ impl Accumulator {
         let mut accumulator = Accumulator::new(kind);
         accumulator.seen = Some((collation, HashSet::new()));
         accumulator
+    }
+
+    /// Sets the collation `min`, `max` and a bare column's witness compare
+    /// under.
+    ///
+    /// @param collation - the argument's collation
+    pub fn compare_under(&mut self, collation: Collation) {
+        self.ordering = collation;
     }
 
     /// Returns which aggregate this computes.
@@ -312,9 +347,9 @@ impl Accumulator {
     /// Tells this accumulator to collect its rows and sort them.
     ///
     /// @param at - the position of the first sort key in a collected row
-    /// @param descending - one flag per key, in key order
-    pub fn sort_by(&mut self, at: usize, descending: Vec<bool>) {
-        self.sort = Some((at, descending));
+    /// @param terms - how each key is compared, in key order
+    pub fn sort_by(&mut self, at: usize, terms: Vec<SortTerm>) {
+        self.sort = Some((at, terms));
     }
 
     /// Folds one whole row of arguments in, for a registered aggregate.
@@ -326,6 +361,22 @@ impl Accumulator {
     ///
     /// @param values - one row's arguments, in written order
     pub fn push_values(&mut self, values: Vec<inillucent_value::value::Value<'static>>) {
+        self.push_values_marked(values, 0);
+    }
+
+    /// Folds one whole row of arguments in, with the JSON subtype of each.
+    ///
+    /// What [`Accumulator::push_values`] does, for a caller that knows which of
+    /// the values a JSON function produced. Only the JSON group aggregates read
+    /// the marks.
+    ///
+    /// @param values - one row's arguments, in written order
+    /// @param marks - bit `n` set when value `n` carries the JSON subtype
+    pub fn push_values_marked(
+        &mut self,
+        values: Vec<inillucent_value::value::Value<'static>>,
+        marks: u32,
+    ) {
         self.count = self.count.saturating_add(1);
         // **A JSON group aggregate comes through this entry point** rather than
         // through `push`, because a NULL is a *member* of the document it
@@ -360,7 +411,12 @@ impl Accumulator {
             let replace = match &self.extreme {
                 None => true,
                 Some(held) => {
-                    !seen.borrow().is_null() && seen.borrow().compare(&held.borrow()) == wanted
+                    !seen.borrow().is_null()
+                        && inillucent_tree::types::compare_under(
+                            &seen.borrow(),
+                            &held.borrow(),
+                            self.ordering,
+                        ) == wanted
                 }
             };
             if replace {
@@ -388,6 +444,7 @@ impl Accumulator {
             )
         {
             self.json_rows.push(values);
+            self.json_marks.push(marks);
             return;
         }
         self.rows.push(values);
@@ -856,7 +913,10 @@ impl Accumulator {
     fn push_extreme(&mut self, value: &Datum<'_>, wanted: std::cmp::Ordering) {
         let replace = match &self.extreme {
             None => true,
-            Some(held) => value.compare(&held.borrow()) == wanted,
+            Some(held) => {
+                inillucent_tree::types::compare_under(value, &held.borrow(), self.ordering)
+                    == wanted
+            }
         };
         if replace {
             self.extreme = Some(OwnedDatum::from_datum(value));
@@ -872,12 +932,22 @@ impl Accumulator {
         self.real_sum + self.compensation
     }
 
+    /// Reports whether one value of one collected row carries the JSON subtype.
+    ///
+    /// @param row - the row's position in `json_rows`
+    /// @param value - the value's position in the row
+    fn marked(&self, row: usize, value: u32) -> bool {
+        self.json_marks
+            .get(row)
+            .is_some_and(|marks| marks.checked_shr(value).is_some_and(|bits| bits & 1 == 1))
+    }
+
     /// Returns the aggregate's value.
     pub fn finish(&self) -> DbResult<OwnedDatum> {
         // A call with its own `ORDER BY` collected its rows; they are folded
         // here, in the order the keys give.
-        if let Some((at, descending)) = &self.sort {
-            return self.finish_sorted(*at, descending);
+        if let Some((at, terms)) = &self.sort {
+            return self.finish_sorted(*at, terms);
         }
         Ok(match &self.kind {
             AggregateKind::CountStar | AggregateKind::Count => OwnedDatum::Int(self.count),
@@ -931,21 +1001,24 @@ impl Accumulator {
             }
             AggregateKind::JsonGroupArray(binary) => {
                 let mut items = Vec::with_capacity(self.json_rows.len());
-                for row in &self.json_rows {
+                for (position, row) in self.json_rows.iter().enumerate() {
                     let value = row
                         .first()
                         .cloned()
                         .unwrap_or(inillucent_value::value::Value::Null);
                     inillucent_scalar::json::group_array_step(
                         &mut items,
-                        &inillucent_scalar::json::Argument::plain(&value),
+                        &inillucent_scalar::json::Argument {
+                            value: &value,
+                            json: self.marked(position, 0),
+                        },
                     )?;
                 }
                 OwnedDatum::from(inillucent_scalar::json::group_array_final(items, *binary)?.value)
             }
             AggregateKind::JsonGroupObject(binary) => {
                 let mut members = Vec::with_capacity(self.json_rows.len());
-                for row in &self.json_rows {
+                for (position, row) in self.json_rows.iter().enumerate() {
                     let label = row
                         .first()
                         .cloned()
@@ -957,7 +1030,10 @@ impl Accumulator {
                     inillucent_scalar::json::group_object_step(
                         &mut members,
                         &inillucent_scalar::json::Argument::plain(&label),
-                        &inillucent_scalar::json::Argument::plain(&value),
+                        &inillucent_scalar::json::Argument {
+                            value: &value,
+                            json: self.marked(position, 1),
+                        },
                     )?;
                 }
                 OwnedDatum::from(
@@ -985,9 +1061,16 @@ impl Accumulator {
     /// way every other comparison in the engine orders it. A descending key
     /// reverses that key alone, which is what `ORDER BY a DESC, b` means.
     ///
+    /// **Each key under its own collation, and its NULLs where the term put
+    /// them.** The keys used to be encoded under `BINARY` whatever the term
+    /// said, so `group_concat(name, ',' ORDER BY name)` over a `NOCASE` column
+    /// answered `Repairs,Zebra,apple,outdoor` where SQLite, and this engine's
+    /// own `SELECT name FROM tag ORDER BY name`, answer
+    /// `apple,outdoor,Repairs,Zebra`.
+    ///
     /// @param at - the position of the first sort key in a collected row
-    /// @param descending - one flag per key, in key order
-    fn finish_sorted(&self, at: usize, descending: &[bool]) -> DbResult<OwnedDatum> {
+    /// @param terms - how each key is compared, in key order
+    fn finish_sorted(&self, at: usize, terms: &[SortTerm]) -> DbResult<OwnedDatum> {
         let mut order: Vec<usize> = (0..self.json_rows.len()).collect();
         let key_of = |row: &Vec<inillucent_value::value::Value<'static>>, which: usize| {
             let mut encoded = Vec::new();
@@ -995,20 +1078,37 @@ impl Accumulator {
                 .get(at.saturating_add(which))
                 .cloned()
                 .unwrap_or(inillucent_value::value::Value::Null);
-            inillucent_tree::key::encode_into_with(
-                &OwnedDatum::from(value).borrow(),
-                Collation::Binary,
-                &mut encoded,
-            );
-            encoded
+            let collation = terms
+                .get(which)
+                .map(|term| term.collation)
+                .unwrap_or(Collation::Binary);
+            let value = OwnedDatum::from(value);
+            let null = value.borrow().is_null();
+            inillucent_tree::key::encode_into_with(&value.borrow(), collation, &mut encoded);
+            (null, encoded)
         };
         order.sort_by(|left, right| {
             let (Some(a), Some(b)) = (self.json_rows.get(*left), self.json_rows.get(*right)) else {
                 return std::cmp::Ordering::Equal;
             };
-            for (which, down) in descending.iter().enumerate() {
-                let ordering = key_of(a, which).cmp(&key_of(b, which));
-                let ordering = if *down { ordering.reverse() } else { ordering };
+            for (which, term) in terms.iter().enumerate() {
+                let (a_null, a_key) = key_of(a, which);
+                let (b_null, b_key) = key_of(b, which);
+                let ordering = match (a_null, b_null) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) if term.nulls_first => std::cmp::Ordering::Less,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) if term.nulls_first => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => {
+                        let ordering = a_key.cmp(&b_key);
+                        if term.descending {
+                            ordering.reverse()
+                        } else {
+                            ordering
+                        }
+                    }
+                };
                 if ordering != std::cmp::Ordering::Equal {
                     return ordering;
                 }
@@ -1017,12 +1117,15 @@ impl Accumulator {
             // positions gives.
             left.cmp(right)
         });
-        let sorted: Vec<Vec<inillucent_value::value::Value<'static>>> = order
+        let sorted: Vec<(Vec<inillucent_value::value::Value<'static>>, u32)> = order
             .into_iter()
-            .filter_map(|at| self.json_rows.get(at).cloned())
+            .filter_map(|at| {
+                let marks = self.json_marks.get(at).copied().unwrap_or(0);
+                self.json_rows.get(at).cloned().map(|row| (row, marks))
+            })
             .collect();
         let mut folded = Accumulator::new(self.kind.clone());
-        for row in sorted {
+        for (row, marks) in sorted {
             match self.kind {
                 // The document builders keep taking whole rows, and so does a
                 // `group_concat` whose separator is a value of each row: the
@@ -1031,7 +1134,7 @@ impl Accumulator {
                 AggregateKind::JsonGroupArray(_)
                 | AggregateKind::JsonGroupObject(_)
                 | AggregateKind::GroupConcatComputed => {
-                    folded.push_values(row);
+                    folded.push_values_marked(row, marks);
                 }
                 // Everything else reduces one value, and a NULL is a row it
                 // skips - which `push` already knows.

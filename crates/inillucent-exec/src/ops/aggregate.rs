@@ -15,7 +15,7 @@ use inillucent_tree::types::compare_under;
 use inillucent_value::collation::Collation;
 use inillucent_value::Value;
 
-use crate::aggregate::{Accumulator, AggregateKind};
+use crate::aggregate::{Accumulator, AggregateKind, SortTerm};
 use crate::batch::{Batch, Vector};
 use crate::expr::Eval;
 
@@ -49,7 +49,14 @@ pub struct AggregateSpec {
     /// Empty for nearly every call. When it is not, the accumulator collects
     /// its rows and sorts them before folding, because the answer of a
     /// `group_concat` or a `json_group_array` is the order the rows arrived in.
-    pub order_by: Vec<(Box<dyn Eval>, bool)>,
+    pub order_by: Vec<(Box<dyn Eval>, SortTerm)>,
+    /// The collation `min` and `max` compare their argument under, and a bare
+    /// column compares the `min` or `max` it follows under.
+    ///
+    /// SQLite compares with the argument's collation, so `max(name)` over a
+    /// `NOCASE` column is `Zebra` where a byte comparison says `outdoor`.
+    /// `BINARY` for everything else, which never reads it.
+    pub collation: Collation,
 }
 impl AggregateSpec {
     /// Returns a fresh accumulator for this aggregate.
@@ -62,7 +69,7 @@ impl AggregateSpec {
         if !self.order_by.is_empty() {
             built.sort_by(
                 self.argument.is_some() as usize + self.extra.len(),
-                self.order_by.iter().map(|(_, down)| *down).collect(),
+                self.order_by.iter().map(|(_, term)| *term).collect(),
             );
         }
         built
@@ -70,10 +77,12 @@ impl AggregateSpec {
 
     /// Returns a fresh accumulator, before the sort is attached.
     fn fresh(&self) -> Accumulator {
-        match self.distinct {
+        let mut built = match self.distinct {
             Some(collation) => Accumulator::distinct(self.kind.clone(), collation),
             None => Accumulator::new(self.kind.clone()),
-        }
+        };
+        built.compare_under(self.collation);
+        built
     }
 
     /// Reports whether this call needs the whole row rather than one value.
@@ -141,11 +150,24 @@ impl AggregateSpec {
         nth: usize,
     ) -> DbResult<()> {
         let mut values = Vec::with_capacity(self.extra.len().saturating_add(1));
-        if let Some(argument) = &self.argument {
-            values.push(Value::from(&argument.value(batch, nth)?.get()).into_owned()?);
-        }
-        for argument in &self.extra {
-            values.push(Value::from(&argument.value(batch, nth)?.get()).into_owned()?);
+        // **The JSON subtype of each argument, for the JSON group aggregates.**
+        // `json_value` answers it from the JSON function that produced the
+        // value; every other expression answers no.
+        let json = matches!(
+            self.kind,
+            AggregateKind::JsonGroupArray(_) | AggregateKind::JsonGroupObject(_)
+        );
+        let mut marks = 0u32;
+        for argument in self.argument.iter().chain(self.extra.iter()) {
+            let (value, marked) = if json {
+                argument.json_value(batch, nth)?
+            } else {
+                (argument.value(batch, nth)?, false)
+            };
+            if marked {
+                marks |= 1u32.checked_shl(values.len() as u32).unwrap_or(0);
+            }
+            values.push(Value::from(&value.get()).into_owned()?);
         }
         // The sort keys go on the end, where `Accumulator::finish` knows to
         // find them: it is told how many there are when the accumulator is
@@ -153,7 +175,7 @@ impl AggregateSpec {
         for (key, _) in &self.order_by {
             values.push(Value::from(&key.value(batch, nth)?.get()).into_owned()?);
         }
-        accumulator.push_values(values);
+        accumulator.push_values_marked(values, marks);
         Ok(())
     }
 }

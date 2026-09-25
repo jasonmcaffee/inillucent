@@ -253,14 +253,32 @@ impl Outcome {
                     ("transactions_discarded", Json::Int(recovery.losers as i64)),
                 ]),
             ));
+            // **"Recovered" only when there was something to recover from.**
+            // Replaying committed transactions the file has not taken yet is
+            // what every open does while another process has the file open
+            // and has not checkpointed, and printing "recovered the log" for
+            // that on every command told a person the database had been
+            // damaged when nothing had happened to it. A transaction with no
+            // commit record, or a dropped record, is what a crash leaves, and
+            // that keeps the word. The JSON member above is unchanged either
+            // way, so a caller asking whether the log was replayed still can.
+            let said = if recovery.losers > 0 || recovery.dropped > 0 {
+                format!(
+                    "recovered the log: {} records scanned, {} applied, {} transactions committed, {} discarded.",
+                    recovery.scanned, recovery.applied, recovery.committed, recovery.losers
+                )
+            } else {
+                format!(
+                    "replayed the log: {} committed transactions were in the log and not yet in the \
+                     database file ({} records scanned, {} applied). A connection that still has the \
+                     file open, or one that ended before a checkpoint, wrote them.",
+                    recovery.committed, recovery.scanned, recovery.applied
+                )
+            };
             self.text = format!(
-                "{}{}recovered the log: {} records scanned, {} applied, {} transactions committed, {} discarded.",
+                "{}{}{said}",
                 self.text,
                 if self.text.is_empty() { "" } else { "\n" },
-                recovery.scanned,
-                recovery.applied,
-                recovery.committed,
-                recovery.losers
             );
         }
         // On its own line and only when it happened, because it is the one
@@ -514,5 +532,47 @@ mod tests {
         assert!(written.starts_with("{\"ok\":true,\"command\":\"version\""));
         assert!(written.contains("\"engine\":\"inillucent\""));
         assert!(written.ends_with("\"text\":\"0.1.0\"}"));
+    }
+
+    /// A replay of committed transactions is not reported as a recovery, and
+    /// a discarded transaction still is.
+    ///
+    /// **The first open while another process has the file open replays that
+    /// process's committed transactions**, and every command printed
+    /// "recovered the log" for it, which reads as damage. The JSON member is
+    /// the same in both cases, so a caller asking whether the log was replayed
+    /// still can.
+    #[test]
+    fn only_a_discarded_transaction_is_called_a_recovery() {
+        let routine = inillucent_driver::Recovery {
+            recovered: true,
+            scanned: 7,
+            applied: 4,
+            committed: 3,
+            ..Default::default()
+        };
+        let replayed = Outcome::said("query", "").with_recovery(&routine, &[]);
+        assert!(
+            replayed
+                .text
+                .starts_with("replayed the log: 3 committed transactions"),
+            "{}",
+            replayed.text
+        );
+        assert!(!replayed.text.contains("recovered"), "{}", replayed.text);
+        assert!(replayed.extra.iter().any(|(name, _)| name == "recovered"));
+
+        let crashed = inillucent_driver::Recovery {
+            losers: 1,
+            ..routine
+        };
+        let recovered = Outcome::said("query", "").with_recovery(&crashed, &[]);
+        assert!(
+            recovered
+                .text
+                .starts_with("recovered the log: 7 records scanned, 4 applied, 3 transactions committed, 1 discarded."),
+            "{}",
+            recovered.text
+        );
     }
 }
