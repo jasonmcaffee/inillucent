@@ -27,3 +27,6 @@ stamp	commit	machine	target	verdict	seconds
 2026-09-25T08:50:47Z	a66339c	machine-c9df3d5a	inillucent-compat::nightly::release_format_history	pass	368.7
 2026-09-25T08:50:47Z	a66339c	machine-c9df3d5a	inillucent-compat::nightly::story_large_table_nightly	pass	1017.4
 2026-09-25T08:50:47Z	a66339c	machine-c9df3d5a	inillucent::story_ledger_day_nightly	pass	1058.9
+2026-09-25T18:13:43Z	ec3af66	machine-c9df3d5a	inillucent-compat::nightly::release_format_history	pass	374.5
+2026-09-25T18:13:43Z	ec3af66	machine-c9df3d5a	inillucent-compat::nightly::story_large_table_nightly	pass	1037.8
+2026-09-25T18:13:43Z	ec3af66	machine-c9df3d5a	inillucent::story_ledger_day_nightly	pass	1062.4
