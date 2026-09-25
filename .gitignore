@@ -31,6 +31,11 @@ corpus.jsonl
 /examples/todo-mvc/target/
 /examples/todo-mvc/data/
 
+# The coffee shop example is its own Cargo workspace as well, and its server
+# creates data/coffee.rdb on first start.
+/examples/coffee-shop/target/
+/examples/coffee-shop/data/
+
 # Engine databases and their log segments, wherever a test or a scratch run
 # leaves one. These are output, never source: no `.rdb` has ever been tracked,
 # and `drivers/inillucent-driver/other.rdb` is what an uncommitted directory

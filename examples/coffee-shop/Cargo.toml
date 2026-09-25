@@ -1,0 +1,37 @@
+[package]
+name = "coffee-shop"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Orders, stock and double entry bookkeeping for a coffee shop, as a REST API on one inillucent database file."
+license = "MIT"
+
+# This example is its own workspace. Without this table, Cargo would find the
+# inillucent repository's root manifest two folders up and refuse to build a
+# package that is not one of its members. With it, the example builds the same
+# way inside the repository and in a copy of this folder anywhere else.
+[workspace]
+
+[[bin]]
+name = "coffee-server"
+path = "src/main.rs"
+
+[dependencies]
+# The database, from crates.io, exactly as an application outside this
+# repository gets it. No features: this example uses the relational engine
+# only, so it needs no embedding model.
+inillucent = "1.0.30"
+
+# The HTTP server. axum routes requests to handlers, and tokio runs them.
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The end to end tests call the running server over HTTP with a blocking client.
+# TLS is off: the tests only call the server on 127.0.0.1, and the TLS crates
+# need a C compiler to build.
+ureq = { version = "2", default-features = false, features = ["json"] }

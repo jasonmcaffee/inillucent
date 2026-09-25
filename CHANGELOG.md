@@ -10,6 +10,15 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**A new example, `examples/coffee-shop`: a coffee shop's orders, stock and double entry books, as a
+REST API in Rust.** It takes orders with sizes and modifiers, prices them with promotion codes,
+loyalty points and sales tax, takes split cash and card payments, and keeps the stock and the books
+in one database built on inillucent 1.0.30 from crates.io. Triggers post every sale and refund to
+the journal and use up the stock, and a view proves that every journal entry balances. Its README
+shows the SQL for each use case with the answer it returned on the seed data, from the ticket
+number to the trial balance, and lists eleven ways 1.0.30 answers differently from SQLite, with what
+the example does in each case.
+
 **A new example, `examples/todo-mvc`: a todo service with a REST API, in Rust.** It keeps people,
 lists, todos with subtasks to any depth, tags and comments in one database built on inillucent
 1.0.30 from crates.io, and its README explains the SQL behind each route: foreign keys that cascade,
