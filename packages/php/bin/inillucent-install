@@ -69,7 +69,7 @@ const DOWNLOADS = 'https://inillucent.com/downloads';
  * different programs on two days, and makes the package's own version say
  * nothing about what it puts on the machine.
  */
-const NATIVE_VERSION = '0.1.8';
+const NATIVE_VERSION = '0.1.9';
 
 /**
  * Fetches a URL, refusing anything that is not a 200.
