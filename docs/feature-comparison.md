@@ -21,7 +21,7 @@ them.
 | **Faster than pgvector** | **174% faster unfiltered, 6,169% faster filtered** | retrieval p50 0.8462 ms against 2.315, and 0.5820 ms against 36.486 with a `source =` predicate, against the *better* of the two pgvector configurations |
 | **Less CPU** | **50% less CPU** | 555 ms of processor against SQLite's 1,082, same plan, one child process each. Ratio 0.500x against a 0.400x bar, missed on all four runs. It was 0.400x on 2026-09-20; the plan has since gained four correlated subquery workloads that took this engine 182 ms a round and SQLite under half a millisecond. At `52c4b5f` they take under 2 ms and the round is 367 ms against 1,102, **67% less**, on passes the gate did not grade because the machine was busy; [Performance](performance.md#measured-again-at-52c4b5f-on-2026-09-24-and-not-graded) has them |
 | **Less RAM** | **it is not less. It is 9.5% MORE** | 40.76 MiB peak resident against SQLite's 37.22, on the same 128 MiB budget. It was **102% more** before review 6, **43% more** before review 7 and **14% more** before the index build stopped going through the page pool, and the bar asks for **5% less** - so this is the one headline that is still a loss |
-| **Same features as SQLite** | **97.1% byte for byte, 98.5% of what SQLite answers, none refused** | 404 of 416 probed cases produce SQLite's exact bytes. 6 of the other 12 are vector features SQLite does not have, and 6 answer differently. [Why it is not 100%](#why-it-is-not-100) says what each is and which can ever be closed |
+| **Same features as SQLite** | **96.6% byte for byte, 98.5% of what SQLite answers, none refused** | 402 of 416 probed cases produce SQLite's exact bytes. Of the other 14, 6 are vector features SQLite does not have, 6 answer differently, and 2 are `DELETE` and `UPDATE` with `ORDER BY ... LIMIT`, which the pinned SQLite build refuses and inillucent runs. [Why it is not 100%](#why-it-is-not-100) says what each is and which can ever be closed |
 
 **This figure has read 403 twice, with a dip to 391 between.** It was first measured at **403 of 416
 with 0 refused** through `inillucent-shell` while that shell still ran an engine this project
@@ -35,7 +35,9 @@ answering differently, 6 features SQLite does not have** after that, and **404 s
 answering differently, 6 features SQLite does not have** when it was re-run on 2026-09-23. The
 one that moved is `PRAGMA locking_mode`, which reports `normal` as SQLite does now that `normal` is
 the default, and `sql.select.window` and
-`functions.window` are `pass` in `compat/sqlite-3.53.4.toml` to match.
+`functions.window` are `pass` in `compat/sqlite-3.53.4.toml` to match. Since `DELETE` and `UPDATE`
+began taking `ORDER BY ... LIMIT` it reads **402 same, 0 refused, 6 answering differently, 6
+features SQLite does not have and 2 accepted that the pinned SQLite refuses**, re-run on 2026-09-24.
 
 So the sentence this table used to carry — *"there is no case SQLite answers that this engine
 refuses"* — was true of a program that is no longer what you install. It is written out here rather
@@ -104,21 +106,24 @@ works because somebody implemented it is the thing the probe exists to replace.
 
 ## Why it is not 100%
 
-**Twelve of the 416 cases are not byte-equal to SQLite, and none of them is refused.** All
-twelve answer - none of them is silent -
-split between vector search features SQLite has no equivalent for and three kinds of measured or
-structural difference. Zero cases are accepted here that SQLite rejects.
+**Fourteen of the 416 cases are not byte-equal to SQLite, and none of them is refused.** All
+fourteen answer - none of them is silent -
+split between vector search features SQLite has no equivalent for, three kinds of measured or
+structural difference, and one compile option the pinned SQLite build does not have. Two cases are
+accepted here that the pinned build rejects.
 
 | how many | what they are | can it ever be closed? |
 |---|---|---|
 | **6** | **vector-search features SQLite does not have** - the `vec0` table, the distance functions and the operator spellings. There is no SQLite output for them to be byte-equal to, so they cannot count as agreement however well they work. All six work | **No, by construction.** They are extras, not gaps |
 | **2** | **one decision this engine made and measured**: `PRAGMA page_size` is 32768 where the reference says 4096, and `.recover` differs on the one line of nineteen that names the page size. Adopting the reference's value was measured, not assumed: 4096 puts the `schema` family at **0.94x**, under the contract's 1.00x floor. `PRAGMA locking_mode` was the third row and is no longer one: it reports `normal`, as SQLite does | **Yes - at a measured cost to the performance bars.** The pragma reports what the file is, which is its job |
 | **1** | **the two pinned SQLite artifacts disagreeing with each other.** `.limit` reports `trigger_depth 1000`; the downloaded `sqlite3.exe` says 100 because it was built with `SQLITE_MAX_TRIGGER_DEPTH=100`, and the locally built oracle says 1000. Twelve of its thirteen lines agree | **No.** Whichever value is printed, one of the two references disagrees with it |
+| **2** | **a compile option the pinned build does not have.** `DELETE` and `UPDATE` with `ORDER BY ... LIMIT` need `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`. Apple's SQLite and many application builds set it; the pinned 3.53.4 build does not, so it answers `near "ORDER": syntax error`. inillucent runs the statement the way a build with the option does, because `DELETE ... LIMIT 1000` in a loop is how a large table is trimmed without one large transaction | **Yes, by refusing the clause again**, which is what this engine did until a consumer reported the refusal as a gap. It is kept on purpose |
 | **3** | **numbers that describe SQLite's own C structures**: `EXPLAIN`'s bytecode program, `.vfslist`'s `szOsFile`, `.stats`' lookaside counters. Each prints the same report in the same shape over the facts *this* engine has | **No.** Printing SQLite's bytes would be a statement about a library that is not linked into this program - a fabrication, not compatibility |
 
-So: **404 of 416 agree byte for byte (97.1%)**, **none are refused**, and **6 answer differently
-(1.4%)**. Excluding the six vector cases that have no SQLite answer to compare against, 404 of the
-remaining 410 agree byte for byte - **98.5%**. **Four of the
+So: **402 of 416 agree byte for byte (96.6%)**, **none are refused**, **6 answer differently
+(1.4%)**, and **2 are accepted that the pinned build refuses**. Excluding the six vector cases, which
+have no SQLite answer to compare against, and the two the pinned build refuses, 402 of the remaining
+408 agree byte for byte - **98.5%**. **Four of the
 six that differ cannot be closed by any value** - three because they describe SQLite's own internals,
 and one because the two reference artifacts contradict each other. The other two could be closed at
 a measured cost to the performance bars.
@@ -135,8 +140,9 @@ the message. The cause was one of review 6's own fixes: moving `bind::refused` f
 the re-run reproduced **403 / 7 / 6 with no wording difference**, and both shapes are cases in
 `crates/inillucent-compat/tests/semantics.rs` so they cannot drift back. That **403** was measured
 through `inillucent-shell` while it still ran a retired engine; against the engine that ships it read
-**391 / 12 / 7 / 6** until the window path was reconnected, then **403 / 0 / 7 / 6**, and it reads
-**404 / 0 / 6 / 6** now, as above.
+**391 / 12 / 7 / 6** until the window path was reconnected, then **403 / 0 / 7 / 6**, then
+**404 / 0 / 6 / 6** on 2026-09-23. It reads **402 / 0 / 6 / 6 with 2 accepted** now, as above: the
+two are the same two shapes this paragraph is about, which now run.
 
 Detail for every one of the six that differ: [The six rows that are not the same](#the-six-rows-that-are-not-the-same).
 
@@ -160,9 +166,9 @@ and this engine wins two of those three.
 | | SQLite 3.53.4 | inillucent | the difference |
 |---|---|---|---|
 | **SQL features probed** | 416 | 416 | - |
-| features that agree byte for byte, answers and error text alike | the reference | 404 | **97.1% of the surface** - and [here is exactly why it is not 100%](#why-it-is-not-100): 6 of the other 12 are vector features SQLite does not have, and the remaining 6 answer differently. None of the 12 is silent |
+| features that agree byte for byte, answers and error text alike | the reference | 402 | **96.6% of the surface** - and [here is exactly why it is not 100%](#why-it-is-not-100): of the other 14, 6 are vector features SQLite does not have, 6 answer differently, and 2 are accepted where the pinned build refuses. None of the 14 is silent |
 | features SQLite answers and inillucent **refuses** | - | **0** | **none**. The last twelve were window functions, and they answer now |
-| features inillucent accepts that SQLite rejects | - | **0** | **none** |
+| features inillucent accepts that SQLite rejects | - | **2** | `DELETE` and `UPDATE` with `ORDER BY ... LIMIT`, which the pinned build is compiled without |
 | features both answer **differently** | - | 6 | **1.4%**, none of them silent |
 | vector features with no SQLite equivalent | 0 | 6 | **6 extra** |
 | **the surface audited against SQLite's own registers**, not against our case list | 218 functions, 67 pragmas, 19 modules, 5 collations, 65 dot commands | all called in both engines, and now **compared on every build** | **4 functions, 2 modules and 2 dot commands absent**, and the **silent difference is closed** - see [Is the feature list itself complete?](#is-the-feature-list-itself-complete) |
@@ -207,14 +213,14 @@ pages and arena.
 
 | | | at review 5 |
 |---|---|---|
-| **416 probed features** | **404 agree with SQLite byte for byte** - [why not 416](#why-it-is-not-100) | 403 |
+| **416 probed features** | **402 agree with SQLite byte for byte** - [why not 416](#why-it-is-not-100) | 403 |
 | features SQLite answers and inillucent refuses | **0** - the last twelve were window functions, and they answer now | 0 |
 | features both answer, **differently** | **6** - and none of them is silent | 7 |
-| features inillucent accepts that SQLite rejects | **0** | 0 |
+| features inillucent accepts that SQLite rejects | **2** - `DELETE` and `UPDATE` with `ORDER BY ... LIMIT`, which the pinned build is compiled without | 0 |
 | vector features with no SQLite equivalent | **6**, all working | 6 |
 | | **416 of 416 answer** | 409 |
 
-The middle column is the probe as it was re-run on 2026-09-23. A case where both engines
+The middle column is the probe as it was re-run on 2026-09-24. A case where both engines
 refuse counts as agreement only when the refusal is **the same text**. There is no separate column
 for it because there is no case where the wording differs.
 
@@ -225,8 +231,9 @@ cause was one of review 6's own fixes applied one caller too widely. Corrected, 
 403 case for case, and both shapes are now cases in `semantics.rs`, so the next drift fails a build
 instead of a document. **That 403 was measured through `inillucent-shell` while it still ran the
 a retired engine.** Against the engine that ships the count read 391 agree, 12 refused and 7 differ
-until the window path was reconnected, then 403 agree, 0 refused and 7 differ, and it reads 404
-agree, 0 refused and 6 differ now -
+until the window path was reconnected, then 403 agree, 0 refused and 7 differ, then 404 agree,
+0 refused and 6 differ on 2026-09-23, and it reads 402 agree, 0 refused, 6 differ and 2 accepted
+now -
 [why it is not 100%](#why-it-is-not-100) has the full breakdown.
 
 **The five goals, measured:**

@@ -79,7 +79,12 @@ pub(crate) enum Cached {
     /// argument, and the comment. See `program_of` for what those mean here.
     Program(Vec<(String, i64, i64, String, String)>),
     /// An insert into a virtual table, which the module applies.
-    VirtualInsert(Box<inillucent_sql::dml::BoundInsert>),
+    ///
+    /// The flag says whether the `VALUES` list holds a subquery, decided once
+    /// when the statement is compiled, for the same reason [`Cached::Insert`]
+    /// carries one: an FTS5 load is one of these per document, and walking
+    /// every value per execution to find no subquery is a cost on that path.
+    VirtualInsert(Box<inillucent_sql::dml::BoundInsert>, bool),
     /// An insert into `sqlite_schema` under `PRAGMA writable_schema`.
     ///
     /// It writes a catalog row through the same `record` every `CREATE` uses,

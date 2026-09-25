@@ -1233,7 +1233,7 @@ fn modules() -> inillucent_ext::registry::Registry {
 fn writes_something(cached: &Cached) -> bool {
     match cached {
         Cached::Insert(..)
-        | Cached::VirtualInsert(_)
+        | Cached::VirtualInsert(..)
         | Cached::SchemaInsert(_)
         | Cached::Update(..)
         | Cached::Delete(..) => true,

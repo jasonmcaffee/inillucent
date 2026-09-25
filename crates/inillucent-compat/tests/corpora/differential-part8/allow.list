@@ -13,9 +13,15 @@
 # tells apart from a refusal for any other reason. They come off this list when
 # the construct is built, and until then they are what keeps the list honest
 # about what the engine does not do.
+#
+# One more is the other way round. `ms-007` is `DELETE ... ORDER BY ... LIMIT`,
+# which the pinned build refuses because it is compiled without
+# SQLITE_ENABLE_UPDATE_DELETE_LIMIT, and which this engine runs, as builds with
+# that option do (task-2120). It stays here for as long as the engine accepts it.
 
 lim-004	an exit 3 gap: `LIMIT 1+1`, an expression rather than a literal
 lim-005	an exit 3 gap: `LIMIT '2'`, a text literal
 ms-006	an exit 3 gap: `UPDATE t SET (a,b) = (3,4)`, the row-value form
+ms-007	accepted on purpose: `DELETE ... ORDER BY ... LIMIT`, which the pinned build is compiled without
 sub-010	an exit 3 gap: `(a, b) IN (SELECT ...)`, a row value against a subquery
 win-025	an exit 3 gap: a window function inside a derived table

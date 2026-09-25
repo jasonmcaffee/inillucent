@@ -160,7 +160,7 @@ check a run against.
 |---|---:|---:|---|
 | `smoke` | 1 | 10 | the ten-second answer: a real file opened, written, reopened, read |
 | `unit` | 31 | 1,446 | every crate's own `#[cfg(test)]` modules |
-| `engine` | 68 | 447 | SQL and storage behaviour over real database files |
+| `engine` | 71 | 466 | SQL and storage behaviour over real database files |
 | `differential` | 34 | 349 | graded against the pinned SQLite 3.53.4 |
 | `durability` | 34 | 234 | crashes, injected faults, corruption and concurrency |
 | `e2e` | 36 | 432 | the public surfaces an application binds to, end to end |

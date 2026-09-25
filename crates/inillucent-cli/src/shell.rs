@@ -136,6 +136,16 @@ pub struct Shell {
     pub done: bool,
     /// Whether anything has failed, which decides the exit code.
     pub failed: bool,
+    /// The engine's error for the first statement that failed since `failed`
+    /// was last cleared, when the failure came from the engine.
+    ///
+    /// **Kept so a command can report the right status (task-2120).** The
+    /// printed text says what went wrong; only the `DbError` says which class
+    /// of failure it was. `inillucent run` used to report every failure in a
+    /// script as `syntax` with exit code 1, so a statement the engine has not
+    /// built - `exec` reports it as `unsupported` with exit code 3 - told the
+    /// caller to look for a mistake in SQL that had none.
+    pub first_error: Option<inillucent_base::DbError>,
     /// The line the statement being run started on.
     pub line: usize,
     /// Where `.log` was pointed, when it was pointed anywhere.
@@ -382,6 +392,7 @@ impl Shell {
             defensive: true,
             done: false,
             failed: false,
+            first_error: None,
             log_to: None,
             progress_interval: 0,
             progress_limit: 0,
@@ -830,6 +841,9 @@ impl Shell {
     /// which is the same rule the reference follows: `no such table` has no
     /// position and `no such column` does.
     fn report(&mut self, sql: &str, failure: &Failure) {
+        if self.first_error.is_none() {
+            self.first_error = failure.error.clone();
+        }
         let line = self.line;
         let heading = if failure.compiling {
             format!("Parse error near line {line}: {}", failure.message)

@@ -129,7 +129,13 @@
 //!
 //! `index.partial`, `index.expr` and `without.rowid.index` - the three
 //! `CREATE INDEX` forms that were once left refused - are now built, and their
-//! rows moved from `Differs` to `Agrees`. No *construct* differs.
+//! rows moved from `Differs` to `Agrees`. No *construct* differs by accident.
+//!
+//! Two differ on purpose. `dml.delete.limit` and `dml.update.limit` are
+//! `DELETE` and `UPDATE` with `ORDER BY ... LIMIT`, which the pinned reference
+//! refuses because it is compiled without `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`
+//! and which this engine runs, because the builds applications link often have
+//! the option and a consumer reported the refusal as a gap (task-2120).
 //!
 //! The seven `Differs` rows at the end of the table are a different thing, and
 //! they arrived in task-2036. `docs/feature-comparison.md` measured them, gave
@@ -299,18 +305,15 @@ const CASES: &[Case] = &[
         script: "CREATE TABLE t(a INTEGER PRIMARY KEY, n INTEGER);\nINSERT INTO t VALUES(1,100),(2,600);\nINSERT INTO t VALUES(1,7) ON CONFLICT(a) DO UPDATE SET n=999 WHERE t.n > 500;\nINSERT INTO t VALUES(2,7) ON CONFLICT(a) DO UPDATE SET n=999 WHERE t.n > 500;\nSELECT * FROM t ORDER BY a;\nSELECT changes();",
         expect: Agrees,
     },
-    // A later QA pass: the two shapes the 416-case probe caught reporting a
-    // refusal in the wrong words.
-    //
-    // The pinned reference is not compiled with
-    // `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, so it has no grammar for the clause
-    // and answers `near "ORDER": syntax error`. This engine parses the form -
-    // it is a published production and the syntax register requires it - and
-    // refuses it at bind time in the reference's words. A later change moved
-    // `bind::refused` from `Unexpected` to `Refused`, which was right for the
-    // forty-seven sentence-shaped refusals it was aimed at and wrong for this
-    // one: the message became a bare `ORDER`. Both engines still refused, so
-    // nothing that only checks for failure could see it.
+    // **Two differences on purpose (task-2120).** The pinned reference is not
+    // compiled with `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, so it has no grammar
+    // for `ORDER BY` and `LIMIT` on a write and answers `near "ORDER": syntax
+    // error`. This engine refused the form in those same words until a
+    // consumer on macOS - whose `sqlite3` is compiled with the option -
+    // reported the refusal as a gap, and it now runs the statement. Which rows
+    // it changes is graded in `limited_writes.rs`, since this reference cannot
+    // grade it. If either case starts agreeing, the engine has started
+    // refusing the clause again.
     Case {
         name: "dml.delete.limit",
         kind: "write",
@@ -318,7 +321,7 @@ const CASES: &[Case] = &[
 INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t');
 DELETE FROM t ORDER BY a DESC LIMIT 2;
 SELECT count(*) FROM t;",
-        expect: Agrees,
+        expect: Differs,
     },
     Case {
         name: "dml.update.limit",
@@ -327,7 +330,7 @@ SELECT count(*) FROM t;",
 INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t');
 UPDATE t SET b='z' ORDER BY a DESC LIMIT 1;
 SELECT group_concat(b) FROM (SELECT b FROM t ORDER BY id);",
-        expect: Agrees,
+        expect: Differs,
     },
     Case {
         name: "trigger.recursive",

@@ -224,6 +224,7 @@ pub fn rewrite_update(statement: &mut BoundUpdate, rewrite: Rewrite<'_>) {
         rewrite_expr(&mut check.expr, rewrite);
     }
     rewrite_columns(&mut statement.returning, rewrite);
+    rewrite_order(&mut statement.order_by, rewrite);
     rewrite_option(statement.limit.as_mut(), rewrite);
     rewrite_option(statement.offset.as_mut(), rewrite);
     if let Some(rows) = statement.view_rows.as_mut() {
@@ -239,6 +240,7 @@ pub fn rewrite_update(statement: &mut BoundUpdate, rewrite: Rewrite<'_>) {
 pub fn rewrite_delete(statement: &mut BoundDelete, rewrite: Rewrite<'_>) {
     rewrite_option(statement.filter.as_mut(), rewrite);
     rewrite_columns(&mut statement.returning, rewrite);
+    rewrite_order(&mut statement.order_by, rewrite);
     rewrite_option(statement.limit.as_mut(), rewrite);
     rewrite_option(statement.offset.as_mut(), rewrite);
     if let Some(rows) = statement.view_rows.as_mut() {

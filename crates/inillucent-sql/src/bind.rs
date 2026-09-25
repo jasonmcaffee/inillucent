@@ -3422,10 +3422,10 @@ impl<'a> Binder<'a> {
     /// Not [`Binder::bind_order_by`]: that one resolves a bare integer as an
     /// ordinal into the *result columns*, which an aggregate's own `ORDER BY`
     /// has none of. `group_concat(b ORDER BY 1)` sorts by the literal 1 in
-    /// SQLite, which is to say by nothing.
+    /// SQLite, which is to say by nothing. A limited write uses it too.
     ///
     /// @param terms - the terms as written
-    fn bind_aggregate_order(
+    pub(crate) fn bind_aggregate_order(
         &mut self,
         terms: &[ast::OrderTerm],
     ) -> Result<Vec<BoundOrderTerm>, ParseError> {

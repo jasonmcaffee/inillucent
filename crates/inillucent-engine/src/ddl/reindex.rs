@@ -45,11 +45,9 @@ impl ImportedDatabase {
                 table
                     .indexes
                     .iter()
+                    .filter(move |index| has_its_own_tree(table, index))
                     .map(move |index| (table.name.clone(), index.clone()))
             })
-            // A module owns its own index and rebuilds it its own way; a b-tree
-            // rebuild has nothing to put in it.
-            .filter(|(_, index)| index.origin != inillucent_sql::catalog_view::IndexOrigin::Module)
             .filter(|(_, index)| {
                 wanted.is_empty()
                     || wanted.contains(&index.folded)
@@ -79,9 +77,7 @@ impl ImportedDatabase {
                     table
                         .indexes
                         .iter()
-                        .filter(|index| {
-                            index.origin != inillucent_sql::catalog_view::IndexOrigin::Module
-                        })
+                        .filter(move |index| has_its_own_tree(table, index))
                         .map(move |index| (table.name.clone(), index.name.clone()))
                 })
                 .chain(targets)
@@ -341,4 +337,32 @@ impl ImportedDatabase {
             }
         }
     }
+}
+
+/// Returns whether an index is a b-tree of its own that a `REINDEX` can rebuild.
+///
+/// Two kinds of entry in a table's index list are not:
+///
+/// - **A module's index.** The module owns its rows and rebuilds them its own
+///   way, so a b-tree rebuild has nothing to put in it.
+/// - **A `WITHOUT ROWID` table's primary key.** That table *is* its primary-key
+///   b-tree, so the catalog loader lists the key with the table's own root and
+///   SQLite writes no `sqlite_schema` row for it. A bare `REINDEX` used to reach
+///   it, look for its catalog row, and fail with `the index has no catalog row`
+///   under the `syntax` class, on a database whose only unusual feature was one
+///   `WITHOUT ROWID` table. Rebuilding it would mean rebuilding the table, and
+///   its order cannot drift from its key: the rows are stored in key order and
+///   read back in key order through the same tree.
+///
+/// @param table - the table the index belongs to
+/// @param index - the entry from that table's index list
+fn has_its_own_tree(
+    table: &inillucent_sql::catalog_view::TableInfo,
+    index: &inillucent_sql::catalog_view::IndexInfo,
+) -> bool {
+    use inillucent_sql::catalog_view::IndexOrigin;
+    if index.origin == IndexOrigin::Module {
+        return false;
+    }
+    !(table.without_rowid && index.origin == IndexOrigin::PrimaryKey && index.root == table.root)
 }

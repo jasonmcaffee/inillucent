@@ -302,6 +302,71 @@ fn run_reports_a_failing_statement_as_a_failure() {
     );
 }
 
+/// **`run` reports an unbuilt construct as `unsupported` with exit code 3, the
+/// way `exec` does.**
+///
+/// `run` classified every failure in a script as `syntax` with exit code 1,
+/// because the shell kept only whether something had failed and not the
+/// engine's error. `AGENTS.md` promises that exit code 3 means "this engine
+/// has not built that", so a script can branch on it, and `exec` keeps that
+/// promise. A consumer's probe hit the difference with the same statement run
+/// both ways (task-2120). The statement here is `window_in_derived_table`,
+/// which the capability table declares `no`.
+///
+/// The second half keeps the fix honest: a real typo in a script is still
+/// `syntax` with exit code 1, so the change is not a verb that reports
+/// everything as unbuilt.
+#[test]
+fn run_reports_an_unbuilt_construct_as_unsupported() {
+    let binary = program("inillucent");
+    let database = populated(&binary, "run-unsupported");
+    let path = database.to_string_lossy().to_string();
+    let unbuilt = "SELECT n FROM (SELECT row_number() OVER () AS n FROM note)";
+    let refused = run(
+        &binary,
+        &[
+            "--db",
+            &path,
+            "run",
+            &format!("SELECT 1; {unbuilt};"),
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(
+        refused.code, 3,
+        "`run` on a statement the engine has not built exited {}:\n{}\n{}",
+        refused.code, refused.stdout, refused.stderr
+    );
+    assert_eq!(
+        text_field(&refused.stdout, "status"),
+        "unsupported",
+        "{}",
+        refused.stdout
+    );
+    let direct = run(
+        &binary,
+        &["--db", &path, "exec", unbuilt, "--output", "json"],
+    );
+    assert_eq!(
+        (direct.code, text_field(&direct.stdout, "status")),
+        (3, "unsupported".to_string()),
+        "`exec` on the same statement: {}",
+        direct.stdout
+    );
+
+    let mistyped = run(
+        &binary,
+        &["--db", &path, "run", "SELEC 1;", "--output", "json"],
+    );
+    assert_eq!(
+        (mistyped.code, text_field(&mistyped.stdout, "status")),
+        (1, "syntax".to_string()),
+        "a typo in a script: {}",
+        mistyped.stdout
+    );
+}
+
 /// A `.once` in a script handed to `run` writes its file.
 ///
 /// **The defect `export --out` was reported for was the shell's, not the

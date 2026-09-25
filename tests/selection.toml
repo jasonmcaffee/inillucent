@@ -704,6 +704,29 @@ covers = ["inillucent-engine", "inillucent-exec"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "reindex_without_rowid"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "limited_writes"
+tier = "engine"
+# The binder carries ORDER BY onto the query that finds a write's rows, and the
+# engine and the trigger runner each build that query, so all three are here.
+covers = ["inillucent-engine", "inillucent-exec", "inillucent-sql"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "subquery_values"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-exec"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "search"
 tier = "engine"
 covers = ["inillucent-search", "inillucent-engine"]

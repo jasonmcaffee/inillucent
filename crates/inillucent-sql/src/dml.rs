@@ -21,11 +21,11 @@ use inillucent_value::Collation;
 
 use crate::ast::{self, ConflictAction};
 use crate::bind::{
-    no_such_column, refused, unsupported, Binder, BoundExpr, BoundResultColumn, BoundSelect,
-    BoundSource,
+    no_such_column, refused, unsupported, Binder, BoundExpr, BoundOrderTerm, BoundResultColumn,
+    BoundSelect, BoundSource,
 };
 use crate::catalog_view::{IndexInfo, TableInfo, TableKind, TriggerEventInfo, TriggerInfo};
-use crate::diagnostic::{ParseError, ParseErrorKind};
+use crate::diagnostic::ParseError;
 use crate::lexer::Span;
 use crate::parser::parse_expression;
 
@@ -360,6 +360,14 @@ pub struct BoundUpdate {
     pub index_hint: crate::bind::IndexChoice,
     /// The `RETURNING` columns.
     pub returning: Vec<BoundResultColumn>,
+    /// The `ORDER BY` that decides which rows a `LIMIT` keeps.
+    ///
+    /// Empty unless the statement wrote one, and then always with a `LIMIT`,
+    /// because the binder refuses an order with nothing to limit. It goes onto
+    /// the query that finds the rows to change, which is where SQLite puts it
+    /// too: a limited write is `WHERE rowid IN (SELECT rowid ... ORDER BY ...
+    /// LIMIT ...)` there.
+    pub order_by: Vec<BoundOrderTerm>,
     /// The `LIMIT`.
     pub limit: Option<BoundExpr>,
     /// The `OFFSET`.
@@ -399,6 +407,14 @@ pub struct BoundDelete {
     pub filter: Option<BoundExpr>,
     /// The `RETURNING` columns.
     pub returning: Vec<BoundResultColumn>,
+    /// The `ORDER BY` that decides which rows a `LIMIT` keeps.
+    ///
+    /// Empty unless the statement wrote one, and then always with a `LIMIT`,
+    /// because the binder refuses an order with nothing to limit. It goes onto
+    /// the query that finds the rows to change, which is where SQLite puts it
+    /// too: a limited write is `WHERE rowid IN (SELECT rowid ... ORDER BY ...
+    /// LIMIT ...)` there.
+    pub order_by: Vec<BoundOrderTerm>,
     /// The `LIMIT`.
     pub limit: Option<BoundExpr>,
     /// The `OFFSET`.
@@ -620,7 +636,7 @@ impl<'a> Binder<'a> {
 
     /// Binds an `UPDATE` with its CTEs already in scope.
     fn bind_update_body(&mut self, update: &ast::Update) -> Result<BoundUpdate, ParseError> {
-        if let Some(refusal) = limited_dml_refusal(update.limited_at) {
+        if let Some(refusal) = order_without_limit(update.limited_at, update.limit, "UPDATE") {
             return Err(refusal);
         }
         let (table, source) =
@@ -704,6 +720,9 @@ impl<'a> Binder<'a> {
         let not_null_defaults = self.bind_not_null_defaults(&table)?;
         let index_exprs = self.bind_index_exprs(&table)?;
         let returning = self.bind_returning(&update.returning)?;
+        // Bound as expressions, the way an aggregate's own `ORDER BY` is: a
+        // write has no result columns, so a bare integer names no ordinal.
+        let order_by = self.bind_aggregate_order(&update.order_by)?;
         let limit = match update.limit {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
@@ -727,7 +746,9 @@ impl<'a> Binder<'a> {
             TriggerEventInfo::Update(Vec::new()),
             &changed,
         )?);
-        let view_rows = self.view_rows(&table, filter.clone());
+        let view_rows = self
+            .view_rows(&table, filter.clone())
+            .map(|rows| limit_view_rows(rows, &order_by, &limit, &offset));
         let index_hint = self.write_hint(source, &index_exprs, filter.as_ref(), &joined)?;
         Ok(BoundUpdate {
             table,
@@ -742,6 +763,7 @@ impl<'a> Binder<'a> {
             checks,
             not_null_defaults,
             returning,
+            order_by,
             limit,
             offset,
             triggers,
@@ -761,7 +783,7 @@ impl<'a> Binder<'a> {
 
     /// Binds a `DELETE` with its CTEs already in scope.
     fn bind_delete_body(&mut self, delete: &ast::Delete) -> Result<BoundDelete, ParseError> {
-        if let Some(refusal) = limited_dml_refusal(delete.limited_at) {
+        if let Some(refusal) = order_without_limit(delete.limited_at, delete.limit, "DELETE") {
             return Err(refusal);
         }
         let (table, source) =
@@ -772,6 +794,7 @@ impl<'a> Binder<'a> {
             None => None,
         };
         let returning = self.bind_returning(&delete.returning)?;
+        let order_by = self.bind_aggregate_order(&delete.order_by)?;
         let limit = match delete.limit {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
@@ -782,7 +805,9 @@ impl<'a> Binder<'a> {
         };
         let mut triggers = self.bind_triggers(&table, TriggerEventInfo::Delete, &[])?;
         triggers.extend(self.bind_foreign_keys(&table, TriggerEventInfo::Delete, &[])?);
-        let view_rows = self.view_rows(&table, filter.clone());
+        let view_rows = self
+            .view_rows(&table, filter.clone())
+            .map(|rows| limit_view_rows(rows, &order_by, &limit, &offset));
         let index_hint = self.write_hint(source, &index_exprs, filter.as_ref(), &[])?;
         Ok(BoundDelete {
             table,
@@ -791,6 +816,7 @@ impl<'a> Binder<'a> {
             source,
             filter,
             returning,
+            order_by,
             limit,
             offset,
             triggers,
@@ -1910,31 +1936,60 @@ pub fn rowid_message(table: &TableInfo) -> (i32, String) {
     }
 }
 
-/// Returns the refusal a `DELETE` or `UPDATE` with `ORDER BY`/`LIMIT` earns.
+/// Puts a limited write's order, limit and offset on the query that finds a
+/// view's rows.
 ///
-/// The pinned reference is not compiled with `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`,
-/// so it has no grammar for the clause at all and answers `near "ORDER": syntax
-/// error` with its caret under the word. The syntax register requires the form
-/// to *parse* here - it is a published production - so the refusal is made here
-/// instead, in the reference's words and at the reference's position.
+/// A write through a view's `INSTEAD OF` trigger fires once per row the view
+/// produces under the statement's `WHERE`, so a `LIMIT` on the write limits
+/// that query. SQLite's `sqlite3MaterializeView` is handed the same three
+/// clauses for the same reason.
 ///
-/// **It is an `Unexpected`, not a `Refused`, and the distinction is the whole
-/// message.** This is the one refusal whose text really is `near "X": syntax
-/// error`, because the reference's parser genuinely has no production for the
-/// word - unlike the sentence-shaped refusals that were moved off that variant,
-/// which are a schema saying no to a statement that parsed. Routing it through
-/// `bind::refused` with them made it answer a bare `ORDER`, which the
-/// 416-case probe caught as `both-refuse-differently` on `DELETE ... ORDER BY
-/// ... LIMIT` and `UPDATE ... ORDER BY ... LIMIT`.
+/// @param rows - the query over the view the binder built
+/// @param order_by - the statement's bound `ORDER BY`
+/// @param limit - the statement's bound `LIMIT`
+/// @param offset - the statement's bound `OFFSET`
+fn limit_view_rows(
+    mut rows: Box<BoundSelect>,
+    order_by: &[BoundOrderTerm],
+    limit: &Option<BoundExpr>,
+    offset: &Option<BoundExpr>,
+) -> Box<BoundSelect> {
+    rows.order_by = order_by.to_vec();
+    rows.limit = limit.clone();
+    rows.offset = offset.clone();
+    rows
+}
+
+/// Returns the refusal a `DELETE` or `UPDATE` with `ORDER BY` and no `LIMIT`
+/// earns, or `None` when the clause is allowed.
 ///
-/// @param limited - the word and where it was written, from the parser
-fn limited_dml_refusal(limited: Option<(ast::Limited, Span)>) -> Option<ParseError> {
+/// **`ORDER BY` and `LIMIT` on a write are run, not refused (task-2120).** They
+/// were refused in the pinned reference's words, `near "ORDER": syntax error`,
+/// because that build is not compiled with `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`
+/// and has no grammar for the clause. But the builds applications actually link
+/// often are - Apple's is - and `DELETE FROM t WHERE ... LIMIT 1000` in a loop
+/// is the ordinary way to trim a large table without one large transaction. A
+/// consumer probing 0.1.8 against the macOS `sqlite3` reported the refusal as a
+/// real gap, which it was.
+///
+/// What remains is the one rule a build compiled with the option enforces:
+/// an order with nothing to limit is refused, in SQLite's own words, because
+/// sorting the rows a statement changes all of changes nothing.
+///
+/// @param limited - which of the two words came first and where, from the parser
+/// @param limit - the statement's `LIMIT`, when it wrote one
+/// @param statement - `DELETE` or `UPDATE`, for the message
+fn order_without_limit(
+    limited: Option<(ast::Limited, Span)>,
+    limit: Option<ast::ExprId>,
+    statement: &str,
+) -> Option<ParseError> {
     let (word, span) = limited?;
-    Some(ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: word.word().to_string(),
-            expected: Vec::new(),
-        },
+    if word != ast::Limited::OrderBy || limit.is_some() {
+        return None;
+    }
+    Some(refused(
+        format!("ORDER BY without LIMIT on {statement}"),
         span,
     ))
 }

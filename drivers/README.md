@@ -37,7 +37,7 @@ observe the request:
 
 ```
 $ python bindings/python/run_conformance.py
-45 capabilities reported
+49 capabilities reported
 ```
 
 ---

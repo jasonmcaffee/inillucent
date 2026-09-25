@@ -30,9 +30,10 @@ capability that fails and a denied one that now works each turn the build red â€
 trusting in a way a hand-written feature list is not. **A name that is not in the table answers
 *no***, because a capability nobody declared was never checked.
 
-`docs/feature-comparison.md` is the measured side-by-side against SQLite: 416 differential cases, 404 of
-which produce SQLite's exact bytes, and every one of the differences named with what it measures. Six
-of the other twelve are vector features SQLite does not have and six answer differently.
+`docs/feature-comparison.md` is the measured side-by-side against SQLite: 416 differential cases, 402 of
+which produce SQLite's exact bytes, and every one of the differences named with what it measures. Of
+the other fourteen, six are vector features SQLite does not have, six answer differently, and two are
+`DELETE ... LIMIT` forms the pinned SQLite build refuses and inillucent runs.
 
 ## "It refuses to write the file"
 

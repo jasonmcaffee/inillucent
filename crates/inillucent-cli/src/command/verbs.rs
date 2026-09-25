@@ -522,6 +522,34 @@ pub fn batch(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Fa
     Ok(produced)
 }
 
+/// Returns the failure the shell recorded while running a command, and clears it.
+///
+/// The message is what the shell printed, because that is the text a person
+/// reads: the line number, the statement and the caret. The status comes from
+/// the engine's error when there is one, so a statement the engine has not
+/// built is `unsupported` with exit code 3 here exactly as it is under `exec`.
+/// A failure with no engine error behind it came from the shell itself - a dot
+/// command's own complaint - and stays `syntax`.
+///
+/// @param context - the command's context, whose shell ran the input
+/// @param printed - what the shell printed while running it
+fn take_failure(context: &mut Context, printed: &str) -> Option<Failed> {
+    let shell = context.shell();
+    let failed = std::mem::replace(&mut shell.failed, false);
+    let error = shell.first_error.take();
+    if !failed {
+        return None;
+    }
+    let message = printed.trim_end().to_string();
+    Some(match error {
+        Some(error) => Failed {
+            message,
+            ..Failed::from_engine(&error)
+        },
+        None => Failed::said(Status::Syntax, message),
+    })
+}
+
 /// `run`: runs shell input, dot commands included, and returns what it printed.
 pub fn run_input(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let input = arguments.required_text("input")?.to_string();
@@ -535,8 +563,6 @@ pub fn run_input(context: &mut Context, arguments: &Arguments) -> Result<Outcome
         }
     }
     let printed = context.collect_output(&input);
-    let failed = context.shell().failed;
-    context.shell().failed = false;
     // **A failing statement is a failure** (task-2066 section 4.2, item 27).
     // This used to answer `Ok` with a `shell_reported_an_error` field beside
     // the printed text, so `inillucent run "SELECT * FROM nothing;"` exited 0
@@ -545,8 +571,8 @@ pub fn run_input(context: &mut Context, arguments: &Arguments) -> Result<Outcome
     // command had run. The other four verbs that drive the shell go through
     // `dot`, which has reported this as a failure all along; `run` was the one
     // that did not, and it is the one an agent reaches for.
-    if failed {
-        return Err(Failed::said(Status::Syntax, printed.trim_end().to_string()));
+    if let Some(failed) = take_failure(context, &printed) {
+        return Err(failed);
     }
     Ok(Outcome::said("run", printed.trim_end()))
 }
@@ -739,6 +765,7 @@ pub fn schema(context: &mut Context, arguments: &Arguments) -> Result<Outcome, F
     }
     let printed = context.collect_output(&line);
     context.shell().failed = false;
+    context.shell().first_error = None;
     Ok(Outcome::said("schema", printed.trim_end()))
 }
 
@@ -841,10 +868,8 @@ fn dot(context: &mut Context, command: &str, line: &str) -> Result<Outcome, Fail
     let guarded = std::mem::replace(&mut context.shell().safe, false);
     let printed = context.collect_output(line);
     context.shell().safe = guarded;
-    let failed = context.shell().failed;
-    context.shell().failed = false;
-    if failed {
-        return Err(Failed::said(Status::Syntax, printed.trim_end().to_string()));
+    if let Some(failed) = take_failure(context, &printed) {
+        return Err(failed);
     }
     Ok(Outcome::said(command, printed.trim_end()))
 }
@@ -990,10 +1015,8 @@ pub fn export(context: &mut Context, arguments: &Arguments) -> Result<Outcome, F
     if destination.is_some() {
         let _ = context.shell().redirect(None, false);
     }
-    let failed = context.shell().failed;
-    context.shell().failed = false;
-    if failed {
-        return Err(Failed::said(Status::Syntax, printed.trim_end().to_string()));
+    if let Some(failed) = take_failure(context, &printed) {
+        return Err(failed);
     }
     let Some(path) = destination else {
         return Ok(Outcome::said("export", printed.trim_end()));
@@ -1714,6 +1737,7 @@ fn migrate_sqlite_file(from: &std::path::Path, to: &std::path::Path) -> Result<O
 pub fn version(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {
     let printed = context.collect_output(".version");
     context.shell().failed = false;
+    context.shell().first_error = None;
     let text = format!(
         "{}
 inillucent-cli {}

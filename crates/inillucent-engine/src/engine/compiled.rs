@@ -147,7 +147,9 @@ impl crate::ImportedDatabase {
             Cached::Ddl(sql) => self.execute_ddl(sql),
             Cached::QueryPlan(lines) => Ok(query_plan_rows(lines)),
             Cached::Program(rows) => Ok(program_rows(rows)),
-            Cached::VirtualInsert(statement) => self.insert_into_module(statement, params),
+            Cached::VirtualInsert(statement, holds_subquery) => {
+                self.insert_into_module_folded(statement, *holds_subquery, params)
+            }
             Cached::SchemaInsert(statement) => self.insert_into_schema(statement, params),
             Cached::Select(plan, prepared, slot, names) => {
                 self.execute_select_cached(plan, prepared, slot, names, params)
@@ -204,6 +206,17 @@ impl crate::ImportedDatabase {
             Cached::VirtualUpdate(statement, query) => {
                 let keys =
                     self.run_cached_query(&query.plan, &query.prepared, &query.slot, params)?;
+                // A module's new values are constants, read by `literal_value`
+                // out of `Params`, so a subquery among them is answered before
+                // the rows are changed - the same fold `Cached::Update` gives
+                // an ordinary table's assignments (task-2120).
+                let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
+                    .assignments
+                    .iter()
+                    .map(|assignment| &assignment.value)
+                    .collect();
+                let folded = inillucent_exec::subquery::fold_expressions(&assigned, self, params)?;
+                let params = folded.as_ref().unwrap_or(params);
                 let changed = self.update_module(statement, &keys, params)?;
                 if self.writing.batch().is_none() {
                     self.sync_modules()?;
@@ -250,6 +263,34 @@ impl crate::ImportedDatabase {
                 )
             }
         }
+    }
+
+    /// Runs an insert into a virtual table with its `VALUES` subqueries folded.
+    ///
+    /// **A module's row is built from constants, so a subquery in it has to be
+    /// answered first (task-2120).** `insert_into_module` evaluates each value
+    /// with `literal_value`, which reads a subquery's answer out of `Params` -
+    /// and nothing had put one there, so `INSERT INTO docs(title, body) VALUES
+    /// ((SELECT title FROM shelf LIMIT 1), 'x')` on an FTS5 table was refused
+    /// as "a correlated subquery used as a value". The same insert into an
+    /// ordinary table ran, because [`Cached::Insert`] folds its list; a
+    /// consumer found the difference and reported the combination as missing.
+    ///
+    /// @param statement - the bound insert
+    /// @param holds_subquery - whether the `VALUES` list holds a subquery
+    /// @param params - the values bound for this execution
+    pub(crate) fn insert_into_module_folded(
+        &mut self,
+        statement: &inillucent_sql::dml::BoundInsert,
+        holds_subquery: bool,
+        params: &Params,
+    ) -> DbResult<Outcome> {
+        let folded = if holds_subquery {
+            self.fold_values(statement, params)?
+        } else {
+            None
+        };
+        self.insert_into_module(statement, folded.as_ref().unwrap_or(params))
     }
 
     /// Folds the subqueries in an insert's `VALUES` list, when it has one.
@@ -333,8 +374,7 @@ impl crate::ImportedDatabase {
                     &statement.table,
                     statement.source,
                     statement.filter.as_ref(),
-                    statement.limit.as_ref(),
-                    statement.offset.as_ref(),
+                    KeptRows::of(&statement.order_by, &statement.limit, &statement.offset),
                     &statement.index_hint,
                     &statement.index_exprs,
                 )?
@@ -345,8 +385,7 @@ impl crate::ImportedDatabase {
                     &statement.table,
                     statement.source,
                     statement.filter.as_ref(),
-                    statement.limit.as_ref(),
-                    statement.offset.as_ref(),
+                    KeptRows::of(&statement.order_by, &statement.limit, &statement.offset),
                     &statement.index_hint,
                     &statement.index_exprs,
                 )?
@@ -435,7 +474,8 @@ impl crate::ImportedDatabase {
                 // engine evaluates the row and hands it over; what happens to it
                 // is the module's business, which is what makes a module a
                 // module rather than a table with a funny name.
-                Ok(Cached::VirtualInsert(statement))
+                let holds_subquery = values_hold_subquery(&statement);
+                Ok(Cached::VirtualInsert(statement, holds_subquery))
             }
             BoundStatement::Insert(statement) => {
                 let source = match &statement.source {
@@ -446,14 +486,8 @@ impl crate::ImportedDatabase {
                     }
                     inillucent_sql::dml::BoundInsertSource::Values(_) => None,
                 };
-                let values_hold_subquery = match &statement.source {
-                    inillucent_sql::dml::BoundInsertSource::Values(rows) => rows
-                        .iter()
-                        .flatten()
-                        .any(inillucent_sql::plan::expression_holds_subquery),
-                    inillucent_sql::dml::BoundInsertSource::Select(_) => false,
-                };
-                Ok(Cached::Insert(statement, source, values_hold_subquery))
+                let holds_subquery = values_hold_subquery(&statement);
+                Ok(Cached::Insert(statement, source, holds_subquery))
             }
             // **A write to a virtual table is the module's to make**, the same
             // way an insert and a delete already are. `UPDATE f SET body=...`
@@ -464,13 +498,14 @@ impl crate::ImportedDatabase {
             BoundStatement::Update(statement)
                 if statement.table.kind == inillucent_sql::catalog_view::TableKind::Virtual =>
             {
-                let select = inillucent_exec::dml::module_keys_query(
+                let mut select = inillucent_exec::dml::module_keys_query(
                     &statement.table,
                     statement.source,
                     statement.filter.as_ref(),
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
                 );
+                select.order_by = statement.order_by.clone();
                 let plan = plan_select_with(select, self.pragmas.levers());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualUpdate(
@@ -493,13 +528,14 @@ impl crate::ImportedDatabase {
             BoundStatement::Delete(statement)
                 if statement.table.kind == inillucent_sql::catalog_view::TableKind::Virtual =>
             {
-                let select = inillucent_exec::dml::module_keys_query(
+                let mut select = inillucent_exec::dml::module_keys_query(
                     &statement.table,
                     statement.source,
                     statement.filter.as_ref(),
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
                 );
+                select.order_by = statement.order_by.clone();
                 let plan = plan_select_with(select, self.pragmas.levers());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualDelete(
@@ -521,8 +557,7 @@ impl crate::ImportedDatabase {
                     &statement.table,
                     statement.source,
                     statement.filter.as_ref(),
-                    statement.limit.as_ref(),
-                    statement.offset.as_ref(),
+                    KeptRows::of(&statement.order_by, &statement.limit, &statement.offset),
                     &statement.index_hint,
                     &statement.index_exprs,
                 )?;
@@ -550,8 +585,7 @@ impl crate::ImportedDatabase {
     /// @param table - the table being written
     /// @param source - the statement-wide number of its FROM term
     /// @param filter - the statement's `WHERE`
-    /// @param limit - the statement's `LIMIT`
-    /// @param offset - the statement's `OFFSET`
+    /// @param kept - the statement's `ORDER BY`, `LIMIT` and `OFFSET`
     /// @param hint - `INDEXED BY` or `NOT INDEXED` on the target
     /// @param index_exprs - the target's bound index expressions
     fn keys_plan(
@@ -559,8 +593,7 @@ impl crate::ImportedDatabase {
         table: &TableInfo,
         source: usize,
         filter: Option<&inillucent_sql::bind::BoundExpr>,
-        limit: Option<&inillucent_sql::bind::BoundExpr>,
-        offset: Option<&inillucent_sql::bind::BoundExpr>,
+        kept: KeptRows<'_>,
         hint: &inillucent_sql::bind::IndexChoice,
         index_exprs: &[inillucent_sql::dml::BoundIndexExprs],
     ) -> DbResult<(PhysicalPlan, physical::Prepared)> {
@@ -569,7 +602,8 @@ impl crate::ImportedDatabase {
             .layouts
             .get(&table.root)
             .ok_or_else(|| refusal("no layout imported for the table being written"))?;
-        let mut select = dml::keys_query(table, source, filter, limit, offset, layout)?;
+        let mut select = dml::keys_query(table, source, filter, kept.limit, kept.offset, layout)?;
+        select.order_by = kept.order_by.to_vec();
         dml::hint_target(&mut select, hint, index_exprs);
         let mut plan = plan_select_with(select, self.pragmas.levers());
         // **The one place `Levers::INDEXED_WRITE` has to be applied by hand.**
@@ -624,8 +658,7 @@ impl crate::ImportedDatabase {
                 &statement.table,
                 statement.source,
                 statement.filter.as_ref(),
-                statement.limit.as_ref(),
-                statement.offset.as_ref(),
+                KeptRows::of(&statement.order_by, &statement.limit, &statement.offset),
                 &statement.index_hint,
                 &statement.index_exprs,
             );
@@ -650,6 +683,7 @@ impl crate::ImportedDatabase {
             &statement.from,
             &assigned,
         )?;
+        select.order_by = statement.order_by.clone();
         dml::hint_target(&mut select, &statement.index_hint, &statement.index_exprs);
         let plan = plan_select_with(select, self.pragmas.levers());
         let prepared = physical::prepare_any(&plan, self)?;
@@ -968,5 +1002,55 @@ impl crate::ImportedDatabase {
         // every way out of `write` clears it.
         self.writing.set_statement_txn(None);
         undone.err().unwrap_or(error)
+    }
+}
+
+/// The three clauses that decide which of a write's matching rows it changes.
+///
+/// Grouped because they only ever travel together - an `ORDER BY` on a write
+/// means nothing without its `LIMIT` - and because `keys_plan` would otherwise
+/// take one argument past the workspace's threshold of eight.
+#[derive(Clone, Copy)]
+struct KeptRows<'a> {
+    /// The order a `LIMIT` counts rows in.
+    order_by: &'a [inillucent_sql::bind::BoundOrderTerm],
+    /// How many rows are changed, when the statement limited it.
+    limit: Option<&'a inillucent_sql::bind::BoundExpr>,
+    /// How many ordered rows are passed over first.
+    offset: Option<&'a inillucent_sql::bind::BoundExpr>,
+}
+
+impl<'a> KeptRows<'a> {
+    /// Borrows the three clauses from a bound `UPDATE` or `DELETE`.
+    ///
+    /// @param order_by - the statement's bound `ORDER BY`
+    /// @param limit - the statement's bound `LIMIT`
+    /// @param offset - the statement's bound `OFFSET`
+    fn of(
+        order_by: &'a [inillucent_sql::bind::BoundOrderTerm],
+        limit: &'a Option<inillucent_sql::bind::BoundExpr>,
+        offset: &'a Option<inillucent_sql::bind::BoundExpr>,
+    ) -> KeptRows<'a> {
+        KeptRows {
+            order_by,
+            limit: limit.as_ref(),
+            offset: offset.as_ref(),
+        }
+    }
+}
+
+/// Reports whether an insert's `VALUES` list holds a subquery.
+///
+/// Asked once, when the statement is compiled, so an insert without one - the
+/// common case - does not walk its values on every execution.
+///
+/// @param statement - the bound insert
+fn values_hold_subquery(statement: &inillucent_sql::dml::BoundInsert) -> bool {
+    match &statement.source {
+        inillucent_sql::dml::BoundInsertSource::Values(rows) => rows
+            .iter()
+            .flatten()
+            .any(inillucent_sql::plan::expression_holds_subquery),
+        inillucent_sql::dml::BoundInsertSource::Select(_) => false,
     }
 }

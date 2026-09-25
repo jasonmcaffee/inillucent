@@ -461,6 +461,57 @@ pub static CAPABILITIES: &[Capability] = &[
         },
     },
     Capability {
+        name: "update_delete_limit",
+        support: Support::Yes,
+        // **Probed by its value.** `ORDER BY` on a write used to be parsed and
+        // then dropped by the binder, so a probe that only asked whether the
+        // statement ran would pass an engine that deleted an arbitrary row.
+        // Without the order this deletes the row with the lowest rowid, 1.
+        note: "DELETE and UPDATE take ORDER BY, LIMIT and OFFSET, as SQLite does when it is compiled with SQLITE_ENABLE_UPDATE_DELETE_LIMIT, so a batch loop of `DELETE ... LIMIT 1000` runs. An ORDER BY with no LIMIT is refused, as it is there.",
+        probe: Probe::Answers {
+            setup: &[
+                "CREATE TABLE cap_limited (a INTEGER)",
+                "INSERT INTO cap_limited VALUES (1), (2), (3), (4), (5)",
+            ],
+            sql: "DELETE FROM cap_limited RETURNING a ORDER BY a DESC LIMIT 1",
+            expect: "5",
+        },
+    },
+    Capability {
+        name: "subquery_value_in_a_virtual_table",
+        support: Support::Yes,
+        note: "A scalar subquery is a value an INSERT or UPDATE of a virtual table, such as an FTS5 table, can write: `INSERT INTO docs(title) VALUES ((SELECT title FROM shelf LIMIT 1))`.",
+        probe: Probe::Runs {
+            setup: &[
+                "CREATE TABLE cap_shelf (title TEXT)",
+                "INSERT INTO cap_shelf VALUES ('dune')",
+                "CREATE VIRTUAL TABLE cap_docs USING fts5(title)",
+            ],
+            sql: "INSERT INTO cap_docs(title) VALUES ((SELECT title FROM cap_shelf LIMIT 1))",
+        },
+    },
+    Capability {
+        name: "subquery_in_a_trigger_body",
+        support: Support::Yes,
+        note: "A statement in a trigger body may use a subquery as a value, in a WHEN guard and in its WHERE, whatever the statement that fired the trigger held.",
+        probe: Probe::Runs {
+            setup: &[
+                "CREATE TABLE cap_running (id INTEGER PRIMARY KEY, v INTEGER, total INTEGER)",
+                "CREATE TRIGGER cap_running_total AFTER INSERT ON cap_running BEGIN UPDATE cap_running SET total = (SELECT sum(v) FROM cap_running) WHERE id = new.id; END",
+            ],
+            sql: "INSERT INTO cap_running (id, v) VALUES (1, (SELECT 10))",
+        },
+    },
+    Capability {
+        name: "load_extension",
+        support: Support::No,
+        note: "There is no C extension interface to load a shared library into, so load_extension() refuses. Full text search (FTS5) and vector search (HNSW) are built in rather than loaded, which covers the usual reason to load one.",
+        probe: Probe::Runs {
+            setup: &[],
+            sql: "SELECT load_extension('cap_missing_extension')",
+        },
+    },
+    Capability {
         name: "window_in_derived_table",
         support: Support::No,
         note: "A window function inside a derived table in FROM is refused; the same query written with a common table expression runs.",

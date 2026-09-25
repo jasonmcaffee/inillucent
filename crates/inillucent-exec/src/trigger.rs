@@ -255,7 +255,10 @@ pub fn fire(
                 &mut guard,
                 &mut substitution(rows, slots, rowid),
             );
-            if !truth_of(&guard, target, params)? {
+            // Without the firing statement's subqueries, for the reason
+            // `run_body` gives: the guard's own `EXISTS (SELECT ...)` has to be
+            // folded, and a table the firing statement filled says it has been.
+            if !truth_of(&guard, target, &params.without_subqueries())? {
                 continue;
             }
         }
@@ -389,6 +392,16 @@ fn run_body(
         params,
         depth,
     } = *firing;
+    // **A body statement folds its own subqueries (task-2120).** It was handed
+    // the firing statement's `Params`, and when that statement had folded a
+    // subquery of its own, those report `has_subqueries` - which the fold reads
+    // as "already done" - so the body's subqueries were never answered and the
+    // physical pass refused them as correlated. Whether a trigger's
+    // `WHERE a IN (SELECT ...)` worked depended on what fired it. The
+    // substitution below has already turned every `OLD` and `NEW` read into a
+    // literal, so nothing in the body needs the firing statement's table.
+    let own = params.without_subqueries();
+    let params = &own;
     // **`PRAGMA recursive_triggers` lives here, and it is one assignment.** A
     // trigger body is *inlined* by the binder, and a trigger already being
     // bound is skipped - which is what makes the inlining terminate, and is
@@ -429,12 +442,21 @@ fn run_body(
                 &mut insert,
                 &mut substitution(rows, slots, rowid),
             );
-            let supplied = match &insert.source {
+            let (supplied, folded) = match &insert.source {
                 inillucent_sql::dml::BoundInsertSource::Select(select) => {
-                    run_select(select, target, params)?
+                    (run_select(select, target, params)?, None)
                 }
-                inillucent_sql::dml::BoundInsertSource::Values(_) => Vec::new(),
+                // A `VALUES` list is evaluated by the write path and not
+                // planned, so nothing folds it on the way - the same reason
+                // the engine folds a typed insert's list before running it.
+                inillucent_sql::dml::BoundInsertSource::Values(values) => {
+                    let exprs: Vec<&BoundExpr> = values.iter().flatten().collect();
+                    let folded =
+                        crate::subquery::fold_expressions(&exprs, target.catalog(), params)?;
+                    (Vec::new(), folded)
+                }
             };
+            let params = folded.as_ref().unwrap_or(params);
             dml::insert_at(&insert, target, params, &supplied, depth)?;
             Ok(())
         }
@@ -448,6 +470,15 @@ fn run_body(
                 &mut substitution(rows, slots, rowid),
             );
             let keys = keys_for_update(&update, target, params)?;
+            // After the keys, because the keys query folds its own `WHERE`
+            // and would find this table already filled.
+            let assigned: Vec<&BoundExpr> = update
+                .assignments
+                .iter()
+                .map(|assignment| &assignment.value)
+                .collect();
+            let folded = crate::subquery::fold_expressions(&assigned, target.catalog(), params)?;
+            let params = folded.as_ref().unwrap_or(params);
             dml::update_at(&update, target, params, &keys, depth)?;
             Ok(())
         }
@@ -490,6 +521,7 @@ fn keys_for_update(
         statement.offset.as_ref(),
         &layout,
     )?;
+    select.order_by = statement.order_by.clone();
     dml::hint_target(&mut select, &statement.index_hint, &statement.index_exprs);
     run_select(&select, target, params)
 }
@@ -513,6 +545,7 @@ fn keys_for_delete(
         statement.offset.as_ref(),
         &layout,
     )?;
+    select.order_by = statement.order_by.clone();
     dml::hint_target(&mut select, &statement.index_hint, &statement.index_exprs);
     run_select(&select, target, params)
 }

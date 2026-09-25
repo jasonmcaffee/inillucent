@@ -10,6 +10,36 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**`DELETE` and `UPDATE` take `ORDER BY`, `LIMIT` and `OFFSET`.** They were refused with
+`near "LIMIT": syntax error`, in the words of the pinned SQLite build, which is compiled without
+`SQLITE_ENABLE_UPDATE_DELETE_LIMIT`. Apple's SQLite and many application builds have the option, and
+`DELETE FROM t WHERE ... LIMIT 1000` in a loop is how a large table is trimmed without one large
+transaction. The statement changes exactly the rows a `SELECT` with the same `WHERE`, `ORDER BY`,
+`LIMIT` and `OFFSET` would return, which is how SQLite defines it. An `ORDER BY` with no `LIMIT` is
+refused with SQLite's message, `ORDER BY without LIMIT on DELETE`. The two cases in the feature probe
+that test this clause now answer where the pinned build refuses.
+
+**A bare `REINDEX` runs on a database holding a `WITHOUT ROWID` table.** It failed with
+`the index has no catalog row`, and so did `REINDEX` naming the table. A `WITHOUT ROWID` table is
+its own primary key tree, so there is no separate index to rebuild. Its secondary indexes are still
+rebuilt.
+
+**A scalar subquery can be a value in an insert or update of a virtual table, and in a trigger
+body.** `INSERT INTO docs(title, body) VALUES ((SELECT title FROM shelf LIMIT 1), 'x')` into an FTS5
+table was refused as "a correlated subquery used as a value", although the same insert into an
+ordinary table ran. A statement inside a trigger body was refused the same way, and so was an insert
+through a view's `INSTEAD OF` trigger. A trigger body's `WHEN EXISTS (...)` guard and its
+`WHERE ... IN (SELECT ...)` also failed when the statement that fired the trigger held a subquery of
+its own.
+
+**`inillucent run` reports the same status and exit code as `exec`.** A statement the engine has not
+built was reported as `syntax` with exit code 1 when it was part of a `run` script, and as
+`unsupported` with exit code 3 under `exec`. Exit code 3 now means the same thing under both.
+
+**`inillucent capabilities` has four more rows**: `update_delete_limit`,
+`subquery_value_in_a_virtual_table`, `subquery_in_a_trigger_body`, and `load_extension`, which is
+`no` because there is no C extension interface to load a library into.
+
 ## 0.1.9 — 2026-09-24
 
 **The macOS `.pkg` opens in Installer.app again.** The 0.1.8 package crashed the macOS Installer

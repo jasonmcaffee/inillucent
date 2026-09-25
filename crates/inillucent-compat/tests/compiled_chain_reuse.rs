@@ -706,20 +706,17 @@ fn a_self_join_update_writes_the_other_rows_value() {
 /// sum(value) FROM t` each firing reads is `t` as it stands *this* time, which
 /// only holds if the plan's own row-finding cannot go stale as `t` grows.
 ///
-/// **Not a subquery expression, and that restriction is deliberate.**
-/// `trigger::run_body` never calls `subquery::fold` for a trigger's own body
-/// statements - nothing in this ticket touches `trigger.rs` - so `UPDATE t SET
-/// total = (SELECT sum(value) FROM t) WHERE id = new.id` inside a trigger
-/// body refuses by name with "a correlated subquery used as a value" even
-/// though the subquery is not correlated at all, and `UPDATE ... FROM`
-/// answers "bad parameter or other API misuse" inside a trigger body too. That
-/// first gap is
-/// [`a_trigger_body_subquery_is_refused_as_though_it_were_correlated`] below,
-/// left as a known defect for whoever picks up trigger bodies rather than
-/// worked around here. `INSERT ... SELECT sum(value) FROM t` has no subquery
-/// expression at all - `sum(value)` is an ordinary aggregate over the SELECT's
-/// own FROM term - so it is unaffected by either gap and is what this test
-/// uses to read the table from inside the trigger.
+/// **Not a subquery expression, and that restriction was deliberate.**
+/// `trigger::run_body` did not fold a trigger's own body statements when this
+/// test was written, so `UPDATE t SET total = (SELECT sum(value) FROM t) WHERE
+/// id = new.id` inside a trigger body was refused as "a correlated subquery
+/// used as a value". task-2120 made the body fold its own subqueries, and
+/// [`a_trigger_body_subquery_is_answered_on_every_firing`] below now checks
+/// the value that statement writes. `UPDATE ... FROM` inside a trigger body
+/// still answers "bad parameter or other API misuse". `INSERT ... SELECT
+/// sum(value) FROM t` has no subquery expression at all - `sum(value)` is an
+/// ordinary aggregate over the SELECT's own FROM term - and it is what this
+/// test uses to read the table from inside the trigger.
 #[test]
 fn a_trigger_reading_its_own_table_answers_correctly() {
     let (mut cached, mut fresh) = cached_and_fresh_pair("trigger-self-read");
@@ -779,13 +776,16 @@ fn a_trigger_reading_its_own_table_answers_correctly() {
     );
 }
 
-/// Pins the known defect the doc comment above names: a trigger body's own
-/// uncorrelated subquery is refused as though it read an outer row, because
-/// `trigger::run_body` never folds it. Reverting a fix to `trigger.rs` would
-/// turn this red, which is exactly what should happen - see the testing
-/// standard's rule 1.3.
+/// A trigger body's own uncorrelated subquery is answered, on every firing.
+///
+/// This test used to assert the refusal, as rule 1.3 of the testing standard
+/// asks for a known defect, and said that a fix to `trigger.rs` should turn it
+/// red. task-2120 was that fix: `trigger::run_body` now folds the body's
+/// subqueries with the body's own parameters. The value is read after two
+/// firings, because the cached statement is run again for the second and a
+/// fold done once at compile time would still answer 10.
 #[test]
-fn a_trigger_body_subquery_is_refused_as_though_it_were_correlated() {
+fn a_trigger_body_subquery_is_answered_on_every_firing() {
     let mut database = ImportedDatabase::create(scratch("trigger-subquery-gap"), PAGE_SIZE, FRAMES)
         .expect("a fresh database is created");
     exec(
@@ -798,13 +798,17 @@ fn a_trigger_body_subquery_is_refused_as_though_it_were_correlated() {
            UPDATE t SET total = (SELECT sum(value) FROM t) WHERE id = new.id; \
          END",
     );
-    let refused = database
-        .execute_any("INSERT INTO t (id, value) VALUES (1, 10)", &Params::new())
-        .expect_err("the uncorrelated subquery in the trigger body is refused, not answered");
-    let detail = refused.detail().unwrap_or_default();
-    assert!(
-        detail.contains("a correlated subquery used as a value"),
-        "expected the unfolded-subquery refusal, got: {detail}"
+    exec(&mut database, "INSERT INTO t (id, value) VALUES (1, 10)");
+    exec(&mut database, "INSERT INTO t (id, value) VALUES (2, 25)");
+    let (rows, _) = database
+        .run_with("SELECT id, total FROM t ORDER BY id", &Params::new())
+        .expect("reads back");
+    assert_eq!(
+        rows,
+        vec![
+            vec![OwnedDatum::Int(1), OwnedDatum::Int(10)],
+            vec![OwnedDatum::Int(2), OwnedDatum::Int(35)],
+        ]
     );
 }
 

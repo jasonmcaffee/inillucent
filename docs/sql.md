@@ -16,9 +16,11 @@ in [the glossary](glossary.md), one sentence each. Every pragma is in [Pragmas](
 416 SQL scripts were run through `inillucent-shell` and through a pinned `sqlite3` 3.53.4, each over
 its own fresh database, and every byte of both output streams was compared.
 
-- **404 of 416 produce SQLite's exact bytes** - 97.1% of the total, and 98.5% of the 410 cases that
+- **402 of 416 produce SQLite's exact bytes** - 96.6% of the total, and 98.5% of the 408 cases that
   have a SQLite answer to compare against.
-- **0 are refused here that SQLite answers**, and 0 are accepted here that SQLite rejects. Window
+- **0 are refused here that SQLite answers**, and 2 are accepted here that the pinned SQLite build
+  rejects: `DELETE` and `UPDATE` with `ORDER BY ... LIMIT`, which need a compile option that build
+  does not have and many others do. Window
   functions were the last twelve cases to close: all eleven window-only functions, every frame unit,
   every bound and every `EXCLUDE` clause now match the pinned SQLite exactly.
 - **6 answer differently, and 6 are vector search features SQLite has no equivalent for**, so there
@@ -187,7 +189,7 @@ Rows in the file equal commits acknowledged, which
 **`.recover`** differs on one line of nineteen, and it is the line that names the page size.
 
 Adopting SQLite's 4,096 byte page would close both `PRAGMA page_size` and `.recover`, and take the
-byte for byte number from 404 to 406, at the measured cost to the `schema` family above.
+byte for byte number from 402 to 404, at the measured cost to the `schema` family above.
 
 ### One is the two pinned reference artifacts disagreeing with each other
 

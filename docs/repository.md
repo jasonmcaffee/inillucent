@@ -107,7 +107,7 @@ If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the ru
 failing binary, and has reported about a quarter of the suite.
 
 **One test fails today, and it is a pinned checksum rather than a behaviour.**
-`inillucent-testrun --strict` reports 1 failed over the 231 rows in `tests/selection.toml`:
+`inillucent-testrun --strict` reports 1 failed over the 234 rows in `tests/selection.toml`:
 `harness::the_retrieval_baseline_is_unchanged`, which pins the retrieval engine's source files by
 checksum so that work on the relational engine cannot disturb them. The design for a faster commit
 path deliberately changed three of those files - the distance kernel, the graph build and the index -
@@ -175,7 +175,7 @@ fix had already removed the cause and nobody re-ran it, which is recorded in
 
 ## What the tests cover
 
-3,499 tests across 231 test targets in the workspace, in these classes:
+3,499 tests across 234 test targets in the workspace, in these classes:
 
 The 231 is the `[[target]]` row count in `tests/selection.toml`, which is what
 `tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.

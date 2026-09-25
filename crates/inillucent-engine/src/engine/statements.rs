@@ -269,7 +269,7 @@ impl crate::ImportedDatabase {
             Cached::QueryPlan(_) => Ok(vec!["a query plan".to_string()]),
             Cached::Program(_) => Ok(vec!["a program listing".to_string()]),
             Cached::Insert(..) => Ok(vec!["an insert".to_string()]),
-            Cached::VirtualInsert(_) => Ok(vec!["an insert into a module".to_string()]),
+            Cached::VirtualInsert(..) => Ok(vec!["an insert into a module".to_string()]),
             Cached::SchemaInsert(_) => Ok(vec!["an insert into sqlite_schema".to_string()]),
             Cached::VirtualUpdate(..) => Ok(vec!["an update of a module".to_string()]),
             Cached::VirtualDelete(..) => Ok(vec!["a delete from a module".to_string()]),
@@ -570,7 +570,7 @@ impl ImportedDatabase {
             | Cached::Program(_)
             | Cached::VirtualUpdate(..)
             | Cached::VirtualDelete(..)
-            | Cached::VirtualInsert(_)
+            | Cached::VirtualInsert(..)
             | Cached::SchemaInsert(_)
             | Cached::Select(..)
             | Cached::Insert(_, None, _) => Vec::new(),
@@ -602,8 +602,8 @@ impl ImportedDatabase {
             // A module's own write, which this harness does not time: what it
             // costs is the module's business and not the engine's.
             Cached::VirtualDelete(..) | Cached::VirtualUpdate(..) => {}
-            Cached::VirtualInsert(statement) => {
-                self.insert_into_module(statement, params)?;
+            Cached::VirtualInsert(statement, holds_subquery) => {
+                self.insert_into_module_folded(statement, *holds_subquery, params)?;
             }
             Cached::SchemaInsert(statement) => {
                 self.insert_into_schema(statement, params)?;
