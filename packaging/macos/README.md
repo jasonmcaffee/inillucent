@@ -232,7 +232,8 @@ it installs anything, and on every Mac it aborted in `_ReadFreeList` with
 `EXC_CRASH (SIGABRT)`. The tests in `tools/macos-pkg/src/bom.rs` now check the
 layout macOS reads, compared against a `Bom` Apple's tools wrote:
 `cargo test --manifest-path tools/macos-pkg/Cargo.toml`. A change to the writer
-is still only proven by opening the built `.pkg` on a Mac.
+ships through `packaging/ship.ps1` like any other fix, since this machine builds,
+signs and notarises the `.pkg`. The one thing it cannot do is run Installer.app.
 
 ## A note on where it installs
 

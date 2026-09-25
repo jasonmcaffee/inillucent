@@ -60,6 +60,16 @@
 > `tools/cross/bin`, which is gitignored - `pwsh tools/cross/fetch-toolchain.ps1` fetches it, and a
 > worktree shares the main checkout's copy.
 >
+> **This machine builds, signs, notarises and publishes every target: macOS, Linux and Windows.**
+> An agent here never needs a Mac or a Linux machine to release, and must never tell Jason that it
+> does. The Linux archives, `.deb` and `.rpm` are built here too. A fix to anything a release ships
+> (a binary, the `.pkg`, an installer script, a wrapper package) is finished when `ship.ps1` has
+> published it and every route reports it. It is not finished when the fix is merged and a release is
+> recommended. The 0.1.8 `.pkg` crashed Installer.app, and the fix was merged and then left
+> unreleased with "this box has no Mac" as the reason. That reason was wrong: the release was
+> 0.1.9, built and notarised on this machine. The one thing this machine cannot do is run
+> Installer.app or a Mac binary. If that matters, say it in those words, after the release is out.
+>
 > ### Five things that will waste an afternoon
 >
 > - **A registry pins a version's commit the first time it sees the tag, and never moves it.**
