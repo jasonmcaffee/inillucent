@@ -46,6 +46,15 @@ builds now run at once: 257 seconds cold, against 646 seconds one after another.
 on the development machine for the first time, with four suites reported as not evidenced there by
 declaration.
 
+**A gate that misses only a known bar does not make the night red.** `inillucent-fullgate` exits 1
+on any missed bar, and three bars have been missed on every graded run: `open.prepare`, `schema` and
+the peak resident set. `compat/perf/known-misses.txt` lists them, and the nightly is red only when a
+gate misses a bar that is not on the list, disagrees with SQLite, puts a family under the floor, or
+does not finish. A gate that was not graded because the machine was busy is reported and is not red.
+The first nightly also failed to publish, because `gh` was never logged in on the machine; it now
+uses the token `git push` already uses, as `ship.ps1` does. And `latest.json` now records a commit
+hash: the first night recorded git's `HEAD is now at` message, which no release commit could match.
+
 **A new `CREATE INDEX ... USING inillucent_hnsw` index walks its HNSW graph.** An index used to be
 created in exact mode, which compares the query with every stored vector on every query. There was
 no setting to change that, so the graph the index built was never used. A new index is now

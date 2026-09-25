@@ -237,6 +237,8 @@ tagged and left half published for four days, with its GitHub release still a dr
 | `nightly.ps1` | The nightly: every tier, the release build, the gates, the rolling `nightly` pre release, the timings committed, `latest.json`, and a ticket when red. `-WhatIf` prints the plan |
 | `register-nightly.ps1` | Registers `nightly.ps1` as the scheduled task `inillucent nightly` at 02:00. `-Unregister` removes it |
 | `nightly-evidence.ps1` | The functions `nightly.ps1` writes `latest.json` with and `ship.ps1` reads it with. `tests/ship-evidence.Tests.ps1` tests them |
+| `nightly-gates.ps1` | How `nightly.ps1` grades a gate. A gate that exits 1 is red only when it misses a bar not listed in `compat/perf/known-misses.txt`, or disagrees with SQLite, or puts a family under the floor. `tests/nightly-gates.Tests.ps1` tests it |
+| `github-token.ps1` | `Resolve-GitHubToken`, which gives `gh` the token `git push` already uses. `ship.ps1` and `nightly.ps1` both call it, because `gh` is not logged in on the release machine |
 | `setup-machine.ps1` | The machine settings: `-Linker` for the `rust-lld` linker, `-Sccache`, `-Defender`. `-Remove` undoes the first two |
 | `release.ps1`, `release.sh` | Builds, stages, smoke tests and archives one target |
 | `macos/release-macos.ps1` | Builds, signs and notarises the macOS half |

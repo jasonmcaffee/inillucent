@@ -119,6 +119,7 @@ if ($Only) { $Only = @($Only -split ',' | ForEach-Object { $_.Trim() } | Where-O
 if ($Skip) { $Skip = @($Skip -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 . (Join-Path $PSScriptRoot 'stage-layout.ps1')
 . (Join-Path $PSScriptRoot 'nightly-evidence.ps1')
+. (Join-Path $PSScriptRoot 'github-token.ps1')
 # The DPAPI sealing helpers live in apple-credentials.ps1 because that is where sealing was first
 # needed. Nothing about `Protect-AppleSecret` is Apple-specific: it is `ConvertFrom-SecureString`,
 # which encrypts under one Windows account, and the project's minisign and OpenPGP keys want exactly
@@ -414,35 +415,6 @@ function Find-VersionStraggler {
 # ---------------------------------------------------------------------------
 # Phase 1: what can run.
 # ---------------------------------------------------------------------------
-
-function Resolve-GitHubToken {
-    <#
-    .SYNOPSIS
-        A token gh can use, from GH_TOKEN, from a gh login, or from the credential git already has.
-
-    .DESCRIPTION
-        **`gh` has never been logged in on this machine, and the release needed it anyway.** The
-        github route checked only that the program was installed, so preflight said `[run ]` and the
-        publish would have answered `To get started with GitHub CLI, please run: gh auth login` -
-        the same false positive the npm route had twice. It is not a small one: inillucent 0.1.3
-        reached the site and PyPI on 2026-09-19 with no GitHub release at all, and nothing said so.
-
-        Asking for `gh auth login` would be asking for a second credential for a host this machine
-        is already authenticated to. `git push` works here because Git Credential Manager holds an
-        OAuth token for github.com, and `git credential fill` is the supported way to read it - the
-        same interface git itself uses. So the order is: an explicit GH_TOKEN, then a real gh login,
-        then git's stored credential.
-
-        The token is returned rather than printed, and `Remove-SigningSecrets` clears it.
-    #>
-    if ($env:GH_TOKEN) { return $env:GH_TOKEN }
-    & gh auth status *> $null
-    if ($LASTEXITCODE -eq 0) { return $null }   # gh has its own login; leave it alone.
-    $answer = ("protocol=https`nhost=github.com`n`n" | & git credential fill 2>$null)
-    $line = $answer | Where-Object { $_ -like 'password=*' } | Select-Object -First 1
-    if (-not $line) { return $null }
-    return $line.Substring('password='.Length)
-}
 
 function Import-SigningSecrets {
     <#

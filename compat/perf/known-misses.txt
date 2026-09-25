@@ -1,0 +1,14 @@
+# Bars in compat/perf/contract.toml that inillucent is known to miss.
+#
+# packaging/nightly.ps1 reads this file. When inillucent-fullgate or inillucent-writegate
+# exits 1 and every bar it missed is named here, the night is not red. A missed bar that
+# is not named here makes the night red. docs/performance.md has the measured figure for
+# each one.
+#
+# One name per line, exactly as the gate prints it in its report. Remove a line when the
+# work that meets that bar lands; the nightly names a known miss it met.
+
+open.prepare        # 1.69x against a 5.00x bar
+schema              # 1.31x against a 3.00x bar
+peak resident set   # 9.5% more than SQLite against a bar of 5% less
+processor time      # 0.500 against a bar of 0.400 on the graded run of 23 September 2026

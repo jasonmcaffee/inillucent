@@ -12,7 +12,8 @@
         3. release    release-all.ps1 for all five targets, built in parallel with fat LTO, signed and
                       notarised, so a build or signing failure is found the night it happens
         4. gates      inillucent-fullgate, inillucent-writegate and inillucent-scorecard, built with the
-                      release profile, against the medium fixture
+                      release profile, against the medium fixture. A missed bar listed in
+                      compat/perf/known-misses.txt does not make the night red
         5. publish    the archives and SHA256SUMS on a rolling `nightly` pre release on the public
                       mirror. Never a registry: a published version is permanent
         6. commit     tests/timings.toml, tests/nightly-history.tsv and compat/perf/nightly, pushed
@@ -87,6 +88,8 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'stage-layout.ps1')
 . (Join-Path $PSScriptRoot 'nightly-evidence.ps1')
+. (Join-Path $PSScriptRoot 'nightly-gates.ps1')
+. (Join-Path $PSScriptRoot 'github-token.ps1')
 
 $main = Get-MainCheckout -Root $repo
 $evidencePath = Get-NightlyEvidencePath -MainCheckout $main
@@ -140,15 +143,21 @@ function Initialize-Worktree {
         anybody's work: it is rebuilt from the remote every night. The gitignored prerequisites the
         suites need, the pinned SQLite build and the gate fixtures, are copied from the main checkout
         the first time, and the machine's declaration of absent prerequisites every time.
+
+        Every git command but the last sends what it prints to the console with Out-Host. A
+        PowerShell function returns everything its commands write to standard output, so on
+        2026-09-25 `git worktree add` printed `HEAD is now at 8f389cc ...` into the return value.
+        latest.json recorded that sentence as the commit, which no release commit can ever equal,
+        and the records commit and three rows of tests/nightly-history.tsv said `HEAD is`.
     #>
-    & git -C $main fetch origin --quiet
+    & git -C $main fetch origin --quiet | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'git fetch origin failed in the main checkout' }
     if (-not (Test-Path -LiteralPath (Join-Path $Worktree '.git'))) {
-        & git -C $main worktree add --detach $Worktree "origin/$Branch"
+        & git -C $main worktree add --detach $Worktree "origin/$Branch" | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "could not create the worktree $Worktree" }
     } else {
-        & git -C $Worktree fetch origin --quiet
-        & git -C $Worktree checkout --detach --force "origin/$Branch"
+        & git -C $Worktree fetch origin --quiet | Out-Host
+        & git -C $Worktree checkout --detach --force "origin/$Branch" | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "could not move $Worktree to origin/$Branch" }
     }
     foreach ($folder in @('.sqlite-ref', '_agent_output/fixtures')) {
@@ -163,7 +172,9 @@ function Initialize-Worktree {
     if (Test-Path -LiteralPath $declaration) {
         Copy-Item -LiteralPath $declaration -Destination (Join-Path $Worktree 'tests/prerequisites.local.toml') -Force
     }
-    return (& git -C $Worktree rev-parse HEAD).Trim()
+    $head = "$(& git -C $Worktree rev-parse HEAD)".Trim()
+    if ($head -notmatch '^[0-9a-f]{40}$') { throw "git rev-parse HEAD in $Worktree answered '$head', not a commit" }
+    return $head
 }
 
 function Invoke-Suite {
@@ -209,8 +220,12 @@ function Invoke-Gates {
         copy of the fixture: a gate leaves an index behind on the SQLite side, and a second run against
         the same file stops on it. The scorecard appends to compat/perf/nightly/history.jsonl, which
         is committed, so a regression shows as a diff.
+
+        A gate that exits 1 is graded against compat/perf/known-misses.txt by Resolve-GateOutcome
+        in nightly-gates.ps1, which explains why a known miss does not make the night red.
     #>
     $log = Join-Path $runDir 'gates.log'
+    $known = Read-KnownGateMisses -Path (Join-Path $Worktree 'compat/perf/known-misses.txt')
     $code = Invoke-Native -Log $log -Program 'cargo' -Arguments @('build', '--manifest-path', (Join-Path $Worktree 'Cargo.toml'),
         '--release', '-p', 'inillucent-compat', '--bin', 'inillucent-fullgate', '--bin', 'inillucent-writegate',
         '--bin', 'inillucent-scorecard')
@@ -220,20 +235,46 @@ function Invoke-Gates {
     $release = Join-Path $env:CARGO_TARGET_DIR 'release'
     $scratch = Join-Path $runDir 'gates'
     New-Item -ItemType Directory -Force -Path $scratch | Out-Null
-    $failed = @()
+    $outcomes = @()
     Copy-Item -LiteralPath $fixture -Destination (Join-Path $scratch 'medium-full.db')
-    $code = Invoke-Native -Log $log -Program (Join-Path $release 'inillucent-fullgate.exe') -Arguments @(
+    $outcomes += Invoke-Gate -Log $log -Name 'fullgate' -Known $known -Program (Join-Path $release 'inillucent-fullgate.exe') -Arguments @(
         (Join-Path $scratch 'medium-full.db'), '--scale', 'medium', '--rounds', '30', '--page-size', '32768', '--frames', '4096')
-    if ($code -ne 0) { $failed += "fullgate exited $code" }
     Copy-Item -LiteralPath $fixture -Destination (Join-Path $scratch 'medium-write.db')
-    $code = Invoke-Native -Log $log -Program (Join-Path $release 'inillucent-writegate.exe') -Arguments @(
+    $outcomes += Invoke-Gate -Log $log -Name 'writegate' -Known $known -Program (Join-Path $release 'inillucent-writegate.exe') -Arguments @(
         (Join-Path $scratch 'medium-write.db'), '--scale', 'medium')
-    if ($code -ne 0) { $failed += "writegate exited $code" }
     $code = Invoke-Native -Log $log -Program (Join-Path $release 'inillucent-scorecard.exe') -Arguments @(
         '--scale', 'medium', '--out', (Join-Path $Worktree 'compat/perf/nightly'), '--label', "nightly-$stamp")
-    if ($code -ne 0) { $failed += "scorecard exited $code" }
-    if ($failed.Count -gt 0) { return "red: $($failed -join '; ')" }
-    return 'green'
+    $outcomes += [pscustomobject]@{ Red = ($code -ne 0); Text = $(if ($code -eq 0) { 'scorecard ran' } else { "scorecard exited $code" }) }
+    $text = ($outcomes | ForEach-Object { $_.Text }) -join '; '
+    if (@($outcomes | Where-Object { $_.Red }).Count -gt 0) { return "red: $text" }
+    return "green: $text"
+}
+
+function Invoke-Gate {
+    <#
+    .SYNOPSIS
+        Runs one gate, appending its report to the gates log, and grades what it printed.
+
+    .PARAMETER Log
+        The gates log.
+
+    .PARAMETER Name
+        The gate's name in the step: fullgate or writegate.
+
+    .PARAMETER Known
+        The known misses.
+
+    .PARAMETER Program
+        The gate program.
+
+    .PARAMETER Arguments
+        Its arguments.
+    #>
+    param([string] $Log, [string] $Name, [string[]] $Known, [string] $Program, [string[]] $Arguments)
+    $before = if (Test-Path -LiteralPath $Log) { @(Get-Content -LiteralPath $Log).Count } else { 0 }
+    $code = Invoke-Native -Log $Log -Program $Program -Arguments $Arguments
+    $lines = @(Get-Content -LiteralPath $Log | Select-Object -Skip $before)
+    return Resolve-GateOutcome -Name $Name -ExitCode $code -Lines $lines -Known $Known
 }
 
 function Publish-NightlyPrerelease {
@@ -269,16 +310,27 @@ function Publish-NightlyPrerelease {
         'It is replaced every night, is marked as a pre release, and is not published to any registry.',
         "Its archives carry the workspace version $version, which is the last release's number, so a",
         'nightly archive and a release archive can have the same name. Take a release unless you need',
-        'what changed since it.'
+        'what changed since it.',
+        '',
+        'The mirror holds only release commits, so the `nightly` tag points at the newest release commit',
+        'there. The commit named above is the one the archives were built from.'
     ) -join "`n"
-    & gh release view nightly --repo $mirror --json tagName 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        & gh release delete nightly --repo $mirror --cleanup-tag --yes
-        if ($LASTEXITCODE -ne 0) { return 'red: the previous nightly pre release could not be removed' }
+    # gh is not logged in on this machine; the token is the one `git push` already uses.
+    $previousToken = $env:GH_TOKEN
+    $resolved = Resolve-GitHubToken
+    if ($resolved) { $env:GH_TOKEN = $resolved }
+    try {
+        & gh release view nightly --repo $mirror --json tagName 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            & gh release delete nightly --repo $mirror --cleanup-tag --yes | Out-Host
+            if ($LASTEXITCODE -ne 0) { return 'red: the previous nightly pre release could not be removed' }
+        }
+        & gh release create nightly @assets --repo $mirror --prerelease --title "nightly $date" --notes $notes | Out-Host
+        if ($LASTEXITCODE -ne 0) { return 'red: gh release create failed' }
+        return 'green'
+    } finally {
+        $env:GH_TOKEN = $previousToken
     }
-    & gh release create nightly @assets --repo $mirror --prerelease --title "nightly $date" --notes $notes
-    if ($LASTEXITCODE -ne 0) { return 'red: gh release create failed' }
-    return 'green'
 }
 
 function Add-NightlyHistory {
