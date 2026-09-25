@@ -466,8 +466,9 @@ const SETUP_PARAMS: &[Param] = &[
         kind: Kind::Text,
         required: false,
         positional: true,
-        description: "Which half to install: 'all' (the default), 'runtime' for the ONNX Runtime \
-                      shared library on its own, or 'model' for the weights on their own.",
+        description: "What to install: 'all' for both halves, 'runtime' for the ONNX Runtime \
+                      shared library on its own, or 'model' for the weights on their own. Omit \
+                      it to report what is installed and download nothing.",
     },
     Param {
         name: "status",

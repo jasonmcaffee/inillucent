@@ -970,13 +970,12 @@ The 26 that answer differently with no arguments:
 
 ## Constructs the probe does not reach
 
-`inillucent capabilities` lists 49 capabilities reported by the engine. 19 of them are `no`: the
+`inillucent capabilities` lists 49 capabilities reported by the engine. 18 of them are `no`: the
 engine refuses the construct with exit code 3. None of these is one of the 416 cases. Most of them
-run in SQLite. Two are refused by SQLite too.
+run in SQLite. One, writing to a view, is refused by SQLite too.
 
 | Capability | What is refused |
 |---|---|
-| `distinct_in_a_scalar_function` | `DISTINCT` inside a function that is not an aggregate. SQLite refuses it too |
 | `attach_with_key` | `ATTACH ... KEY`, which SQLite runs only with its encryption extension |
 | `row_value_in_subquery` | `(a, b) IN (SELECT x, y FROM s)` |
 | `computed_limit` | an expression in `LIMIT` or `OFFSET`, such as `LIMIT 1 + 1` |

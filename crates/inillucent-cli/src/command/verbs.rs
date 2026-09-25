@@ -1270,13 +1270,111 @@ pub fn vector_search(context: &mut Context, arguments: &Arguments) -> Result<Out
             )))
         }
     };
+    let shape = searched_table_shape(context, &name);
+    // **The rowid only when the table has no key of its own.** `SELECT rowid, *`
+    // on a table with an `INTEGER PRIMARY KEY` printed that key twice, because
+    // the engine names the rowid after the key and `*` includes it again.
+    let rowid = if shape.integer_key { "" } else { "rowid, " };
     let sql = format!(
-        "SELECT rowid, *, {function}({1}, {blob}) AS distance FROM {0} \
+        "SELECT {rowid}*, {function}({1}, {blob}) AS distance FROM {0} \
          WHERE {1} IS NOT NULL ORDER BY {function}({1}, {blob}) LIMIT {k}",
         quoted(&name),
         quoted(&column)
     );
-    produce(context, "vector-search", &sql, &[], 0)
+    let mut produced = produce(context, "vector-search", &sql, &[], 0)?;
+    let offset = usize::from(!shape.integer_key);
+    let positions: Vec<usize> = shape.vectors.iter().map(|nth| nth + offset).collect();
+    for row in &mut produced.rows {
+        for &nth in &positions {
+            if let Some(cell) = row.get_mut(nth) {
+                if let Some(numbers) = vector_numbers(cell) {
+                    *cell = numbers;
+                }
+            }
+        }
+    }
+    if !positions.is_empty() {
+        let names: Vec<String> = produced.columns.iter().map(|c| c.name.clone()).collect();
+        produced.columns = columns_from(&names, &produced.rows);
+        produced.text = table(&produced.columns, &produced.rows, &context.null);
+    }
+    Ok(produced)
+}
+
+/// What `vector-search` needs to know about the table it searches.
+struct SearchedTable {
+    /// The table has a single `INTEGER PRIMARY KEY` column, which is its rowid.
+    integer_key: bool,
+    /// The positions, among the table's own columns, of every `VECTOR` column.
+    vectors: Vec<usize>,
+}
+
+/// Reads the table's columns to decide how `vector-search` lays out a row.
+///
+/// A table the engine cannot describe gets the old layout: the rowid is
+/// selected and no cell is converted. The search itself then reports the real
+/// error, which is better than inventing one here.
+///
+/// @param context - the open database
+/// @param name - the table being searched
+fn searched_table_shape(context: &mut Context, name: &str) -> SearchedTable {
+    let info = context
+        .shell()
+        .collect(&format!("PRAGMA table_info({})", quoted(name)))
+        .map(|(_, rows)| rows)
+        .unwrap_or_default();
+    let text_of = |value: Option<&Value<'static>>| match value {
+        Some(Value::Text(text)) => String::from_utf8_lossy(text.raw()).to_ascii_uppercase(),
+        _ => String::new(),
+    };
+    let key_of = |row: &Vec<Value<'static>>| match row.get(5) {
+        Some(Value::Integer(key)) => *key,
+        _ => 0,
+    };
+    let keys: Vec<&Vec<Value<'static>>> = info.iter().filter(|row| key_of(row) > 0).collect();
+    let integer_key = matches!(keys.as_slice(), [only] if text_of(only.get(2)) == "INTEGER");
+    let vectors = info
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| text_of(row.get(2)).starts_with("VECTOR"))
+        .map(|(nth, _)| nth)
+        .collect();
+    SearchedTable {
+        integer_key,
+        vectors,
+    }
+}
+
+/// Turns a `VECTOR` cell into the JSON array of its numbers.
+///
+/// A vector is stored as little endian 32 bit floats. The result used to print
+/// it as `{"blob": "0000803f..."}`, which nobody can read. A cell that is not
+/// a blob, or whose length is not a whole number of floats, is left alone.
+///
+/// @param cell - the value the query produced for a `VECTOR` column
+fn vector_numbers(cell: &Json) -> Option<Json> {
+    let hex = cell.get("blob").and_then(Json::text)?;
+    let bytes: Vec<u8> = hex
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+        })
+        .collect::<Option<Vec<u8>>>()?;
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let numbers = bytes
+        .chunks_exact(4)
+        .map(|word| {
+            let mut four = [0u8; 4];
+            four.copy_from_slice(word);
+            Json::Real(f64::from(f32::from_le_bytes(four)))
+        })
+        .collect();
+    Some(Json::Array(numbers))
 }
 
 /// `capabilities`: what the engine says it does, checked in both directions.
@@ -1396,17 +1494,59 @@ pub fn functions(context: &mut Context, arguments: &Arguments) -> Result<Outcome
     // list that would then be the only one.
     let mut produced = produced?;
     if let Some(pattern) = arguments.text("pattern") {
-        let lower = pattern.to_ascii_lowercase();
         produced.rows.retain(|row| {
             row.first()
                 .and_then(Json::text)
-                .is_some_and(|name| name.to_ascii_lowercase().contains(&lower))
+                .is_some_and(|name| like_matches(pattern, name))
         });
         produced.total = produced.rows.len();
         produced.text = table(&produced.columns, &produced.rows, &context.null);
     }
     sql.clear();
     Ok(produced)
+}
+
+/// Says whether a name matches a SQL LIKE pattern, ignoring ASCII case.
+///
+/// `functions` filters rows the engine has already returned, so it cannot hand
+/// the pattern to the engine's own LIKE. This used to be a substring test, so
+/// `json%` matched nothing, because no function name contains a percent sign.
+/// `%` matches any run of characters and `_` matches one, as in SQLite. There
+/// is no escape character because no function name needs one.
+///
+/// @param pattern - the LIKE pattern the caller typed
+/// @param name - the function name to test
+fn like_matches(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let name: Vec<char> = name.chars().map(|c| c.to_ascii_lowercase()).collect();
+    // A two pointer walk that remembers only the last `%` and where in the name
+    // it began matching. It never recurses, so a pattern made of many `%`
+    // characters cannot exhaust the stack.
+    let (mut p, mut n) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        match pattern.get(p) {
+            Some('%') => {
+                star = Some((p, n));
+                p += 1;
+            }
+            Some(&c) if c == '_' || name.get(n) == Some(&c) => {
+                p += 1;
+                n += 1;
+            }
+            _ => match star {
+                Some((star_p, star_n)) => {
+                    p = star_p + 1;
+                    n = star_n + 1;
+                    star = Some((star_p, star_n + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    pattern
+        .get(p..)
+        .is_some_and(|rest| rest.iter().all(|&c| c == '%'))
 }
 
 /// `migrate`: brings a SQLite file, a running server, or a legacy index into

@@ -478,7 +478,7 @@ impl Database {
     /// **Each one is its own session**, and a session is what `temp.`, `ATTACH`
     /// and the connection pragmas are scoped to. A caller that keeps one
     /// connection needs nothing more; one that hands out a connection per call
-    /// wants [`Database::connect_as`], or every `CREATE TEMP TABLE` is gone by
+    /// wants [`Database::session_as`], or every `CREATE TEMP TABLE` is gone by
     /// the next statement.
     ///
     /// **It is called `session` and not `connect` because that is what it
@@ -688,7 +688,7 @@ impl std::fmt::Debug for Connection<'_> {
 impl Connection<'_> {
     /// Returns the number that identifies this connection's session.
     ///
-    /// Hand it to [`Database::connect_as`] and the connection that comes back
+    /// Hand it to [`Database::session_as`] and the connection that comes back
     /// continues this one: the same temporary tables, the same attached
     /// databases, the same connection pragmas.
     pub fn session(&self) -> u64 {

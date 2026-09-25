@@ -627,6 +627,63 @@ fn functions_lists_a_builtin_by_name() {
     );
 }
 
+/// Lists the function names `functions` prints for a pattern.
+///
+/// @param binary - the `inillucent` program
+/// @param database - the database to list against
+/// @param pattern - the LIKE pattern, or `None` for every function
+fn function_names(binary: &Path, database: &Path, pattern: Option<&str>) -> Vec<String> {
+    let path = database.to_string_lossy();
+    let mut arguments = vec!["--db", path.as_ref(), "functions"];
+    arguments.extend(pattern);
+    arguments.extend(["--output", "json"]);
+    let ran = run(binary, &arguments);
+    succeeded("functions", &ran);
+    rows(&ran.stdout)
+        .into_iter()
+        .filter_map(|row| row.first().cloned())
+        .collect()
+}
+
+/// `functions` treats its argument as a LIKE pattern, as its help says.
+///
+/// It used to test for a substring, so `json%` listed nothing while
+/// `json_extract` listed one row. The expected set is taken from the
+/// unfiltered listing, so a new JSON function does not break this test, and
+/// the count of 30 is the JSON functions the pinned SQLite registers.
+#[test]
+fn functions_filters_by_a_like_pattern() {
+    let binary = program("inillucent");
+    let database = populated(&binary, "functions_like");
+    let every = function_names(&binary, &database, None);
+    let mut expected: Vec<String> = every
+        .iter()
+        .filter(|name| name.to_ascii_lowercase().starts_with("json"))
+        .cloned()
+        .collect();
+    expected.sort();
+    expected.dedup();
+    let mut listed = function_names(&binary, &database, Some("json%"));
+    listed.sort();
+    listed.dedup();
+    assert_eq!(listed, expected, "`functions json%` listed the wrong names");
+    assert_eq!(listed.len(), 30, "`functions json%` listed {listed:?}");
+    assert_eq!(
+        function_names(&binary, &database, Some("JSON_EXTRACT")),
+        vec!["json_extract".to_string()],
+        "an exact name, in any case, lists that one function"
+    );
+    let underscore = function_names(&binary, &database, Some("sub_tr"));
+    assert!(
+        underscore.contains(&"substr".to_string()),
+        "`_` matches one character: `sub_tr` listed {underscore:?}"
+    );
+    assert!(
+        function_names(&binary, &database, Some("xtrac")).is_empty(),
+        "a pattern with no wildcard is an exact match, not a substring"
+    );
+}
+
 /// `capabilities` reports every row with a support value.
 #[test]
 fn capabilities_reports_every_row_with_a_support_value() {
@@ -1764,6 +1821,139 @@ fn vector_search_answers_with_a_distance_column() {
         column_names(&ran.stdout).contains(&"distance".to_string()),
         "`vector-search` has no `distance` column: {:?}",
         column_names(&ran.stdout)
+    );
+}
+
+/// Runs `vector-search` for `[1,0,0]` over one table and returns the result.
+///
+/// @param binary - the `inillucent` program
+/// @param database - the database to search
+/// @param table - the table to search
+fn searched(binary: &Path, database: &Path, table: &str) -> String {
+    let ran = run(
+        binary,
+        &[
+            "--db",
+            &database.to_string_lossy(),
+            "vector-search",
+            "--table",
+            table,
+            "--column",
+            "at",
+            "--vector",
+            "[1,0,0]",
+            "--output",
+            "json",
+        ],
+    );
+    succeeded("vector-search", &ran);
+    ran.stdout
+}
+
+/// `vector-search` prints each column once and a vector as its numbers.
+///
+/// It used to select `rowid, *`, which on a table with an `INTEGER PRIMARY KEY`
+/// printed the key twice under the same name, and it printed a `VECTOR` cell
+/// as `{"blob": "0000803f..."}`. A table with no key of its own still gets the
+/// rowid, because it is the only thing that names the row.
+#[test]
+fn vector_search_prints_each_column_once_and_vectors_as_numbers() {
+    let binary = program("inillucent");
+    let database = populated(&binary, "vector-search-columns");
+    let path = database.to_string_lossy().to_string();
+    for sql in [
+        "INSERT INTO point (id, at) VALUES (1, '[1,0,0]'), (2, '[0,1,0]')",
+        "CREATE TABLE loose (name TEXT, at VECTOR(3))",
+        "INSERT INTO loose (name, at) VALUES ('a', '[0,0,1]')",
+    ] {
+        let ran = run(&binary, &["--db", path.as_str(), "exec", sql]);
+        succeeded("exec", &ran);
+    }
+    let keyed = searched(&binary, &database, "point");
+    assert_eq!(
+        column_names(&keyed),
+        vec!["id".to_string(), "at".to_string(), "distance".to_string()],
+        "a table with an INTEGER PRIMARY KEY lists that key once"
+    );
+    let first = rows(&keyed).into_iter().next().unwrap_or_default();
+    let vector = first.get(1).cloned().unwrap_or_default();
+    let numbers: Vec<f64> = vector
+        .trim_matches(|c| c == '[' || c == ']')
+        .split(',')
+        .filter_map(|part| part.trim().parse::<f64>().ok())
+        .collect();
+    assert_eq!(
+        numbers,
+        vec![1.0, 0.0, 0.0],
+        "the nearest row's vector printed as {vector:?}"
+    );
+    let loose = searched(&binary, &database, "loose");
+    assert_eq!(
+        column_names(&loose),
+        vec![
+            "rowid".to_string(),
+            "name".to_string(),
+            "at".to_string(),
+            "distance".to_string()
+        ],
+        "a table with no key of its own keeps the rowid"
+    );
+}
+
+/// Opening a SQLite file names the command that copies one.
+///
+/// The refusal used to suggest `inillucent-migrate <file> <new.rdb>`, and that
+/// program reads a legacy retrieval index directory, not a SQLite file. The
+/// file here is only SQLite's 16 byte header and a page of zeros, which is all
+/// the engine reads before it refuses.
+#[test]
+fn opening_a_sqlite_file_names_inillucent_migrate() {
+    let binary = program("inillucent");
+    let path = area("sqlite-file").join("app.db");
+    let mut bytes = b"SQLite format 3\0".to_vec();
+    bytes.resize(4096, 0);
+    std::fs::write(&path, &bytes).unwrap_or_else(|error| panic!("writing {path:?}: {error}"));
+    let ran = run(
+        &binary,
+        &["--db", &path.to_string_lossy(), "query", "SELECT 1"],
+    );
+    let said = ran.said();
+    assert_ne!(ran.code, 0, "a SQLite file opened:\n{said}");
+    assert!(
+        said.contains("inillucent migrate <file> --destination <new.rdb>"),
+        "the refusal does not name `inillucent migrate`:\n{said}"
+    );
+    assert!(
+        !said.contains("inillucent-migrate"),
+        "the refusal names the legacy index tool:\n{said}"
+    );
+}
+
+/// `help setup-embeddings` says one thing about running it with no component.
+///
+/// The description said a bare call downloads nothing, and the `component`
+/// parameter said `all` was the default, which would be a 620 MB download.
+/// `setup_embeddings_reports_what_is_installed` shows the description is the
+/// true one, so the parameter text must not call `all` the default.
+#[test]
+fn setup_embeddings_help_agrees_about_no_component() {
+    let binary = program("inillucent");
+    let ran = run(&binary, &["help", "setup-embeddings"]);
+    succeeded("help", &ran);
+    assert!(
+        !ran.stdout.contains("(the default)"),
+        "the help still calls a component the default:\n{}",
+        ran.stdout
+    );
+    let component = ran
+        .stdout
+        .lines()
+        .skip_while(|line| !line.starts_with("Parameters:"))
+        .find(|line| line.trim_start().starts_with("component "))
+        .unwrap_or_default();
+    assert!(
+        component.contains("download nothing"),
+        "the `component` text does not say what omitting it does: {component:?}"
     );
 }
 

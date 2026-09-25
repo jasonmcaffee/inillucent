@@ -518,7 +518,7 @@ impl Database {
         if is_a_sqlite_file(file.as_ref()) {
             return Err(inillucent_base::error::refusal(
                 "this is a SQLite database, and this engine writes its own format; \
-                 `inillucent-migrate <file> <new.rdb>` reads it and writes one",
+                 `inillucent migrate <file> --destination <new.rdb>` reads it and writes one",
             )
             .with_unsupported("opening a SQLite database in place"));
         }

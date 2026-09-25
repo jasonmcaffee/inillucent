@@ -56,9 +56,8 @@ impl Binder<'_> {
         }
         let aggregate = found.aggregate;
         if !aggregate {
-            if distinct {
-                return Err(unsupported("DISTINCT on a scalar function", span));
-            }
+            // `DISTINCT` means nothing to a function that sees one row, and
+            // SQLite ignores it, so a registered scalar function ignores it too.
             let mut bound = Vec::with_capacity(arguments.len());
             for argument in arguments {
                 bound.push(self.bind_expr(*argument)?);

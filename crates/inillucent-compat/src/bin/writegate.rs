@@ -308,7 +308,7 @@ fn report_families(settings: &Settings, measured: &[Paired], graded: bool) -> bo
             agreed: true,
             disagreement: String::new(),
         };
-        let (low, high) = family_bounds(&members, SEED);
+        let (centre, low, high) = family_figures(&members, SEED);
         let worst = members
             .iter()
             .map(|entry| entry.ratio())
@@ -320,7 +320,7 @@ fn report_families(settings: &Settings, measured: &[Paired], graded: bool) -> bo
         met_every_family = met_every_family && met;
         println!(
             "  {family:<14} {:>8.2}x {:>8.2}x {:>8.2}x {bar:>7.2}x {:>8.2}x  {}",
-            geometric_mean(&members),
+            centre,
             low,
             high,
             worst,
@@ -603,34 +603,23 @@ fn print_where_one_statement_goes(
     Ok(())
 }
 
-/// Returns the geometric mean of a family's per-workload ratios.
-///
-/// Each workload counts once whatever its absolute time, and the geometric mean
-/// is the right centre for a ratio - halving and doubling are the same size of
-/// change.
-///
-/// @param members - the workloads in the family
-fn geometric_mean(members: &[&Paired]) -> f64 {
-    let logs: Vec<f64> = members
-        .iter()
-        .map(|entry| entry.ratio().max(f64::MIN_POSITIVE).ln())
-        .collect();
-    if logs.is_empty() {
-        return 0.0;
-    }
-    (logs.iter().sum::<f64>() / logs.len() as f64).exp()
-}
-
-/// Returns the family's bootstrap interval, one per-round mean per round.
+/// Returns the family's ratio and its bootstrap interval, one per-round mean
+/// per round.
 ///
 /// The statistic is `perf::family_interval`, shared with every other gate and
 /// the scorecard so that no two of them grade a family by different numbers.
 ///
+/// **The ratio is that statistic's own centre.** The table used to print the
+/// geometric mean of each workload's median ratio beside this interval. The two
+/// disagree on a skewed family, and on 2026-09-24 they printed
+/// `read.analytical 10.68x` with the interval 10.70x to 10.85x and `extension
+/// 1.80x` with 1.26x to 1.74x: a centre outside its own interval, which reads
+/// as a broken interval although the verdict is taken from the interval.
+///
 /// @param members - the workloads in the family
 /// @param seed - the seed the resampling uses
-fn family_bounds(members: &[&Paired], seed: u64) -> (f64, f64) {
-    let (_, low, high) = inillucent_compat::perf::family_interval(members, seed);
-    (low, high)
+fn family_figures(members: &[&Paired], seed: u64) -> (f64, f64, f64) {
+    inillucent_compat::perf::family_interval(members, seed)
 }
 
 /// Returns a fresh copy of the fixture for one arm of one round.

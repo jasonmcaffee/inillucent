@@ -63,7 +63,7 @@ pub(crate) struct ConnState {
     /// re-applied every time.
     ///
     /// Keeping the number and reconnecting with it is the engine's own answer
-    /// to this shape, and `Database::connect_as` is where the driver passes it
+    /// to this shape, and `Database::session_as` is where the driver passes it
     /// on.
     pub(crate) session: u64,
 }

@@ -1787,6 +1787,31 @@ mod tests {
         assert!((centre - 2.0).abs() < 0.01, "{centre}");
     }
 
+    /// A skewed family's centre is inside its own interval, and the geometric
+    /// mean of its workloads' medians is not.
+    ///
+    /// `fullgate` and `writegate` printed that geometric mean as the family
+    /// ratio beside this interval, and on 2026-09-24 printed `extension 1.80x`
+    /// beside 1.26x to 1.74x. Here one workload is 1.0x in twenty rounds and
+    /// 4.0x in ten, so its median is 1.0x while its rounds average about 1.6x.
+    /// The gates now print the centre this function returns.
+    #[test]
+    fn a_skewed_family_centre_lies_inside_its_interval() {
+        let mut skewed = steady_workload("extension.a", 1.0);
+        for (round, pair) in skewed.pairs.iter_mut().enumerate() {
+            *pair = (1.0, if round % 3 == 0 { 4.0 } else { 1.0 });
+        }
+        let even = Paired {
+            pairs: (0..30).map(|_| (1.0, 1.0)).collect(),
+            ..steady_workload("extension.b", 1.0)
+        };
+        let members = [&skewed, &even];
+        let (centre, low, high) = family_interval(&members, 7);
+        assert!(low <= centre && centre <= high, "{low} {centre} {high}");
+        let medians = ((skewed.ratio().ln() + even.ratio().ln()) / 2.0).exp();
+        assert!(medians < low, "{medians} is not below {low}");
+    }
+
     /// The verdicts are the thresholds the TDD names.
     #[test]
     fn the_verdicts_are_the_declared_thresholds() {

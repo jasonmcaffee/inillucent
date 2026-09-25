@@ -49,7 +49,7 @@ The probe is `tools/feature-probe/`. Many of its cases are also checked in as te
 direction, fails the build.
 
 The 416 cases are a list somebody wrote. Some constructs are outside that list, and inillucent
-refuses 19 of them by name. They are listed in [What is refused](#what-is-refused).
+refuses 18 of them by name. They are listed in [What is refused](#what-is-refused).
 
 ### Counted against SQLite's own lists
 
@@ -256,7 +256,6 @@ exit code 3.
 
 | Construct | Example | What to write instead |
 |---|---|---|
-| `DISTINCT` inside a function that is not an aggregate | `SELECT abs(DISTINCT a) FROM t` | `SELECT DISTINCT abs(a) FROM t` |
 | `ATTACH ... KEY` | `ATTACH 'x.db' AS k KEY 'secret'` | `ATTACH` without `KEY`. inillucent has no encryption |
 | a row value `IN` a subquery | `(a, b) IN (SELECT x, y FROM s)` | `EXISTS (SELECT 1 FROM s WHERE x = a AND y = b)` |
 | an expression in `LIMIT` or `OFFSET` | `LIMIT 1 + 1` | a constant or a bound parameter |

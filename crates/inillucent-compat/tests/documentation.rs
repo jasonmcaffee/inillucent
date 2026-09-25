@@ -1134,7 +1134,8 @@ fn ratios_in(text: &str) -> Vec<(String, String)> {
     found
 }
 
-/// Every prerequisite the map declares is on the page.
+/// Every prerequisite the map declares is on the page, and every one on the
+/// page is declared by at least one row.
 ///
 /// **The page described one machine's run rather than the shape (task-1969,
 /// 4.15).** It listed the five suites that one `--strict` pass on one desktop
@@ -1202,6 +1203,24 @@ fn the_prerequisite_table_names_every_value_in_the_map() {
         miscounted.is_empty(),
         "these counts in the table disagree with the map:\n  {}",
         miscounted.join("\n  ")
+    );
+
+    // **The other direction.** A row whose prerequisite no target declares any
+    // more was never reported: `capi | 1` stayed in the table after its only
+    // target stopped declaring it, and so did `conformance-records` after
+    // `bindings` started running the runners itself. A reader on a machine
+    // without the thing would go looking for a prerequisite nothing needs.
+    let stale: Vec<String> = table
+        .lines()
+        .filter_map(|line| line.strip_prefix("| `"))
+        .filter_map(|rest| rest.split_once("` |").map(|(value, _)| value.to_string()))
+        .filter(|value| !declared.contains_key(value))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these prerequisites are in the table in docs/repository.md and no row in \
+         tests/selection.toml declares them:\n  {}",
+        stale.join("\n  ")
     );
 }
 

@@ -4432,9 +4432,6 @@ impl<'a> Binder<'a> {
             if star {
                 return Err(wrong_arguments(&folded, span));
             }
-            if distinct {
-                return Err(unsupported("DISTINCT in a scalar function", span));
-            }
             if func == function::TimeFunc::TimeDiff && list.len() != 2 {
                 return Err(wrong_arguments(&folded, span));
             }
@@ -4454,9 +4451,6 @@ impl<'a> Binder<'a> {
             if star {
                 return Err(wrong_arguments(&folded, span));
             }
-            if distinct {
-                return Err(unsupported("DISTINCT in a scalar function", span));
-            }
             let (least, most) = func.arity();
             if list.len() < least || list.len() > most {
                 return Err(wrong_arguments(&folded, span));
@@ -4473,9 +4467,6 @@ impl<'a> Binder<'a> {
         if let Some(func) = function::lookup_json(&folded) {
             if star {
                 return Err(wrong_arguments(&folded, span));
-            }
-            if distinct {
-                return Err(unsupported("DISTINCT in a scalar function", span));
             }
             if !func.arity_ok(list.len()) {
                 return Err(wrong_arguments(&folded, span));
@@ -4530,9 +4521,11 @@ impl<'a> Binder<'a> {
         if star {
             return Err(wrong_arguments(&folded, span));
         }
-        if distinct {
-            return Err(unsupported("DISTINCT in a scalar function", span));
-        }
+        // **`DISTINCT` in a function that is not an aggregate is ignored, as in
+        // SQLite.** The pinned 3.53.4 answers `abs(DISTINCT a)` as `abs(a)`, and
+        // the same for the date, math and JSON functions and for `coalesce`. It
+        // used to be refused here and in the three branches above, and the
+        // capability note said SQLite refused it too, which nobody had run.
         if !function::scalar_arity_ok(func, list.len()) {
             return Err(wrong_arguments(&folded, span));
         }

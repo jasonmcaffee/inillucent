@@ -909,6 +909,28 @@ fn a_distinct_aggregate_with_its_own_order_by_matches_the_oracle() {
     );
 }
 
+/// `DISTINCT` inside a function that is not an aggregate is ignored.
+///
+/// The engine used to refuse `abs(DISTINCT a)` with exit code 3, and its
+/// capability note said SQLite refused it too. The pinned SQLite answers it as
+/// `abs(a)`, one row per input row. Each statement here reaches a different
+/// branch of the binder: a core scalar, a math function, a date function, a
+/// JSON function, and a scalar under `GROUP BY`.
+#[test]
+fn distinct_in_a_scalar_function_matches_the_oracle() {
+    grade(
+        "distinct-scalar",
+        &[
+            "SELECT abs(DISTINCT score) FROM a ORDER BY id",
+            "SELECT upper(DISTINCT name), substr(DISTINCT name, 1, 2) FROM a ORDER BY id",
+            "SELECT round(DISTINCT score), sqrt(DISTINCT abs(score)) FROM a ORDER BY id",
+            "SELECT date(DISTINCT '2020-01-02'), json(DISTINCT '[1]')",
+            "SELECT coalesce(DISTINCT NULL, 1)",
+            "SELECT team, length(DISTINCT team) FROM a GROUP BY team ORDER BY team",
+        ],
+    );
+}
+
 /// `IN` over a bare table name, which is SQLite's own form.
 ///
 /// **A form the engine simply did not answer (task-1913).** The binder refused

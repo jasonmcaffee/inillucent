@@ -423,16 +423,16 @@ pub static CAPABILITIES: &[Capability] = &[
                still open for writing and another handle could write it.",
         probe: Probe::Nothing,
     },
-    // —— what it does not do ——————————————————————————————————————
     Capability {
         name: "distinct_in_a_scalar_function",
-        support: Support::No,
-        note: "DISTINCT belongs to an aggregate: `count(DISTINCT a)` works and `abs(DISTINCT a)` is refused, as SQLite refuses it too.",
+        support: Support::Yes,
+        note: "DISTINCT inside a function that is not an aggregate is ignored, as SQLite ignores it: `abs(DISTINCT a)` answers the same as `abs(a)`.",
         probe: Probe::Runs {
             setup: &["CREATE TABLE t (a INTEGER)"],
             sql: "SELECT abs(DISTINCT a) FROM t",
         },
     },
+    // —— what it does not do ——————————————————————————————————————
     Capability {
         name: "attach_with_key",
         support: Support::No,

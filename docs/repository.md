@@ -196,7 +196,7 @@ prerequisite in `tests/selection.toml` is missing from this table or has a diffe
 | `node` | 1 | Node.js, for the npm package's conformance runner: https://nodejs.org/ |
 | `go` | 1 | a Go toolchain, for the Go package's conformance runner: https://go.dev/dl/ |
 | `php` | 1 | PHP, for the PHP package's conformance runner: https://www.php.net/downloads |
-| `asan` | 1 | a toolchain with the address sanitizer. That is a nightly toolchain, and there is none on Windows |
+| `asan` | 1 | an address sanitizer in the C toolchain: MSVC with its `clang_rt.asan` runtime on Windows, or `cc -fsanitize=address` on Linux x86-64 or aarch64. The Rust side uses the pinned compiler with `RUSTC_BOOTSTRAP=1`, so no nightly is needed. `INILLUCENT_CAPI_ASAN=1` makes its absence a failure |
 | `embed` | 1 | a build with `inillucent-engine/embed` turned on. The runner builds it from the target's `features` row. `tools/coverage.mjs` does not, because the feature needs `inillucent-core/onnx` and `inillucent-core` is left out of the coverage run |
 | `baseline` | 1 | a recorded performance baseline: `cargo run -p inillucent-compat --bin inillucent-baseline -- capture` |
 | `btree-corpus` | 1 | the saved sequences under `compat/corpus/btree/`, which are committed |

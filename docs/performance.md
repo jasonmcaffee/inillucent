@@ -876,8 +876,49 @@ builds are compared with each other only.
   overlap.
 - The two read branches cost nothing measurable: v3 is no faster than v2.
 - Turning the two file formats off saved about 0.7 ms here, where the full history walk found
-  nothing. That would trade file size for speed, and it is not done. This comparison needs repeating
-  on a quiet machine.
+  nothing. That would trade file size for speed, and it is not done. The quiet repeat is in the next
+  section, and it found 0.4 ms.
+
+#### The two formats and the older steps, measured again at `fc92827`
+
+Four builds of the read gate at `fc92827`, medium fixture, 30 rounds, pinned to `0xC03C03` from
+outside, the SQLite child's mask read back as `0xC03C03` on every pass. The passes ran in four quiet
+windows on 2026-09-25, with the order reversed on every cycle. The gate graded every pass counted
+here as quiet: SQLite's speed index read between -21.8% and -23.7%. The first five passes of the
+third window ran while the machine settled after another run stopped, read -14.8% to -21.1%, and are
+left out. Every pass agreed with SQLite.
+
+| build | `join.range`, ms a round, windows 1 and 2 | windows 3 and 4 | mean |
+|---|---|---|---|
+| `fc92827` | 26.02, 25.62, 26.19, 25.65, 25.63, 25.91, 26.00, 26.37, 25.83, 25.76 | 25.96, 25.81, 25.83, 25.65, 25.77, 25.70 | 25.90, 25.79 |
+| the frame of reference and the four byte heap pair both off | 25.65, 25.54, 25.28, 25.17, 25.53, 25.15, 25.60, 25.81, 25.50, 25.61 | | 25.48 |
+| `LeafRef::has_extents` always false | 25.30, 25.28, 24.98, 25.03, 24.93, 25.05, 25.09, 25.37, 25.13, 25.09 | 25.37, 25.15, 25.20, 24.89, 24.93, 24.83 | 25.13, 25.06 |
+| out of line values attached only to a leaf that has some | | 24.87, 24.56, 24.95, 24.86, 24.77, 24.59, 24.54 | 24.73 |
+
+- **The two file formats cost about 0.4 ms a round on a quiet machine**, 1.6% of `join.range`,
+  where the busy machine above said 0.7 ms. The slowest pass with the formats off (25.81) is slower
+  than the fastest pass at `fc92827` (25.62), so the two ranges touch. The formats make the imported
+  file 7% smaller, 532 pages against 573. They stay on. Turning them off changes the file format,
+  and that is a decision for a person, not for a measurement of one workload.
+- **The out of line value plumbing cost about 1.1 ms a round, and it is removed.** It is the likely
+  cause of the `b0ba286` to `ea03335` step, which was the same size. `9d3d84d` made every walk call
+  `read_extents` and `with_extents` on every leaf it opened. For a
+  leaf with no out of line values that built an empty `Extents`, attached it and dropped it. None of
+  the medium fixture's leaves has one: a build that counted found the flag set 0 times in about 2.1
+  million checks over a three round run of the whole gate. `join.range` opens a leaf for every probe
+  of `side_table`. `PagedTree::with_leaf_extents` now tests the flag first and
+  attaches nothing to a leaf without the flag. It is 1.06 ms faster than `fc92827` over the same
+  windows, and no pass of the two builds overlaps. It is also faster than the build with the flag
+  test removed, so the flag test itself costs nothing measurable.
+- **`34e026e`'s change is no longer on this path.** The copy it removed is in
+  `crates/inillucent-engine/src/vtab/shadow.rs`, which only a virtual table module reading its own
+  shadow tree runs. `join.range` reads two ordinary tables.
+- **Nothing `81855a7` and `0f24df5` added runs in the read gate's timed loop.** The rollback journal
+  is written only when a page is written back or checkpointed. The file lock is taken and released in
+  `ImportedDatabase::enter` and `leave`, around each statement run through a connection, and the read
+  gate calls the prepared `Statement::run` directly, so it takes no lock. Whatever the
+  `c401bb2..71d014a` step was, it is not those commits' code running at HEAD. The step cannot be
+  placed more finely, because the commits between do not compile.
 
 ### Where `write.insert.batch`'s time and log volume go
 

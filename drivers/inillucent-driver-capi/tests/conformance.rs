@@ -65,8 +65,14 @@
 //! was instrumented, so the case also looks for the sanitizer's
 //! `__asan_report_load` calls in the library before it runs the program.
 //!
-//! This has been run on Windows with MSVC. The Linux branch builds with the
-//! same flags and links with `cc -fsanitize=address`, and it has not been run.
+//! This has been run on Windows with MSVC, and on Linux (Ubuntu 24.04 under
+//! WSL 2, x86-64, the pinned 1.95.0) on 2026-09-24. On Linux `cc` is gcc 13, so
+//! the program links gcc's `libasan.so.8` while the Rust objects were
+//! instrumented by LLVM. That works: the two share the `__asan_*` interface,
+//! the static library carries no sanitizer runtime of its own, and gcc's
+//! runtime reported the canary's `heap-use-after-free` in `canary_read` with a
+//! Rust stack. With `INILLUCENT_STRICT=1 INILLUCENT_CAPI_ASAN=1` both cases
+//! passed. The aarch64 branch has not been run.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -52,10 +52,8 @@ impl PagedTree {
             // leaf is opened means a scan branches on whether a leaf has any and
             // never on where a value lives. A leaf with none reads nothing and
             // allocates nothing.
-            let held = self.read_extents(pool, &leaf)?;
-            let leaf = leaf.with_extents(&held);
             let next = leaf.right_sibling();
-            if !visit(&leaf)? {
+            if !self.with_leaf_extents(pool, leaf, |leaf| visit(leaf))? {
                 return Ok(());
             }
             drop(guard);
@@ -122,9 +120,7 @@ impl PagedTree {
                 let leaf = LeafRef::parse(&guard)?
                     .with_collations(&self.collations)
                     .with_directions(&self.directions);
-                let held = self.read_extents(pool, &leaf)?;
-                let leaf = leaf.with_extents(&held);
-                if !visit(&leaf)? {
+                if !self.with_leaf_extents(pool, leaf, |leaf| visit(leaf))? {
                     return Ok(());
                 }
             }
@@ -334,9 +330,9 @@ impl PagedTree {
             let leaf = LeafRef::parse(&guard)?
                 .with_collations(&self.collations)
                 .with_directions(&self.directions);
-            let held = self.read_extents(pool, &leaf)?;
-            let leaf = leaf.with_extents(&held);
-            match Self::equal_span(&leaf, key, RUN_SCAN, visit)? {
+            match self.with_leaf_extents(pool, leaf, |leaf| {
+                Self::equal_span(leaf, key, RUN_SCAN, visit)
+            })? {
                 Some(right) => right,
                 None => return Ok(()),
             }
@@ -349,9 +345,9 @@ impl PagedTree {
             let leaf = LeafRef::parse(&guard)?
                 .with_collations(&self.collations)
                 .with_directions(&self.directions);
-            let held = self.read_extents(pool, &leaf)?;
-            let leaf = leaf.with_extents(&held);
-            match Self::equal_span(&leaf, key, RUN_SCAN, visit)? {
+            match self.with_leaf_extents(pool, leaf, |leaf| {
+                Self::equal_span(leaf, key, RUN_SCAN, visit)
+            })? {
                 Some(right) => next = right,
                 None => return Ok(()),
             }

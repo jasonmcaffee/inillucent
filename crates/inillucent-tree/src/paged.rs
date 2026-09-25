@@ -1143,6 +1143,34 @@ impl PagedTree {
         }
     }
 
+    /// Calls `visit` with a leaf, with its out-of-line values attached only
+    /// when the leaf has any.
+    ///
+    /// **The flag is tested before anything is built.** Every walk used to call
+    /// [`PagedTree::read_extents`] and `with_extents` on every leaf it opened,
+    /// so a leaf with no extents still built an empty `Extents`, attached it
+    /// and dropped it. `join.range` opens a leaf for every probe of its inner
+    /// table, and on the medium fixture no leaf has an extent. Pinned read gate passes
+    /// in two quiet windows on 2026-09-25 put `join.range` at 24.81 and 24.63 ms
+    /// a round with this, against 25.87 and 25.71 without it, and no pass of one
+    /// build overlapped a pass of the other.
+    ///
+    /// @param pool - the buffer pool the file is open through
+    /// @param leaf - the leaf to hand over
+    /// @param visit - what to do with it
+    pub fn with_leaf_extents<R>(
+        &self,
+        pool: &Pool,
+        leaf: LeafRef<'_>,
+        visit: impl FnOnce(&LeafRef<'_>) -> DbResult<R>,
+    ) -> DbResult<R> {
+        if !leaf.has_extents() {
+            return visit(&leaf);
+        }
+        let held = self.read_extents(pool, &leaf)?;
+        visit(&leaf.with_extents(&held))
+    }
+
     /// Reads every out-of-line value one leaf holds.
     ///
     /// One pass per leaf rather than one per access: a leaf with extents is
@@ -1359,9 +1387,7 @@ impl PagedTree {
                 let leaf = LeafRef::parse(&guard)?
                     .with_collations(&self.collations)
                     .with_directions(&self.directions);
-                let held = self.read_extents(pool, &leaf)?;
-                let leaf = leaf.with_extents(&held);
-                return visit(&leaf);
+                return self.with_leaf_extents(pool, leaf, |leaf| visit(leaf));
             }
             let interior = InteriorRef::parse(&guard)?;
             let mut children = Vec::with_capacity(interior.children());
