@@ -295,10 +295,7 @@ impl crate::ImportedDatabase {
                 )
             }
             Cached::Update(statement, query, assignments_hold_subquery, setup) => {
-                let mut keys = self.keys_of(query, params)?;
-                if !statement.from.is_empty() {
-                    keys = dml::one_row_per_target(keys, statement.assignments.len());
-                }
+                let keys = self.update_keys_of(statement, query, params)?;
                 // The same for an `UPDATE`'s assignments: the plan above finds
                 // the rows, and the values written into them are evaluated by
                 // the write path from expressions the plan never carried.
@@ -758,6 +755,27 @@ impl crate::ImportedDatabase {
         }
         let prepared = physical::prepare_any(&plan, self)?;
         Ok((plan, prepared))
+    }
+
+    /// Returns the rows an `UPDATE` will change, one per target row.
+    ///
+    /// An `UPDATE ... FROM` whose join matches a target row more than once
+    /// changes that row once, as SQLite does; see `dml::one_row_per_target`.
+    ///
+    /// @param statement - the bound update
+    /// @param query - its keys query
+    /// @param params - the bound parameters
+    fn update_keys_of(
+        &self,
+        statement: &inillucent_sql::dml::BoundUpdate,
+        query: &CachedQuery,
+        params: &Params,
+    ) -> DbResult<Vec<Vec<inillucent_tree::datum::OwnedDatum>>> {
+        let keys = self.keys_of(query, params)?;
+        Ok(match statement.from.is_empty() {
+            true => keys,
+            false => dml::one_row_per_target(keys, statement.assignments.len()),
+        })
     }
 
     /// Returns the query that finds an `UPDATE`'s rows, and its shape.
