@@ -328,6 +328,14 @@ fn gather_leaves(expr: &BoundExpr, pre: &mut Vec<BoundExpr>) {
         BoundExpr::Column { .. } | BoundExpr::Rowid { .. } | BoundExpr::Aggregate { .. } => {
             remember(pre, expr)
         }
+        // **A correlated subquery is a leaf too.** It reads the row it sits
+        // in, and the projection above the pass has no row of a table to give
+        // it, so `SELECT o.id, (SELECT count(*) FROM order_line l WHERE
+        // l.order_id = o.id), row_number() OVER (...) FROM orders o` was
+        // refused as "a correlated subquery used as a value". The inner query
+        // below the pass answers one like any other `SELECT` does, so it is
+        // computed there and read back as a column.
+        BoundExpr::Subquery { block, .. } if !block.correlations.is_empty() => remember(pre, expr),
         other => {
             for child in other.children() {
                 gather_leaves(child, pre);
@@ -544,6 +552,14 @@ fn project_over_window(
         projected.push(compile(&translated, &types)?);
     }
     let mut keys = Vec::with_capacity(select.order_by.len());
+    // **A computed sort key is appended to the row before the sort.** The
+    // sorter reads a column, and `ORDER BY low DESC` over `on_hand <=
+    // reorder_level AS low`, or `ORDER BY lower(name)`, is not one, so both
+    // were refused as "a windowed query ordered by a computed expression".
+    // The key is evaluated over the widened row, appended after it, and
+    // sorted by; the projection reads only the columns before it.
+    let whole = width.saturating_add(select.windows.len());
+    let mut computed_keys: Vec<Box<dyn crate::expr::Eval>> = Vec::new();
     for term in &select.order_by {
         // An ordinal or an alias names an output column, so what it orders by
         // is that column's expression - which reads the widened row like every
@@ -556,9 +572,12 @@ fn project_over_window(
                 .ok_or_else(|| misuse("an ORDER BY ordinal outside the result list"))?,
             other => other,
         };
-        let translated = translate(expr, &space, params, frame)?;
-        let Expr::Column(column) = translated else {
-            return unsupported("a windowed query ordered by a computed expression");
+        let column = match translate(expr, &space, params, frame)? {
+            Expr::Column(column) => column,
+            translated => {
+                computed_keys.push(compile(&translated, &types)?);
+                whole.saturating_add(computed_keys.len()).saturating_sub(1)
+            }
         };
         let descending = term.order == SortOrder::Descending;
         keys.push(SortKey {
@@ -590,6 +609,13 @@ fn project_over_window(
     head = Box::new(Project::new(projected, head));
     if !keys.is_empty() {
         head = Box::new(Sort::new(keys, head));
+    }
+    if !computed_keys.is_empty() {
+        let mut extended: Vec<Box<dyn crate::expr::Eval>> = (0..whole)
+            .map(|column| compile(&Expr::Column(column), &types))
+            .collect::<DbResult<Vec<_>>>()?;
+        extended.extend(computed_keys);
+        head = Box::new(Project::new(extended, head));
     }
     ValuesScan::new(rows).run(head.as_mut())?;
     let answer = collected.borrow().clone();

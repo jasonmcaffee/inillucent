@@ -44,6 +44,12 @@ ingredient i ON i.id = c.value ->> '$.id'` failed with "a seek key or range boun
 Both now answer as SQLite does. The same planner fix applies to a registered function's call and to
 an FTS5 auxiliary function in a join condition.
 
+**Two window function queries that were refused now run.** A correlated scalar subquery in the
+select list beside a window function, such as a count of each order's lines next to `row_number()
+OVER (ORDER BY paid_at)`, was refused with "a correlated subquery used as a value". A windowed
+query ordered by an expression, such as `ORDER BY low DESC` over `on_hand <= reorder_level AS low`
+or `ORDER BY lower(name)`, was refused with "a windowed query ordered by a computed expression".
+
 **`ORDER BY` a name that is both an alias and a table column sorts by the alias.**
 `SELECT item, sum(quantity) AS quantity FROM order_line GROUP BY item ORDER BY quantity DESC`
 sorted by `order_line.quantity`, read from whichever row stood for each group, so a list of best
