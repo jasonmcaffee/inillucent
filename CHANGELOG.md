@@ -10,12 +10,16 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+## 0.1.9 — 2026-09-24
+
 **The macOS `.pkg` opens in Installer.app again.** The 0.1.8 package crashed the macOS Installer
 with `abort()` in `_ReadFreeList` as soon as it was opened, because the `Bom` inside it had no free
 list after its block table. The `Bom` writer now writes the free list and counts blocks in the
 header the way Apple's tools do. It also writes the paths tree as a `Bom` from Apple's tools has
 it: one leaf directly under the tree, with entries sorted by parent and name. `install.sh` and
 Homebrew were not affected.
+
+## 0.1.8 — 2026-09-24
 
 **The file format is 2, and an index costs a write about 40% of what it did.** A leaf's delta area -
 the rows written to it since it was last packed - now opens with a directory kept in key order, so a
