@@ -26,6 +26,11 @@ corpus.jsonl
 /examples/rag-agent/rust-example/target/
 /examples/rag-agent/rust-example/data/
 
+# The todo service example is its own Cargo workspace too, and its server
+# creates data/todo.rdb on first start.
+/examples/todo-mvc/target/
+/examples/todo-mvc/data/
+
 # Engine databases and their log segments, wherever a test or a scratch run
 # leaves one. These are output, never source: no `.rdb` has ever been tracked,
 # and `drivers/inillucent-driver/other.rdb` is what an uncommitted directory

@@ -10,6 +10,13 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**A new example, `examples/todo-mvc`: a todo service with a REST API, in Rust.** It keeps people,
+lists, todos with subtasks to any depth, tags and comments in one database built on inillucent
+1.0.30 from crates.io, and its README explains the SQL behind each route: foreign keys that cascade,
+triggers that write a history, a view, recursive CTEs, window functions, filtered aggregates,
+`UPSERT`, JSON functions and FTS5 search. Its README also lists six ways 1.0.30 answers differently
+from SQLite, and what the example does in each case.
+
 **The Rust rag example uses what 1.0.30 added.** It depends on `inillucent` alone with
 `features = ["embed"]`, fills `chunk_search` from `chunk` with one `INSERT ... SELECT` per document,
 embeds each question inside the search SQL, declares `vector_weight = 0.5`, and compacts the search
