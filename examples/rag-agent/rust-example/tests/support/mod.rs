@@ -167,6 +167,20 @@ pub fn scratch(name: &str) -> PathBuf {
     folder
 }
 
+/// Stops the server and removes a test's folder.
+///
+/// Called as the last line of a test, so it runs only when every assertion
+/// passed. A failed test leaves its folder, with the database and the corpus
+/// it was using, for whoever reads the failure. The server is stopped first
+/// because Windows will not delete a file another process holds open.
+///
+/// @param server - the server that used the folder, if one is still running
+/// @param folder - the folder `scratch` returned
+pub fn finish(server: Option<Server>, folder: &Path) {
+    drop(server);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
 /// Returns the lines of the shared corpus for the given article titles, in the corpus's order.
 ///
 /// The tests use real articles from `../corpus/greek-philosophy.jsonl`, so a

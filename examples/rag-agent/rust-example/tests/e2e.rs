@@ -19,7 +19,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use support::{corpus_lines, scratch, titles, write_lines, Server};
+use support::{corpus_lines, finish, scratch, titles, write_lines, Server};
 
 /// The articles the sync test starts with. All five are short.
 const FIRST_CORPUS: [&str; 5] = ["Protagoras", "Anaxarchus", "Diogenes of Sinope", "Socrates", "Zeno of Elea"];
@@ -74,6 +74,7 @@ fn the_server_speaks_mcp_and_reports_errors() {
     // A notification gets no reply, so the next line the server writes answers the ping.
     server.notify("notifications/cancelled");
     assert_eq!(server.request("ping", json!({}))["result"], json!({}));
+    finish(Some(server), &folder);
 }
 
 /// The whole life of an index: the first sync, every search mode, the overlap,
@@ -97,6 +98,7 @@ fn the_server_searches_the_corpus_and_keeps_it_in_sync() {
     overlap_is_stored_and_not_repeated(&mut server);
     distance_is_larger_for_a_question_on_another_subject(&mut server);
     a_periodic_sync_writes_only_what_changed(&mut server, &corpus);
+    finish(Some(server), &folder);
 }
 
 /// Every mode puts Protagoras first for his best known saying.
@@ -247,6 +249,7 @@ fn the_whole_corpus_answers_the_evaluation_questions() {
         let found: usize = row.split('|').nth(2).and_then(|cell| cell.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or(0);
         assert!(found >= least, "{mode} found {found}, fewer than {least}: {table}");
     }
+    finish(None, &folder);
 }
 
 /// Checks that a tool call fails as a tool error whose message contains some text.
