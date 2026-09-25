@@ -88,7 +88,7 @@ change. These are the pages:
   `.claude/skills` and `.agents/skills`;
 - the package readmes under `packages/`;
 - `drivers/README.md`;
-- the chapter in `src/data/documentation.ts` in `sites/inillucent` of the black-rainbow-labs-sites repository, which is published
+- the chapter in `src/data/documentation.ts` in `sites/inillucent` of the `black-rainbow-labs-sites` repository, which is published
   at https://inillucent.com/docs.
 
 Write each page by the rules in [the writing style guide](docs/writing-style.md). Two checks read

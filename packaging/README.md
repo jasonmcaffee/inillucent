@@ -246,7 +246,7 @@ tagged and left half published for four days, with its GitHub release still a dr
 | `sign-sums.ps1` | Signs `SHA256SUMS` with minisign |
 | `mirror-github.ps1` | Builds, pushes or checks the mirror commit for a release |
 | `publish-site.ps1` | `-Stage` copies the downloads to the site, `-Link` adds the links |
-| `deploy-site.ps1` | Builds the site and deploys it to Cloudflare and the brl-sites origin with `tools/deploy.mjs` from the black-rainbow-labs-sites repository |
+| `deploy-site.ps1` | Builds the site and deploys it to Cloudflare and the `brl-sites` origin with `tools/deploy.mjs` from the `black-rainbow-labs-sites` repository |
 | `cargo-publish.ps1` | Publishes the workspace to crates.io. Without `-Execute` it is a dry run |
 | `homebrew/update.sh` | Writes the formula with the checksums from `dist/SHA256SUMS` |
 | `fetch-macos-artifacts.ps1` | Collects and checks macOS files built on a Mac |
