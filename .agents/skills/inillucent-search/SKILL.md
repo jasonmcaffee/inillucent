@@ -92,10 +92,15 @@ shows it:
 SEARCH embedding USING VECTOR INDEX embedding_v (k=10)
 ```
 
-- On an index made with `USING inillucent_hnsw`, the search compares the query with every stored
-  vector, so the answer is the true top k.
+- An index made with `USING inillucent_hnsw` is approximate by default: the search walks the HNSW
+  graph, which is faster on a large table and can miss a true neighbor. `WITH (mode = 'exact')`
+  makes it compare every stored vector, so the answer is the true top k. Below about 2,048 rows the
+  index compares every vector in either mode, because that is cheaper than the walk.
+- `mode` is set on the index, never in a query. `WHERE mode = 'approximate'` fails with
+  `no such column: mode`. An index created by inillucent 1.0.29 or earlier is exact, and dropping
+  and creating it again makes it approximate.
 - On an `inillucent_search` table, `mode = 'exact'` (the default) compares every row, and
-  `mode = 'approximate'` walks the HNSW graph, which is faster and can miss a true neighbor.
+  `mode = 'approximate'` walks the HNSW graph.
 - With no index, the same query compares every row and still returns the correct answer. Build the
   index when that query becomes slow.
 

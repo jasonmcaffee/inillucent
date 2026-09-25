@@ -11,15 +11,20 @@ fails the build when any copy of it disagrees.
 ## Unreleased
 
 **A new `CREATE INDEX ... USING inillucent_hnsw` index walks its HNSW graph.** An index used to be
-created in exact mode, which compares the probe against every vector on every query, and there was
-no setting to change that, so the graph it built was never used. A new index is now approximate
-unless it says `WITH (mode = 'exact')`, which is the behaviour pgvector's `USING hnsw` has. `mode` is
-an accepted index setting, and `mode` on a `USING ivfflat` index is refused rather than ignored.
-An index created by an earlier release records exact mode in its own configuration and keeps it, so
-the rows it returns do not change on upgrade; drop it and create it again to get the new default. A
-table declared `USING inillucent_search` directly is still exact unless it says otherwise.
-`docs/vector-search.md` told readers to write `WHERE mode = 'approximate'` in a query, which is
-refused with `no such column: mode`; that example is gone.
+created in exact mode, which compares the query with every stored vector on every query. There was
+no setting to change that, so the graph the index built was never used. A new index is now
+approximate unless it says `WITH (mode = 'exact')`, which matches pgvector's `USING hnsw`. `mode` is
+an accepted index setting. `mode` on a `USING ivfflat` index is refused, because that module would
+ignore it. An index created by 1.0.29 or earlier recorded exact mode in its own configuration and
+keeps it, so the rows it returns do not change on upgrade. Drop it and create it again to get the new
+default. A table declared `USING inillucent_search` directly is still exact unless it says otherwise.
+
+Measured on 200,000 random vectors of 256 numbers, a query through a new index is 361% faster than
+through an exact one (0.858 ms against 3.952 ms at the median), and its recall of the top 10 is
+0.074. Random vectors are the worst case for a graph. On the 185,078 chunk corpus the same graph has
+recall 0.8775 at the default `ef_search` of 64. `docs/vector-search.md` has both measurements and
+says how to check recall on your own vectors. That page used to tell readers to write
+`WHERE mode = 'approximate'` in a query, which fails with `no such column: mode`.
 
 ## 1.0.29 — 2026-09-24
 

@@ -32,10 +32,10 @@ flowchart TB
     A["What do you search by?"] -->|"keywords only"| B["FTS5 table with bm25"]
     A -->|"vectors only"| C{"Is exact search fast enough?"}
     A -->|"keywords and vectors together"| D{"Is exact search fast enough?"}
-    C -->|"yes"| F["VECTOR(N) column, with or without an inillucent_hnsw index"]
-    C -->|"no"| J["inillucent_search table with mode = 'approximate'"]
+    C -->|"yes"| F["VECTOR(N) column with no index, or an inillucent_hnsw index WITH (mode = 'exact')"]
+    C -->|"no"| G["VECTOR(N) column with an inillucent_hnsw index, approximate by default"]
     D -->|"yes"| I["inillucent_search table, mode = 'exact' by default"]
-    D -->|"no"| J
+    D -->|"no"| J["inillucent_search table with mode = 'approximate'"]
 ```
 
 | You want | Use | Section |
@@ -187,15 +187,56 @@ There are two ways to answer a nearest neighbor query:
 Recall is the share of the true nearest rows that a query returns. A query for 10 rows that returns
 9 of the true 10 has a recall of 0.9.
 
-**In inillucent 1.0.29 an `inillucent_hnsw` index answers in exact mode.** The index is stored as an
-`inillucent_search` table, and that table's default mode is `'exact'`. The planner uses the index,
-as the plan above shows, and the index compares the query with every vector it holds. The answer is
-always the true nearest rows.
+**A new `inillucent_hnsw` index is approximate.** A query walks the HNSW graph, the way a query on a
+pgvector `USING hnsw` index does. To compare every vector instead, say so when you create the index:
 
-`mode` is not an index setting in 1.0.29. `WITH (mode = 'approximate')` fails with
-`no such index setting: mode`. `mode` is not a column either, so `WHERE mode = 'approximate'` in a
-query fails with `no such column: mode`. To get a graph walk today, use an `inillucent_search` table
-declared with `mode = 'approximate'`, described [below](#exact-and-approximate-mode).
+```sql
+CREATE INDEX passage_exact ON passage USING inillucent_hnsw (v) WITH (mode = 'exact');
+```
+
+`mode` belongs to the index. It is not a column, so `WHERE mode = 'approximate'` in a query fails
+with `no such column: mode`. To change the mode of an existing index, drop the index and create it
+again. `mode` on a `USING ivfflat` index is refused, because an inverted file has no exact mode.
+
+**An index created by inillucent 1.0.29 or earlier stays exact.** Those releases created every
+`inillucent_hnsw` index in exact mode and had no `mode` setting. Each index records its mode when it
+is created and reads it back every time the database opens, so an upgrade does not change the rows an
+existing index returns. Drop the index and create it again to make it approximate.
+
+**A small table is searched exactly in either mode.** When the table holds fewer rows than
+`ef_search` times `2m` (64 times 32, or 2,048 rows, with the default settings), comparing every
+vector costs less than walking the graph, and the index does that instead. The graph is walked once
+the table is larger. The same rule decides a filtered query: the index compares every row the filter
+keeps when that number is small enough.
+
+### What the two modes cost
+
+`inillucent-vectorprobe` times `ORDER BY vector_distance_cos(v, ?) LIMIT 10` through an index, and
+checks each answer against a cosine it computes itself over the same vectors. These numbers are from
+25 September 2026, with the process pinned to the performance cores and nothing else running. Each
+row is 200 queries. A 20,000 row time is the mean of the medians of two runs. The vectors are 256
+numbers drawn uniformly at random.
+
+| Rows | Mode | Median time | Recall of the top 10 |
+|---|---|---|---|
+| 20,000 | exact | 0.537 ms | 1.000 |
+| 20,000 | approximate, `ef_search = 64` | 0.401 ms (34% faster) | 0.36 |
+| 200,000 | exact | 3.952 ms | 1.000 |
+| 200,000 | approximate, `ef_search = 64` | 0.858 ms (361% faster) | 0.074 |
+
+Exact search grows in step with the table, and the graph walk grows much more slowly. At 20,000 rows
+the difference is small.
+
+**Random vectors are the hardest case for a graph, so treat these recall numbers as the floor.** In
+random vectors every point is almost the same distance from every other point, so the walk has
+nothing to follow. Real embeddings form clusters. On the 185,078 chunk corpus at 768 dimensions in
+[Exact and approximate mode](#exact-and-approximate-mode), the same graph code has recall 0.8775 at
+`ef_search = 64` and 0.9875 at 512. On the random vectors at 20,000 rows, raising `ef_search`
+raises recall from 0.36 at 64 to 0.55 at 128, 0.75 at 256 and 0.91 at 512.
+
+Measure recall on your own vectors before you rely on approximate mode. Compare an index's answers
+with the same query on a table that has no index, or on an index created `WITH (mode = 'exact')`.
+If recall is too low, raise `ef_search`, or use exact mode.
 
 ### Index settings
 
@@ -205,10 +246,11 @@ CREATE INDEX passage_l2 ON passage USING inillucent_hnsw (v) WITH (metric = 'l2'
 
 | Setting | What it does | Default |
 |---|---|---|
+| `mode` | `'approximate'` walks the HNSW graph. `'exact'` compares the query with every stored vector | `'approximate'` |
 | `metric` (or `distance`) | the distance the index is built for: `'cosine'` or `'l2'` | `'cosine'` |
 | `m` | how many neighbors each node of the HNSW graph links to | 16 |
 | `ef_construction` | how many candidates the graph build considers for each new node | 64 |
-| `ef_search` | how many candidates a graph walk keeps. An index in exact mode does not walk the graph, so this has no effect on it in 1.0.29 | 64 |
+| `ef_search` | how many candidates a graph walk keeps. A larger number raises recall and costs time. An index in exact mode does not walk the graph, so it ignores this | 64 |
 | `threads` | how many threads a build uses | every core |
 | `compact` | how many pending changes a commit collects before it writes them into the index | 1,024 |
 
@@ -401,8 +443,10 @@ declared with: `SELECT k, v FROM docs_config`.
 CREATE VIRTUAL TABLE docs_fast USING inillucent_search(body, dims = 3, mode = 'approximate');
 ```
 
-`mode = 'exact'` is the default. It compares the query with every stored vector and returns the true
-nearest rows.
+`mode = 'exact'` is the default for a table declared with `USING inillucent_search`. It compares the
+query with every stored vector and returns the true nearest rows. An index made with
+`CREATE INDEX ... USING inillucent_hnsw` has the opposite default, `'approximate'`, as
+[Exact and approximate search with an index](#exact-and-approximate-search-with-an-index) says.
 
 `mode = 'approximate'` walks the HNSW graph. It compares far fewer vectors, so it is faster on a
 large table, and it can miss some true neighbors. `ef_search` sets how wide the walk is. The

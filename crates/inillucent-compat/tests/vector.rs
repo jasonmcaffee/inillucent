@@ -549,8 +549,11 @@ fn the_plan_uses_the_index_and_the_index_agrees_with_exhaustive_cosine() {
         assert_eq!(got.len(), 10, "query {query} returned ten rows");
         hits += got.iter().filter(|id| wanted.contains(id)).count();
     }
-    // The store's default mode is exact, so recall below 1.000 is a defect
-    // rather than the approximation working as designed.
+    // The index is approximate, but 500 rows is below the `ef_search * 2m`
+    // crossover (2,048 at the defaults), so the store compares every vector
+    // and recall below 1.000 is a defect rather than the approximation
+    // working as designed. `the_default_index_walks_the_graph_and_exact_still_answers_exactly`
+    // is the test above the crossover.
     assert_eq!(
         hits, wanted_total,
         "recall through the planned index: {hits} of {wanted_total}"

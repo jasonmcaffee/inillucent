@@ -107,13 +107,18 @@ up to 50 candidates, or `k` candidates when `k` is larger than 50. Both obey the
 
 ## 3. Vector search with HNSW
 
-### Exact search is the default
+### Exact search is the default for a search table
 
 An `inillucent_search` table is created with `mode = 'exact'` unless the `CREATE` statement says
 otherwise. Exact search compares the query with every stored vector and keeps the closest ones. The
 answer is correct by construction. On a large table it is the slower choice.
 
 `mode = 'approximate'` makes the table use its HNSW graph. The graph is built in both modes.
+
+An index made with `CREATE INDEX ... USING inillucent_hnsw` is stored as an `inillucent_search`
+table, but it is created with `mode = 'approximate'` unless the statement says
+`WITH (mode = 'exact')`. An index created by inillucent 1.0.29 or earlier recorded `exact` and keeps
+it.
 
 ```sql
 CREATE VIRTUAL TABLE docs USING inillucent_search(
@@ -156,7 +161,7 @@ few hundred or a few thousand vectors, not every vector in the table.
 | `ef_construction` | 64 | How many candidates the build considers when it links a new vector. Larger builds a better graph more slowly. |
 | `ef_search` | 64 | How many candidates a search keeps. Set it in the `CREATE` statement. There is no session setting for it. |
 | `metric` | `cosine` | The distance the graph is built for. `l2` is the other choice. Any other name is refused. |
-| `mode` | `exact` | `exact` compares every row. `approximate` walks the graph. |
+| `mode` | `exact` for a search table, `approximate` for an `inillucent_hnsw` index | `exact` compares every row. `approximate` walks the graph. |
 
 The build uses every processor core. With `metric = 'cosine'`, each vector is scaled to length 1 as
 it is stored, so cosine similarity and the dot product give the same order.

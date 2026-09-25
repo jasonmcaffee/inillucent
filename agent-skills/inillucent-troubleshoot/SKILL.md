@@ -169,6 +169,9 @@ Two things cost more than they appear to:
 - **A vector search with no index reads every row.** The answer is still correct.
   `CREATE INDEX <name> ON <table> USING inillucent_hnsw (<column>)` adds an HNSW index, including
   over rows already in the table.
+- **An HNSW index created by inillucent 1.0.29 or earlier also compares every row.** Those releases
+  created every `inillucent_hnsw` index in exact mode. `SELECT v FROM <index>_config WHERE k = 'mode'`
+  says which mode an index has. Drop the index and create it again to make it walk the graph.
 
 ## "A value came back with the wrong type"
 
