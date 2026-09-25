@@ -2232,11 +2232,15 @@ fn identifier_width(name: &[u8]) -> usize {
 /// the same rule `USING` follows a few lines above and for the same reason: an
 /// index that quietly was not built the way it was asked to be is a wrong answer
 /// nobody can see.
-const INDEX_SETTINGS: [(&str, &str); 9] = [
+const INDEX_SETTINGS: [(&str, &str); 10] = [
     // The graph's own three, spelled as pgvector spells them.
     ("m", "m"),
     ("ef_construction", "ef_construction"),
     ("ef_search", "ef_search"),
+    // Whether a query walks the graph (`approximate`, the default for an
+    // `inillucent_hnsw` index) or compares every vector (`exact`). The store
+    // validates the value, so `mode = 'fast'` is refused by name.
+    ("mode", "mode"),
     // The distance the index is built for. pgvector puts this in an operator
     // class - `USING hnsw (v vector_l2_ops)` - and names it here as well.
     ("metric", "metric"),

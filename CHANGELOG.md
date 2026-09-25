@@ -10,6 +10,17 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**A new `CREATE INDEX ... USING inillucent_hnsw` index walks its HNSW graph.** An index used to be
+created in exact mode, which compares the probe against every vector on every query, and there was
+no setting to change that, so the graph it built was never used. A new index is now approximate
+unless it says `WITH (mode = 'exact')`, which is the behaviour pgvector's `USING hnsw` has. `mode` is
+an accepted index setting, and `mode` on a `USING ivfflat` index is refused rather than ignored.
+An index created by an earlier release records exact mode in its own configuration and keeps it, so
+the rows it returns do not change on upgrade; drop it and create it again to get the new default. A
+table declared `USING inillucent_search` directly is still exact unless it says otherwise.
+`docs/vector-search.md` told readers to write `WHERE mode = 'approximate'` in a query, which is
+refused with `no such column: mode`; that example is gone.
+
 ## 1.0.29 — 2026-09-24
 
 **`DELETE` and `UPDATE` take `ORDER BY`, `LIMIT` and `OFFSET`.** They were refused with

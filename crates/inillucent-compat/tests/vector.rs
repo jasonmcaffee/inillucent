@@ -977,6 +977,221 @@ fn an_ivfflat_takes_its_own_settings_and_refuses_another() {
     );
 }
 
+/// Returns the mode a vector index's store recorded when it was created.
+///
+/// Read out of the store's own `%_config` shadow table, which is what the
+/// store reads back on every open, rather than out of the `CREATE` text.
+///
+/// @param connection - the connection to ask
+/// @param index - the index's name, which is the store's name
+fn stored_mode(connection: &Connection<'_>, index: &str) -> Vec<String> {
+    texts(
+        connection,
+        &format!("SELECT v FROM {index}_config WHERE k = 'mode'"),
+    )
+}
+
+/// A new `inillucent_hnsw` index walks its graph unless it says `exact`.
+///
+/// **It used to be the other way round, with no way out.** The index is an
+/// `inillucent_search` store, that store's default is `exact`, and `mode` was
+/// not an index setting, so every `CREATE INDEX ... USING inillucent_hnsw`
+/// built a graph that no query ever read. `docs/vector-search.md` then told
+/// readers to write `WHERE mode = 'approximate'`, which is refused with
+/// `no such column: mode`. This checks the default, the setting that turns
+/// it off, the refusals on either side, and that both survive a reopen.
+#[test]
+fn a_new_hnsw_index_walks_the_graph_unless_it_says_exact() {
+    let held = database("hnsw-mode");
+    let path = workspace_root().join("target/scratch/vector/hnsw-mode.rdb");
+    {
+        let connection = held.session();
+        let mut setup = String::new();
+        for table in ["plain", "exact", "loud", "bogus", "inverted"] {
+            setup.push_str(&format!(
+                "CREATE TABLE {table} (id INTEGER PRIMARY KEY, v VECTOR(32));
+                 INSERT INTO {table} VALUES (1, {});",
+                literal(&vector_of(1))
+            ));
+        }
+        connection.execute_batch(&setup).expect("five tables");
+        connection
+            .execute_batch("CREATE INDEX plain_v ON plain USING inillucent_hnsw (v)")
+            .expect("an index with no settings");
+        connection
+            .execute_batch(
+                "CREATE INDEX exact_v ON exact USING inillucent_hnsw (v) WITH (mode = 'exact')",
+            )
+            .expect("an index that asks for exact");
+        connection
+            .execute_batch(
+                "CREATE INDEX loud_v ON loud USING inillucent_hnsw (v) WITH (MODE = 'Approximate')",
+            )
+            .expect("the setting is folded like every other one");
+        assert_eq!(stored_mode(&connection, "plain_v"), vec!["approximate"]);
+        assert_eq!(stored_mode(&connection, "exact_v"), vec!["exact"]);
+        assert_eq!(stored_mode(&connection, "loud_v"), vec!["approximate"]);
+
+        let bogus = connection
+            .execute_batch(
+                "CREATE INDEX bogus_v ON bogus USING inillucent_hnsw (v) WITH (mode = 'fast')",
+            )
+            .expect_err("a mode that does not exist is refused");
+        assert!(
+            format!("{bogus:?}").contains("mode must be exact or approximate"),
+            "the refusal names the two modes: {bogus:?}"
+        );
+        let inverted = connection
+            .execute_batch(
+                "CREATE INDEX inverted_v ON inverted USING ivfflat (v) WITH (mode = 'exact')",
+            )
+            .expect_err("an ivfflat has no mode to set");
+        assert!(
+            format!("{inverted:?}").contains("no mode setting"),
+            "the refusal says why: {inverted:?}"
+        );
+    }
+    drop(held);
+    let reopened = Database::open(&path).expect("the database reopens");
+    let connection = reopened.session();
+    assert_eq!(stored_mode(&connection, "plain_v"), vec!["approximate"]);
+    assert_eq!(stored_mode(&connection, "exact_v"), vec!["exact"]);
+}
+
+/// `VACUUM` keeps each index's mode, because it rebuilds a store from the
+/// store's own declaration and that declaration names the mode.
+///
+/// One index per database: `VACUUM` on a database holding two vector indexes
+/// fails with `UNIQUE constraint failed: the rowid is already in the index`
+/// in both modes, in this build and in 0.1.2 and 0.1.7, so that is a separate
+/// defect and not this test's subject.
+#[test]
+fn vacuum_keeps_an_index_mode() {
+    for (name, with, wanted) in [
+        ("vacuum-mode-default", "", "approximate"),
+        ("vacuum-mode-exact", "WITH (mode = 'exact')", "exact"),
+    ] {
+        let held = database(name);
+        let connection = held.session();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(32));
+                 INSERT INTO t VALUES (1, {});
+                 CREATE INDEX t_v ON t USING inillucent_hnsw (v) {with}",
+                literal(&vector_of(1))
+            ))
+            .expect("a table and its index");
+        connection.execute_batch("VACUUM").expect("VACUUM runs");
+        assert_eq!(stored_mode(&connection, "t_v"), vec![wanted], "{name}");
+    }
+}
+
+/// A store declared before `inillucent_hnsw` indexes defaulted to approximate
+/// keeps answering exactly.
+///
+/// An index made by an older build is an `inillucent_search` store whose
+/// declaration names no mode, and that table's own default is still `exact`.
+/// This declares that store by hand, without the `source` arguments an index
+/// adds, and checks the store records `exact`: the new default is added by
+/// `CREATE INDEX` and nowhere else.
+#[test]
+fn a_search_table_that_names_no_mode_is_still_exact() {
+    let held = database("search-mode");
+    let connection = held.session();
+    connection
+        .execute_batch("CREATE VIRTUAL TABLE s USING inillucent_search(body, dims=32)")
+        .expect("a search table with no mode");
+    assert_eq!(stored_mode(&connection, "s"), vec!["exact"]);
+}
+
+/// The default index answers close to an exhaustive cosine on a table large
+/// enough that the graph is walked, and `WITH (mode = 'exact')` answers it
+/// exactly.
+///
+/// **Below about 2,048 rows the new default changes nothing.** In approximate
+/// mode the store still compares every vector when `rows < ef * 2m`
+/// (`prefers_exhaustive` in `inillucent-core/src/hnsw.rs`), which is 64 * 32 at
+/// the defaults, because a scan that small is faster than a walk. Every other
+/// recall test in this file is under that line, so this one uses 4,000 rows,
+/// where the default index really does traverse. The approximate bound is a
+/// floor rather than an equality: a graph is allowed to miss a neighbour, and
+/// the measured value is printed so a regression shows as a number.
+#[test]
+fn the_default_index_walks_the_graph_and_exact_still_answers_exactly() {
+    /// How many rows, chosen to be above the exhaustive crossover.
+    const ROWS: usize = 4_000;
+    let held = database("hnsw-recall");
+    let connection = held.session();
+    connection
+        .execute_batch(
+            "CREATE TABLE walked (id INTEGER PRIMARY KEY, v VECTOR(32));
+             CREATE TABLE scanned (id INTEGER PRIMARY KEY, v VECTOR(32))",
+        )
+        .expect("two tables");
+    let corpus: Vec<Vec<f32>> = (0..ROWS).map(|index| vector_of(index as u64)).collect();
+    let mut batch = String::from("BEGIN; ");
+    for (index, vector) in corpus.iter().enumerate() {
+        let value = literal(vector);
+        batch.push_str(&format!(
+            "INSERT INTO walked VALUES ({index}, {value}); INSERT INTO scanned VALUES ({index}, {value}); "
+        ));
+    }
+    batch.push_str("COMMIT;");
+    connection.execute_batch(&batch).expect("the corpus loads");
+    connection
+        .execute_batch(
+            "CREATE INDEX walked_v ON walked USING inillucent_hnsw (v);
+             CREATE INDEX scanned_v ON scanned USING inillucent_hnsw (v) WITH (mode = 'exact')",
+        )
+        .expect("both indexes are built");
+
+    let mut walked_hits = 0usize;
+    let mut scanned_hits = 0usize;
+    let mut wanted_total = 0usize;
+    for query in 0..20u64 {
+        let probe = vector_of(90_000 + query);
+        let mut ranked: Vec<(usize, f64)> = corpus
+            .iter()
+            .enumerate()
+            .map(|(index, held)| (index, cosine(held, &probe)))
+            .collect();
+        ranked.sort_by(|left, right| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(left.0.cmp(&right.0))
+        });
+        let wanted: Vec<i64> = ranked
+            .iter()
+            .take(10)
+            .map(|(index, _)| *index as i64)
+            .collect();
+        wanted_total += wanted.len();
+        for (table, hits) in [("walked", &mut walked_hits), ("scanned", &mut scanned_hits)] {
+            let got = integers(
+                &connection,
+                &format!(
+                    "SELECT id FROM {table} ORDER BY vector_distance_cos(v, {}) LIMIT 10",
+                    literal(&probe)
+                ),
+            );
+            assert_eq!(got.len(), 10, "{table} query {query} returned ten rows");
+            *hits += got.iter().filter(|id| wanted.contains(id)).count();
+        }
+    }
+    println!(
+        "recall at {ROWS} rows: approximate {walked_hits}/{wanted_total}, exact {scanned_hits}/{wanted_total}"
+    );
+    assert_eq!(
+        scanned_hits, wanted_total,
+        "an exact index compares every vector, so it misses nothing"
+    );
+    assert!(
+        walked_hits * 10 >= wanted_total * 9,
+        "the default index kept at least 0.9 recall: {walked_hits} of {wanted_total}"
+    );
+}
+
 /// A `VECTOR(N)` column refuses a component that is not a finite number.
 ///
 /// **The byte length used to be the only check (task-1979, R8).** A NaN
