@@ -232,7 +232,8 @@ random vectors every point is almost the same distance from every other point, s
 nothing to follow. Real embeddings form clusters. On the 185,078 chunk corpus at 768 dimensions in
 [Exact and approximate mode](#exact-and-approximate-mode), the same graph code has recall 0.8775 at
 `ef_search = 64` and 0.9875 at 512. On the random vectors at 20,000 rows, raising `ef_search`
-raises recall from 0.36 at 64 to 0.55 at 128, 0.75 at 256 and 0.91 at 512.
+raises recall from 0.36 at 64 to 0.55 at 128, 0.75 at 256 and 0.91 at 512. At 200,000 random
+rows, `ef_search = 512` raises it from 0.074 to 0.36.
 
 Measure recall on your own vectors before you rely on approximate mode. Compare an index's answers
 with the same query on a table that has no index, or on an index created `WITH (mode = 'exact')`.
