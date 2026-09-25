@@ -26,6 +26,7 @@ mod collation;
 mod having;
 mod json_subtype;
 mod literal;
+mod order_alias;
 mod raise;
 mod rowvalue;
 mod scratch;
@@ -1911,7 +1912,10 @@ impl<'a> Binder<'a> {
         // it only reads, on every statement including the ones with no
         // `ORDER BY` at all.
         let order_by = match bound.compounds.is_empty() {
-            true => self.bind_order_by(&select.order_by, &bound.columns)?,
+            true => {
+                let aliases = self.order_aliases(select, &bound.columns);
+                self.bind_order_by(&select.order_by, &bound.columns, &aliases)?
+            }
             false => self.bind_compound_order_by(&select.order_by, &bound.columns)?,
         };
         bound.order_by = order_by;
@@ -2706,7 +2710,7 @@ impl<'a> Binder<'a> {
         for expr in &spec.partition_by {
             partition_by.push(self.bind_expr(*expr)?);
         }
-        let order_by = self.bind_order_by(&spec.order_by, &[])?;
+        let order_by = self.bind_order_by(&spec.order_by, &[], &[])?;
         // SQLite's defaults, and they are not the same clause: with an
         // `ORDER BY` the frame ends at the current row's peer group, and
         // without one it covers the whole partition. Using one default for both
@@ -3404,10 +3408,16 @@ impl<'a> Binder<'a> {
     }
 
     /// Binds an `ORDER BY` list, resolving ordinals and result aliases.
+    ///
+    /// @param terms - the terms as written
+    /// @param columns - the result columns an ordinal or an alias names
+    /// @param aliases - the written aliases, which a bare identifier matches
+    ///   before a table column; see `bind::order_alias`
     fn bind_order_by(
         &mut self,
         terms: &[ast::OrderTerm],
         columns: &[BoundResultColumn],
+        aliases: &[(Vec<u8>, usize)],
     ) -> Result<Vec<BoundOrderTerm>, ParseError> {
         let mut bound = Vec::with_capacity(terms.len());
         for term in terms {
@@ -3422,7 +3432,13 @@ impl<'a> Binder<'a> {
                     };
                     column.expr.clone()
                 }
-                None => self.bind_expr(term.expr)?,
+                None => match self
+                    .ordered_by_alias(term.expr, aliases)
+                    .and_then(|at| columns.get(at))
+                {
+                    Some(column) => column.expr.clone(),
+                    None => self.bind_expr(term.expr)?,
+                },
             };
             let collation = expr.collation().unwrap_or(Collation::Binary);
             let nulls = term.nulls.unwrap_or(match term.order {

@@ -37,6 +37,13 @@ NULL is an empty message and a number is its text.
 SQLite answers `{"day":"2026-09-20","items":["Latte","Croissant"]}`. The same holds for
 `json_array(...)` around one, and for a scalar subquery whose one column is a JSON value.
 
+**`ORDER BY` a name that is both an alias and a table column sorts by the alias.**
+`SELECT item, sum(quantity) AS quantity FROM order_line GROUP BY item ORDER BY quantity DESC`
+sorted by `order_line.quantity`, read from whichever row stood for each group, so a list of best
+sellers came out in the wrong order with nothing to say so. In a `SELECT`'s `ORDER BY`, a bare name
+that matches an alias written in the result list now names that result column first, as in SQLite.
+A name inside an expression, such as `quantity + 0`, still reads the table column in both engines.
+
 **`UPDATE ... FROM` changes a target row once when several rows of the join match it.** It was
 changed once per match, `changes()` counted every match, and `RETURNING` listed the row once per
 match. SQLite changes it once, with the values of one match.
