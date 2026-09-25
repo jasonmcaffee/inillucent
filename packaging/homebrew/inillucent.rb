@@ -27,7 +27,7 @@
 class Inillucent < Formula
   desc "Embedded SQL database with full-text and vector search, and an MCP server"
   homepage "https://inillucent.com"
-  version "1.0.30"
+  version "1.0.31"
   license "MIT"
 
   # One universal archive covers both Apple architectures, so macOS needs no

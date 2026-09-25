@@ -1,6 +1,6 @@
 {
   "name": "inillucent",
-  "version": "1.0.30",
+  "version": "1.0.31",
   "description": "Embedded SQL database with full-text and vector search, an MCP server, and a sqlite3-shaped shell. No native build step: the binaries ship as platform packages.",
   "keywords": [
     "database",
@@ -43,10 +43,10 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@blackrainbowlabs/cli-win32-x64": "1.0.30",
-    "@blackrainbowlabs/cli-darwin-arm64": "1.0.30",
-    "@blackrainbowlabs/cli-darwin-x64": "1.0.30",
-    "@blackrainbowlabs/cli-linux-x64": "1.0.30",
-    "@blackrainbowlabs/cli-linux-arm64": "1.0.30"
+    "@blackrainbowlabs/cli-win32-x64": "1.0.31",
+    "@blackrainbowlabs/cli-darwin-arm64": "1.0.31",
+    "@blackrainbowlabs/cli-darwin-x64": "1.0.31",
+    "@blackrainbowlabs/cli-linux-x64": "1.0.31",
+    "@blackrainbowlabs/cli-linux-arm64": "1.0.31"
   }
 }
