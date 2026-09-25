@@ -1113,6 +1113,10 @@ function Invoke-ReleaseTests {
     if (-not (Test-Path -LiteralPath $runner)) { throw "inillucent-testrun built and then could not be found. Looked at $runner." }
 
     Copy-TestPrerequisite -Root $Root -MainCheckout (Get-MainCheckout -Root $Root)
+    # The download cases in inillucent-remote reach a real host and run only with this set, and
+    # `--strict` counts a suite that skipped them as evidence of nothing. nightly.ps1 and both CI
+    # workflows set it. The 1.0.30 release was refused for its absence alone, every test passing.
+    $env:INILLUCENT_NETWORK_TESTS = '1'
     Write-Host "   $runner $($arguments -join ' ')"
     & $runner @arguments
     $code = $LASTEXITCODE
