@@ -181,7 +181,7 @@ impl crate::ImportedDatabase {
     /// second call: once any lever had ever been disabled, `mask = 0` folded in
     /// nothing new and left it disabled, so a connection could turn levers off
     /// but never back on. Three of the optimisation-arm tests in
-    /// `crates/inillucent-compat/tests/levers.rs` reuse one connection across a
+    /// `crates/inillucent-compat/tests/engine/levers.rs` reuse one connection across a
     /// `for` loop of statements for exactly this reason, and every statement
     /// after the first ran its "with" arm under the previous statement's
     /// "without" arm's mask - so the two arms silently compared the same plan

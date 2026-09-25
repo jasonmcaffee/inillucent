@@ -871,7 +871,7 @@ phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 # asserted that this engine and SQLite could take turns mutating one
 # file, which the rearchitecture onto a native PAX storage format
 # withdrew: the shipping engine does not write SQLite's file format at
-# all. `crates/inillucent-compat/tests/wal.rs` says the same thing in its
+# all. `crates/inillucent-compat/tests/engine/wal.rs` says the same thing in its
 # own header. Reading a SQLite database is still covered, by
 # `migrate_sqlite.rs`.
 status = "missing"

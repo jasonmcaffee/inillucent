@@ -18,10 +18,10 @@
 //!
 //! | row | where |
 //! |---|---|
-//! | MCP | `crates/inillucent-compat/tests/mcp_session.rs` |
-//! | CLI golden output, exit code 3 | `crates/inillucent-compat/tests/cli_commands.rs` |
+//! | MCP | `crates/inillucent-compat/tests/e2e/mcp_session.rs` |
+//! | CLI golden output, exit code 3 | `crates/inillucent-compat/tests/e2e/cli_commands.rs` |
 //! | bindings, a temp table across two calls | `drivers/conformance/suite.json` |
-//! | a writer killed holding the lock, a stale index | `crates/inillucent-compat/tests/process_campaign.rs` |
+//! | a writer killed holding the lock, a stale index | `crates/inillucent-compat/tests/durability/process_campaign.rs` |
 //! | FTS5 at 2,500 documents at 4 KiB | `crates/inillucent/tests/story_rag.rs` |
 //!
 //! ## The allow list

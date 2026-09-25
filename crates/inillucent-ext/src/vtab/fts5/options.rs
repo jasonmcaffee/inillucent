@@ -6,7 +6,7 @@
 //! no, because the caller has no way to find out (task-1979, R5 and R15).
 //!
 //! It is its own module because `mod.rs` had grown past the size
-//! `crates/inillucent-compat/tests/policy.rs` records for it, and the argument
+//! `crates/inillucent-compat/tests/tooling/policy.rs` records for it, and the argument
 //! grammar is the part of it that has nothing to do with the table.
 
 use inillucent_base::DbResult;

@@ -116,7 +116,9 @@ pub fn pragma_page() -> String {
         "This page is generated. `cargo run -p inillucent-compat --bin inillucent-obligations`\n",
     );
     out.push_str("writes it from `inillucent_sql::pragma_register::REGISTER`, and\n");
-    out.push_str("`cargo test -p inillucent-compat --test harness` fails when the page and the\n");
+    out.push_str(
+        "`cargo test -p inillucent-compat --test tooling harness::` fails when the page and the\n",
+    );
     out.push_str("register differ. Do not edit it by hand.\n\n");
     out.push_str(&format!(
         "There are **{} pragmas**. {} of them take an argument in parentheses.\n\n",

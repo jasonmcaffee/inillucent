@@ -6,7 +6,7 @@
 //! here rather than evaluated against whatever row happened to be current.
 //!
 //! It lives beside `physical` rather than inside it because `physical.rs` is
-//! one of the modules `crates/inillucent-compat/tests/policy.rs` holds a line
+//! one of the modules `crates/inillucent-compat/tests/tooling/policy.rs` holds a line
 //! ceiling over, and that test names this group as the extraction to make: the
 //! four functions below are one idea - *what is constant, and what is it worth*
 //! - and the rest of the physical pass is about turning a plan into operators.

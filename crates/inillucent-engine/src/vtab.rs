@@ -52,7 +52,7 @@ pub mod stages;
 pub use shadow::Nowhere;
 pub(crate) use shadow::{ReadStore, WriteStore};
 // `ModuleStages` is named as `inillucent_engine::ModuleStages` by the gate and by
-// `crates/inillucent-compat/tests/module_stages.rs`, beside `StageTimings` which
+// `crates/inillucent-compat/tests/engine/module_stages.rs`, beside `StageTimings` which
 // lives at the crate root, so `lib.rs` re-exports it there rather than moving it
 // behind a path a caller would have to learn.
 pub use stages::ModuleStages;

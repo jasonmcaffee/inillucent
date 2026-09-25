@@ -1,6 +1,6 @@
 # Differential cases, category `view`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 view-001	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); CREATE VIEW v AS SELECT a*2 AS d FROM t; SELECT * FROM v ORDER BY d
 view-002	CREATE TABLE t(a); INSERT INTO t VALUES(1); CREATE VIEW v(x) AS SELECT a FROM t; SELECT x FROM v
 view-003	CREATE TABLE t(a); CREATE VIEW v AS SELECT * FROM t; INSERT INTO v VALUES(1)

@@ -83,6 +83,25 @@ fn package_root(package: &str) -> Option<PathBuf> {
     None
 }
 
+/// Returns the file a suite lives in: `tests/<suite>.rs`, or the module file
+/// `tests/<binary>/<suite>.rs` when the suite is one module of a binary.
+///
+/// @param root - the crate directory
+/// @param suite - the suite's name
+fn suite_file(root: &Path, suite: &str) -> PathBuf {
+    let flat = root.join("tests").join(format!("{suite}.rs"));
+    if flat.is_file() {
+        return flat;
+    }
+    let module = std::fs::read_dir(root.join("tests"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join(format!("{suite}.rs")))
+        .find(|candidate| candidate.is_file());
+    module.unwrap_or(flat)
+}
+
 /// Every `#[test]` function name in one file.
 ///
 /// The same walk `harness::every_test_function` does over the whole workspace,
@@ -177,7 +196,8 @@ fn rust_files(directory: &Path) -> Vec<PathBuf> {
 ///
 /// `<package>::lib::<test>` is a unit test: the function has to exist somewhere
 /// under that crate's `src/`. `<package>::<target>::<test>` is an integration
-/// test in `tests/<target>.rs`. A fourth segment is a scenario's arm.
+/// test in `tests/<target>.rs`, or in `tests/<binary>/<target>.rs` where the
+/// suite is one module of a binary. A fourth segment is a scenario's arm.
 ///
 /// @param entry - the `held_by` string
 /// @param arms - the arm names the matrix declares
@@ -209,7 +229,7 @@ fn unresolved(entry: &str, arms: &BTreeSet<String>) -> Option<String> {
         };
     }
 
-    let file = root.join("tests").join(format!("{target}.rs"));
+    let file = suite_file(&root, target);
     let Ok(text) = std::fs::read_to_string(&file) else {
         return Some(format!("`{entry}`: there is no {}", file.display()));
     };
@@ -444,9 +464,10 @@ fn the_differs_variant_is_used_as_often_as_the_comparison_records() {
     ];
 
     let root = workspace_root();
-    let semantics =
-        std::fs::read_to_string(root.join("crates/inillucent-compat/tests/semantics.rs"))
-            .expect("semantics.rs is readable");
+    let semantics = std::fs::read_to_string(
+        root.join("crates/inillucent-compat/tests/differential/semantics.rs"),
+    )
+    .expect("semantics.rs is readable");
     let constructed = semantics
         .lines()
         .filter(|line| line.trim() == "expect: Differs,")

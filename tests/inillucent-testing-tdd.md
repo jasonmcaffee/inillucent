@@ -39,7 +39,7 @@ input was empty has not tested anything; assert the input first.
 When the engine does something wrong and the fix is not this ticket's, the
 behaviour is written down as a **test that asserts what happens**, with a
 comment naming the defect and a failure message telling a future fixer which
-lines to rewrite. `crates/inillucent-compat/tests/semantics.rs` has done this
+lines to rewrite. `crates/inillucent-compat/tests/differential/semantics.rs` has done this
 for some time now, and it is the discipline this repository runs on: a fix that
 lands turns the test red, so a fix cannot land unnoticed and a regression cannot
 either.
@@ -92,7 +92,7 @@ and every one of them eventually failed on a working engine:
 |---|---|---|
 | `crates/inillucent/tests/budget.rs` | one transaction beats 2,000, ≥ 2x | 1.3x |
 | the same | re-preparing is cached, ≤ 4x | 6.6x, "the cache is not being consulted" |
-| `crates/inillucent-compat/tests/new_engine_vtab_stream.rs` | a bounded series answers in < 500 ms | 636 ms |
+| `crates/inillucent-compat/tests/engine/new_engine_vtab_stream.rs` | a bounded series answers in < 500 ms | 636 ms |
 | `crates/inillucent-txn/tests/transactions.rs` | a refused writer gave up in < 50 ms | — |
 
 **Widening the number is not the answer.** It has a floor — the ratio reaches
@@ -140,7 +140,7 @@ oracle, and the rollback journal's ordering, and deleting 1,284 lines that
 nothing called.)
 
 **The target column is the `[[target]]` row count in `tests/selection.toml`, and
-`cargo test -p inillucent-compat --test documentation` fails when it is not.**
+`cargo test -p inillucent-compat --test tooling documentation::` fails when it is not.**
 It said 169 here and 170 in `docs/repository.md` while the map held 181, and its
 `engine` and `differential` cells said 53 and 30 against the map's 58 and 31.
 Nothing compared any of the three to the map: `tools/doc-facts/check.mjs` held a
@@ -156,36 +156,57 @@ hand** (task-2066). Nothing reads them, so they had drifted: `differential` said
 selection predated. Read them as the size of a tier rather than as a number to
 check a run against.
 
-| tier | targets | tests | what it is for |
-|---|---:|---:|---|
-| `smoke` | 1 | 10 | the ten-second answer: a real file opened, written, reopened, read |
-| `unit` | 31 | 1,446 | every crate's own `#[cfg(test)]` modules |
-| `engine` | 71 | 466 | SQL and storage behaviour over real database files |
-| `differential` | 34 | 349 | graded against the pinned SQLite 3.53.4 |
-| `durability` | 34 | 234 | crashes, injected faults, corruption and concurrency |
-| `e2e` | 36 | 432 | the public surfaces an application binds to, end to end |
-| `perf` | 1 | 8 | the cost guards — **runs alone**, see §5 |
-| `retrieval` | 7 | 570 | the embedding and retrieval engine, and its graded harness |
-| `tooling` | 16 | 147 | the checks that keep the repository's own rules true |
-| `nightly` | 3 | 6 | the long forms, run on a schedule rather than on a change |
+| tier | targets | tests | cadence | what it is for |
+|---|---:|---:|---|---|
+| `smoke` | 1 | 10 | `change` | the ten-second answer: a real file opened, written, reopened, read |
+| `unit` | 31 | 1,446 | `change` | every crate's own `#[cfg(test)]` modules |
+| `engine` | 71 | 466 | `change` | SQL and storage behaviour over real database files |
+| `differential` | 34 | 349 | `change` | graded against the pinned SQLite 3.53.4 |
+| `durability` | 34 | 234 | `merge` | crashes, injected faults, corruption and concurrency |
+| `e2e` | 36 | 432 | `change` | the public surfaces an application binds to, end to end |
+| `perf` | 1 | 8 | `merge` | the cost guards — **runs alone**, see §5 |
+| `retrieval` | 7 | 570 | `change` | the embedding and retrieval engine, and its graded harness |
+| `tooling` | 16 | 147 | `change` | the checks that keep the repository's own rules true |
+| `nightly` | 3 | 6 | `nightly` | the long forms, run on a schedule rather than on a change |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than
 code so that a person can read the whole arrangement in one file.
+
+**The cadence column says when a tier runs, and the runner reads it from the
+map.** `inillucent-testrun --changed` runs a `change` tier's targets when the
+change reaches anything they cover, runs a `merge` tier's targets only when a
+crate that actually changed is in their `covers`, and never runs the `nightly`
+tier. A run with no `--changed` runs `change` and `merge`. CI runs
+`--cadence merge` on every push, and the nightly runs `--cadence nightly`,
+which is every tier. So a crash suite runs for the ticket that edits the log
+and on every merge, and not for the ticket that edits the parser. A `durability`
+row's `covers` therefore names every storage crate the suite exercises, not
+only the top of its stack. `the_per_tier_table_matches_the_map` checks the
+cadence column against the map as well as the target column.
 
 ### 2.1 Where a new test goes
 
 | what you are testing | where it goes |
 |---|---|
 | one function, one module | `#[cfg(test)]` in the crate — tier `unit` |
-| a construct SQLite also has | `inillucent-compat/tests/`, graded against the oracle — tier `differential` |
-| SQL or storage behaviour with no SQLite equivalent | `inillucent-compat/tests/` — tier `engine` |
+| a construct SQLite also has | `inillucent-compat/tests/differential/`, graded against the oracle — tier `differential` |
+| SQL or storage behaviour with no SQLite equivalent | `inillucent-compat/tests/engine/` — tier `engine` |
 | what an application does with the public API | `crates/inillucent/tests/` — tier `e2e` |
 | **a sequence an application performs, at every configuration** | `crates/inillucent/tests/story_*.rs`, through `scenario!` — tier `e2e`, see §2.2 |
-| what survives a crash or an injected fault | `inillucent-compat/tests/`, under the simulator — tier `durability` |
+| what survives a crash or an injected fault | `inillucent-compat/tests/durability/`, under the simulator — tier `durability` |
 | **what a language binding must answer** | a case in `drivers/conformance/suite.json`, which all five runners read |
 | **what an earlier release wrote, or will read** | a fixture in `tests/interop/<version>/` — tier `e2e`, see §2.2 |
 | **a defect that escaped, and what holds it now** | a row in `tests/escapes.toml` — tier `tooling` |
 | **the same question at a size nobody waits for** | a second target in tier `nightly`, see §2.2 |
+
+**`inillucent-compat`'s integration tests are one binary per tier.** A suite is a
+file in `tests/<tier>/`, declared by a `mod` line in that tier's
+`tests/<tier>/main.rs`, with a row naming `name = "<tier>"` and
+`module = "<file>"`. They were 149 binaries, and every one linked the same compat
+library and the same 23 crates. The runner still gives each suite its own
+process: it lists the tier binary once and starts it per suite with `--exact` and
+that suite's test names. A plain `cargo test -p inillucent-compat --test tooling
+policy::` runs one suite by hand, inside a process it shares with nothing.
 | a cost that must not change shape | `crates/inillucent/tests/budget.rs` — tier `perf` |
 
 **The public facade is the newest of these and the one most easily forgotten.**
@@ -234,8 +255,8 @@ is in exactly one tier and the tiers partition the suite. The pattern is a pair:
 `story_ledger_day_nightly` issues a hundred thousand and replays them through
 the pinned SQLite shell; `release_format` reads the newest interop fixture in
 `e2e`, and `release_format_history` reads all six and hands a file this build
-wrote to every released binary. `pwsh tools/run-nightly.ps1` runs the tier under
-`--strict` and appends a row per target to `tests/nightly-history.tsv` — the
+wrote to every released binary. The nightly job, `packaging/nightly.ps1`, runs the
+tier under `--strict` and appends a row per target to `tests/nightly-history.tsv` — the
 date, the commit, the machine, the verdict and the seconds — because a green run
 nobody recorded cannot answer "when did this last actually pass".
 
@@ -293,7 +314,7 @@ target/debug/inillucent-testrun --changed --list
    `inillucent-cli` and is selected by a change to the page pool.
 
 Plus two direct rules: editing a crate's own source selects that crate's own
-tests, and editing `tests/wal_crash.rs` selects `wal_crash` and not the other
+tests, and editing `tests/durability/wal_crash.rs` selects `wal_crash` and not the other
 seventy-three suites in the same crate.
 
 ### 3.2 Why `covers` is declared rather than derived
@@ -308,7 +329,7 @@ drive the *shell* over a pipe, so their imports name `inillucent-compat` and
 nothing else while what they exercise is the whole engine end to end.
 
 So coverage is declared once per target, and the two failure modes a declaration
-invites are both closed by `crates/inillucent-compat/tests/selection.rs`:
+invites are both closed by `crates/inillucent-compat/tests/tooling/selection.rs`:
 
 - **a target with no row** — it would never be selected, by `--changed` or by a
   tier, so it would sit in the tree looking like coverage and never run;
@@ -326,9 +347,23 @@ invites are both closed by `crates/inillucent-compat/tests/selection.rs`:
 
 Selecting too much costs time. Selecting too little costs a defect that reaches
 `main`, so every judgement call is biased toward running more. The tier a target
-is in never affects whether it is *selected*: tiers are for asking "run the
-quick ones" and selection is for asking "run what this change can break", and
-conflating them would let a tier choice quietly narrow a correctness question.
+is in decides *when* it runs, through the tier's cadence:
+
+| cadence | tiers | selected by `--changed` when |
+|---|---|---|
+| `change` | smoke, unit, engine, differential, e2e, retrieval, tooling | the closure reaches anything the target covers |
+| `merge` | durability, perf | a crate that actually changed is in the target's `covers`, or its own crate or file changed |
+| `nightly` | nightly | never; it runs in the nightly job, or by name |
+
+A run with no `--changed` runs `change` and `merge`. `--cadence merge` with
+`--changed` selects the merge tiers by the closure too, which is what CI runs on
+a pull request, and `--cadence nightly` is every tier. This is the one place
+selection is narrower than the closure, and it is deliberate: a four file change
+in `inillucent-engine` and `inillucent-sql` selected 178 of 231 targets, one of
+them a 3,991 s nightly story, and 23 crash suites that named
+`inillucent-engine`. A merge row whose `covers` is too narrow is caught by CI's
+merge run and by the nightly, hours later instead of minutes, so a durability
+row names every storage crate the suite exercises.
 
 ### 3.4 The pragmatic ladder
 
@@ -338,7 +373,8 @@ conflating them would let a tier choice quietly narrow a correctness question.
 | about to commit | `--changed` | seconds to a minute |
 | about to commit something structural | `--tier unit --tier engine --tier e2e` | ~55 s |
 | about to push | everything except `retrieval` | ~35 s after a warm build |
-| changing the planner, the tree, or the log | everything | ~155 s |
+| changing the planner, the tree, or the log | everything but `nightly` | minutes |
+| checking what CI's pull request run will select | `--changed origin/main --cadence merge --list` | seconds |
 | claiming a speedup | the gates, not the suite — see §5.3 | minutes |
 
 ---
@@ -365,9 +401,10 @@ classic answer and the reason is the tail: whatever starts last decides when the
 run ends, so the worst thing to start last is the slowest suite.
 
 ```sh
-target/debug/inillucent-testrun                 # everything
+target/debug/inillucent-testrun                 # every tier but nightly
+target/debug/inillucent-testrun --cadence nightly   # every tier
 target/debug/inillucent-testrun --tier engine   # one tier
-target/debug/inillucent-testrun --target inillucent-compat::semantics
+target/debug/inillucent-testrun --target inillucent-compat::differential::semantics
 target/debug/inillucent-testrun --jobs 12 --test-threads 4
 target/debug/inillucent-testrun --record        # update the ledger
 target/debug/inillucent-testrun --strict        # a missing prerequisite fails
@@ -376,6 +413,22 @@ target/debug/inillucent-testrun --strict        # a missing prerequisite fails
 **It never decides that a test passed.** It builds what cargo builds, runs the
 same executables cargo would run, and reports their exit status; where it
 differs is only in *which* binaries it runs and *how many at a time*.
+
+**It builds only what it selected.** The build names each selected package with
+`-p` and each selected target with `--lib`, `--test` or `--bin`, instead of
+`--workspace`, and it builds `inillucent-cli` and `inillucent-driver-capi` as
+programs only when a selected suite starts one. It then writes the executables
+it located to `<target>/inillucent-testrun/artifacts.json` and names that file in
+`INILLUCENT_TESTRUN_ARTIFACTS` for every child. `--artifacts <file>` runs from
+such a list and starts no cargo, which is how `gates_fail_closed` runs its
+nested runners without building a second workspace.
+
+**A machine may declare what it lacks.** `tests/prerequisites.local.toml` is
+gitignored and holds `absent = [...]`, and `--absent <name>` adds to it for
+one run, which is how CI declares what a runner cannot have. Under `--strict`, a
+suite whose row `requires` a declared name is reported under "not evidenced on
+this machine, by declaration" and does not fail the run. A declared name no row
+requires is refused. `--summary <file>` writes the verdict and the declared list as JSON.
 
 ### 4.3 Three things it had to be taught
 
@@ -424,7 +477,7 @@ caller named by hand that do not overlap is a request that could not be
 honoured, and it refuses naming both — it used to print `nothing selected` and
 exit 0, with both names real so neither existing guard fired.
 
-The five cases holding this are in `crates/inillucent-compat/tests/gates_fail_closed.rs`,
+The five cases holding this are in `crates/inillucent-compat/tests/tooling/gates_fail_closed.rs`,
 and each asserts an **exact** code rather than "non-zero". A test that only
 asserts non-zero on a broken build passes against a runner that refuses
 everything, which is a worse program than the one being fixed.
@@ -670,7 +723,7 @@ while those two are still going.
 ### 6.3 The eight that matter
 
 Re-measured post task-1911. Three of the original five (`inillucent-migrate::corpus`,
-`inillucent-compat::corruption`, `inillucent-compat::semantics`) are still slow
+`inillucent-compat::durability::corruption`, `inillucent-compat::differential::semantics`) are still slow
 but no longer the tail; the free-map durability fix's own crash campaigns and
 the differential re-point's new fixture-heavy suites now dominate it, so the
 list is longer rather than swapped one-for-one. Under the parallel runner,
@@ -680,11 +733,11 @@ where contention inflates each, and on a box that was not quiet (see §6.1):
 |---|---:|
 | `inillucent-core::lib` | 261 s |
 | `inillucent-bench::inillucent-bench` | 249 s |
-| `inillucent-compat::search_crash` | 224 s |
-| `inillucent-compat::durability` | 213 s |
-| `inillucent-compat::wal_crash` | 179 s |
-| `inillucent-compat::new_engine_recovery_shapes` | 152 s |
-| `inillucent-compat::semantics` | 122 s |
+| `inillucent-compat::durability::search_crash` | 224 s |
+| `inillucent-compat::durability::durability` | 213 s |
+| `inillucent-compat::durability::wal_crash` | 179 s |
+| `inillucent-compat::durability::new_engine_recovery_shapes` | 152 s |
+| `inillucent-compat::differential::semantics` | 122 s |
 | `inillucent-migrate::corpus` | 98 s |
 
 Serial figures for this list were not re-measured this pass — the original
@@ -858,8 +911,9 @@ and `inillucent-hotprofile` exist for it.
 
 ## 9. Adding to the suite
 
-**A test.** Put it where §2.1 says. If it is a new `tests/*.rs` file, add its row
-to `tests/selection.toml` — `crates/inillucent-compat/tests/selection.rs` will
+**A test.** Put it where §2.1 says. If it is a new `tests/*.rs` file, or a new
+suite module in one of `inillucent-compat`'s tier directories, add its row
+to `tests/selection.toml` — `crates/inillucent-compat/tests/tooling/selection.rs` will
 fail until you do, and its message names the target.
 
 **A tier.** Add a `[[tier]]` row and move targets into it. A declared tier that
@@ -878,8 +932,8 @@ number in the `e2e` one — a target is in exactly one tier. Name it
 `<the short form>_nightly` so the pair is obvious, and state its cadence rather
 than deriving it: the short form's phase boundaries are tuned for a run that
 finishes in seconds, and the same cadence over a hundred thousand transactions
-spends its night on `VACUUM`. `pwsh tools/run-nightly.ps1` picks it up with no
-further wiring.
+spends its night on `VACUUM`. The nightly job picks it up with no further
+wiring, and `pwsh tools/run-nightly.ps1` runs the tier alone by hand.
 
 **An interop fixture.** `pwsh tools/build-interop-fixture.ps1 -Version <version>`
 downloads that release, verifies it against the published `SHA256SUMS` and its
@@ -941,7 +995,8 @@ target/debug/inillucent-testrun --list-tiers        # what the tiers are
 target/debug/inillucent-testrun --tier smoke        # ~1 s
 target/debug/inillucent-testrun --changed           # what your edits can break
 target/debug/inillucent-testrun --changed --list    # ...without running it
-target/debug/inillucent-testrun                     # everything, ~155 s
+target/debug/inillucent-testrun                     # every tier but nightly
+target/debug/inillucent-testrun --cadence nightly   # every tier
 target/debug/inillucent-testrun --strict            # fail on a missing prerequisite
 target/debug/inillucent-testrun --record            # update tests/timings.toml
 

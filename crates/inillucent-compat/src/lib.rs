@@ -75,6 +75,9 @@ pub mod stories;
 // sat on that difference with no verdict and no exit code at all (task-2071).
 pub mod supervise;
 pub mod syntax;
+// What the test runner builds for a selection, and the artifact list a nested
+// runner reads instead of starting cargo.
+pub mod testplan;
 pub mod toml_lite;
 pub mod verdict;
 

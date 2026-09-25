@@ -194,7 +194,7 @@ skips the records a page already has.
 
 Several processes can use one database file. One process writes at a time. A second writer waits up
 to `PRAGMA busy_timeout` (5000 milliseconds by default) and then fails with the status `busy`.
-`crates/inillucent-compat/tests/process_concurrency.rs` runs two real writer processes and checks
+`crates/inillucent-compat/tests/durability/process_concurrency.rs` runs two real writer processes and checks
 that the number of rows in the file equals the number of commits the engine acknowledged.
 
 ## Where the bytes live

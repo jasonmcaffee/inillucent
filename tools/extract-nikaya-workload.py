@@ -13,7 +13,7 @@ placeholder inferred from the column the placeholder stands for.
 
 `--check` exits 0 when the checked-in file is what this would write, 1 when it
 is not, and 2 when the Nikaya checkout is not on this machine - which is how
-`crates/inillucent-compat/tests/workload_freshness.rs` tells "stale" from
+`crates/inillucent-compat/tests/tooling/workload_freshness.rs` tells "stale" from
 "cannot tell". A copy goes stale; something has to notice.
 """
 import argparse

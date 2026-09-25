@@ -3,7 +3,7 @@
 -- One list, two readers. `tools/build-interop-fixture.ps1` runs these against a
 -- database that release's own binary has just written, and records the answers
 -- as `tests/interop/<version>/expected.tsv`.
--- `crates/inillucent-compat/tests/release_format.rs` runs the same lines
+-- `crates/inillucent-compat/tests/e2e/release_format.rs` runs the same lines
 -- against the same file with the current build and compares. Neither side
 -- holds a copy of the SQL, so neither can drift from the other.
 --

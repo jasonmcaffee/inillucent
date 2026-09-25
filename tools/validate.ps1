@@ -233,7 +233,7 @@ Invoke-Stage -Name 'urls' -Because 'a URL a shipped package names has to resolve
 # quick run that skipped it was a quick run with nothing holding the programs
 # that decide pass or fail.
 Invoke-Stage -Name 'contracts' -Because 'dependencies, layering, the command table and the test map' -Body {
-    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test policy --test selection --test command_parity --test harness --test gates_fail_closed
+    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test tooling -- policy:: selection:: command_parity:: harness:: gates_fail_closed::
 }
 
 # **A published compatibility report may not carry its own unresolved Problems
@@ -281,7 +281,7 @@ if ($Quick -and -not $Stage) {
 # The security suites, run before the engine tiers because they are the fastest
 # way to find out that a change reopened a hole.
 Invoke-Stage -Name 'security' -Because 'root confinement, the C ABI lifetimes, and migration transport' -Body {
-    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test confinement
+    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test e2e confinement::
     if ($LASTEXITCODE -ne 0) { return }
     cargo test --manifest-path "$root/Cargo.toml" -p inillucent-driver-capi --test abi --test conformance
     if ($LASTEXITCODE -ne 0) { return }

@@ -282,10 +282,10 @@ they are touching do not collide; two that have not, do.
   between the rebase and the merge. Do the rebase and the fast-forward in one command so nothing
   lands in between, and expect the merge, not the work, to be what takes the retries. Both conflicts
   were the same shape: two tickets appending a `Case` to the end of `CASES` in
-  `crates/inillucent-compat/tests/semantics.rs`. Keep both sides and close the earlier one's last
+  `crates/inillucent-compat/tests/differential/semantics.rs`. Keep both sides and close the earlier one's last
   case - that file is the busiest merge point in the repository right now. (task-2042)
 - **Do not run two copies of a compat test binary in the same worktree at once.**
-  `crates/inillucent-compat/tests/cli_commands.rs::area` does `remove_dir_all` on a per case
+  `crates/inillucent-compat/tests/e2e/cli_commands.rs::area` does `remove_dir_all` on a per case
   directory and then recreates it, so a second run of that binary deletes the first run's fixture
   while it is being used. task-2044 started `inillucent-testrun` in the background and then ran
   `cargo test --test cli_commands` beside it, and got nine failures that all pointed at the fixture
@@ -420,7 +420,7 @@ they are touching do not collide; two that have not, do.
   that has bare tests, the case goes in the arms file. Adding the target also means a
   `tests/selection.toml` row **and** the tier table in `tests/inillucent-testing-tdd.md`, which
   `documentation` compares against the map. (task-2055)
-- **`inillucent-compat::bindings` fails on this machine and it is nobody's ticket.** It reads
+- **`inillucent-compat::tooling::bindings` fails on this machine and it is nobody's ticket.** It reads
   records the npm, go and php conformance runners write into `_agent_output/conformance/`, and
   that directory exists in neither the main checkout nor any worktree - so the failure is "these
   runners have produced no record", on any branch. Produce them with
@@ -462,7 +462,7 @@ they are touching do not collide; two that have not, do.
   staging file. If you add another check to `verify_against`, push it for every table rather than
   only the one that failed - the report is read as a list, and a check that appears once reads as a
   defect in that table. (task-2050)
-- **`crates/inillucent-compat/tests/migrate_realistic.rs` is a merge point now.** task-2036 wrote it
+- **`crates/inillucent-compat/tests/e2e/migrate_realistic.rs` is a merge point now.** task-2036 wrote it
   and task-2050 added three cases to the end of it, which is the same shape as the conflicts on
   `semantics.rs`'s `CASES`. Keep both sides. (task-2050)
 - **`sh tools/build-realistic-fixtures.sh --check` says whether each checked-in `.db` is what the
@@ -509,6 +509,22 @@ they are touching do not collide; two that have not, do.
   anything is actually broken. Two of the nine even print `ok` on their own line, because they
   skip cleanly, so counting `FAILED` lines undercounts. The last target runs alone and took 36
   minutes of the 37. (task-2061)
+- **Most of the note above no longer holds, since task-2125.** Tiers have a cadence: `--changed`
+  runs a `durability` or `perf` target only when a crate you edited is in its `covers`, and never a
+  `nightly` one, so an engine or parser change no longer drags in the crash suites by closure or the
+  hour long stories. `gates_fail_closed` no longer builds a second workspace or runs alone: its
+  nested runners read `INILLUCENT_TESTRUN_ARTIFACTS`. On this box, write the gitignored
+  `tests/prerequisites.local.toml` (`absent = ["go", "mysql", "postgres", ...]`, whatever a strict
+  run names) and `--strict` stops failing for suites this machine can never run; anything it does not
+  declare still fails.
+- **`inillucent-compat`'s integration tests are seven binaries, one per tier, since task-2125.** A
+  suite is `tests/<tier>/<name>.rs` and its target is `inillucent-compat::<tier>::<name>`. A plain
+  `cargo test -p inillucent-compat --test engine` runs all 59 engine suites in one process, which is
+  not how the runner runs them (one process per suite, `--exact` names). If a suite behaves
+  differently under plain cargo, suspect shared process state first, and use the runner.
+- **The nightly lives in `J:/build/nightly` and writes `_agent_output/nightly/latest.json` in the
+  main checkout.** `ship.ps1` reads that file instead of running a suite. Do not edit or build in
+  `J:/build/nightly`: the scheduled task forces it to `origin/main` every night. (task-2125)
 - **Copy `.sqlite-ref/` into the worktree rather than junctioning it.** task-2048 records a
   recursive delete of a junction emptying the one shared copy for every worktree at once.
   `Copy-Item -Recurse C:\jason\dev\inillucent\.sqlite-ref <worktree>\.sqlite-ref` costs about four
@@ -645,7 +661,7 @@ they are touching do not collide; two that have not, do.
   closes: task-2052's page leak cases, the LSN checksum case in `durability.rs`, and the
   `does_not_yet` cases in `planner.rs`. That is a good record, but it only works if the fixing ticket
   runs the strict gate before it merges. task-2074 closed the LSN checksum gap in format 2 and did not
-  run it, so `inillucent-compat::durability` was red on `main` from d142334 until task-2078 inverted
+  run it, so `inillucent-compat::durability::durability` was red on `main` from d142334 until task-2078 inverted
   the case, and two agents each spent a diagnosis on it. Before merging a fix, search the tests for the
   gap's name or ticket number. (task-2078)
 - **`INDEXED BY` forces the named index and nothing else, and the binder refuses what it cannot
@@ -771,10 +787,10 @@ they are touching do not collide; two that have not, do.
   (task-2087)
 - **`bind.rs` and `expr/tree.rs::compile` sit at their `policy.rs` ceilings, and a unit test
   module counts toward the file.** task-2088 added four fields to `BETWEEN` and a test module to
-  `bind.rs`, and `inillucent-compat::policy` failed at the end of a 30 minute `--changed` run on
+  `bind.rs`, and `inillucent-compat::tooling::policy` failed at the end of a 30 minute `--changed` run on
   `no_module_grows_past_the_size_it_is_recorded_at` and
   `no_function_grows_past_the_length_it_is_recorded_at`. Put binder tests in a `bind/` submodule
-  next to the code they test, and run `cargo test -p inillucent-compat --test policy` on its own
+  next to the code they test, and run `cargo test -p inillucent-compat --test tooling policy::` on its own
   before the full run when an edit adds lines to either. (task-2088)
 - **A suite that shells out to `inillucent-shell` builds it while the run is going, so edits made
   during a baseline run end up in that baseline.** `numeric_text.rs` calls `cargo build -p

@@ -28,10 +28,10 @@ Read the file for a rule before you write the code the rule covers. Each file is
 
 | Rule | Where it is written | The test that fails |
 |---|---|---|
-| Dependencies: only crates on an allowed list | `docs/dependency-policy.md`, `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test policy` |
-| Layering: which crate may depend on which | `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test harness`, `the_workspace_obeys_the_dependency_contract` |
-| Test selection: every test target has a row | `tests/selection.toml` | `cargo test -p inillucent-compat --test selection`; `no_test_hides_outside_the_map` names the target |
-| One command table: the command line and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `cargo test -p inillucent-compat --test command_parity` |
+| Dependencies: only crates on an allowed list | `docs/dependency-policy.md`, `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test tooling policy::` |
+| Layering: which crate may depend on which | `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test tooling harness::`, `the_workspace_obeys_the_dependency_contract` |
+| Test selection: every test target has a row | `tests/selection.toml` | `cargo test -p inillucent-compat --test tooling selection::`; `no_test_hides_outside_the_map` names the target |
+| One command table: the command line and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `cargo test -p inillucent-compat --test tooling command_parity::` |
 | The testing standard: where a new test goes and how the suite runs | [`tests/inillucent-testing-tdd.md`](../../tests/inillucent-testing-tdd.md) | none. A reviewer checks it |
 
 ## Running the tests
@@ -46,7 +46,8 @@ target/debug/inillucent-testrun --tier smoke            # the smallest tier, whi
 target/debug/inillucent-testrun --changed               # what your uncommitted edits can break
 target/debug/inillucent-testrun --changed origin/main   # the same, after you have committed
 target/debug/inillucent-testrun --changed --list        # the selection, without running it
-target/debug/inillucent-testrun                         # everything
+target/debug/inillucent-testrun                         # every tier except nightly
+target/debug/inillucent-testrun --cadence nightly       # every tier
 target/debug/inillucent-testrun --strict                # fail when a prerequisite is missing
 ```
 
@@ -66,7 +67,14 @@ flowchart LR
 - `--changed` reads `git diff --name-only` and `git ls-files --others`, so a new file counts.
 - `tests/selection.toml` maps each path to a package. The runner adds every package that depends
   on those packages, then runs every target that covers one of them.
-- A path that no rule in `tests/selection.toml` matches selects every target.
+- A path that no rule in `tests/selection.toml` matches selects every target except the nightly
+  tier.
+- Each tier has a cadence. A `change` tier target runs by the closure above. A `durability` or
+  `perf` target (cadence `merge`) runs only when a crate you changed is in its `covers`; CI runs
+  them all on every push. A `nightly` target never runs on a change: the nightly job runs it, or
+  `--tier nightly` by name.
+- The build names only the selected targets, so a run that selects no `inillucent-bench` row does
+  not compile ONNX Runtime, the tokenizers or oniguruma.
 - `--changed` compares against `HEAD` by default. Once your work is committed, `--changed` with no
   revision selects nothing and exits 0. Pass `--changed origin/main`.
 
@@ -98,12 +106,17 @@ absent. `inillucent-testrun --strict` counts those suites as failures and names 
 Setting `INILLUCENT_STRICT=1` in your shell does not do the same thing. The runner sets
 `INILLUCENT_STRICT` in every child process from its own `--strict` flag.
 
+A machine that will never have a prerequisite lists it in the gitignored
+`tests/prerequisites.local.toml`, as `absent = ["mysql", "postgres", "go"]`, or passes
+`--absent <name>` for one run. A strict run reports the suites whose row requires one of them under "not evidenced on this machine, by declaration" and does not
+fail for them. Say which suites that heading named when you report a result.
+
 A new git worktree is missing two gitignored folders:
 
 | Folder | What needs it | How to get it |
 |---|---|---|
 | `.sqlite-ref/` | every suite graded against the pinned SQLite | copy it from the main checkout, or run `pwsh tools/sqlite-reference.ps1` |
-| `_agent_output/fixtures/` | `small.db`, `medium.db` and `large.db`, used by `inillucent-compat::new_engine_log_lead` and `inillucent-compat::gates_fail_closed` | copy it from the main checkout, or run `tools/build-gate-fixtures.sh` |
+| `_agent_output/fixtures/` | `small.db`, `medium.db` and `large.db`, used by `inillucent-compat::engine::new_engine_log_lead` and `inillucent-compat::tooling::gates_fail_closed` | copy it from the main checkout, or run `tools/build-gate-fixtures.sh` |
 
 ## Adding a dependency
 
@@ -187,7 +200,9 @@ where a test goes. The common cases:
 | a cost that must not change | `crates/inillucent/tests/budget.rs` | `perf` |
 
 A new `tests/*.rs` file needs a row in `tests/selection.toml`. Without the row, the `selection` suite
-fails and names the target.
+fails and names the target. In `inillucent-compat`, a suite is a module of its tier binary: a file
+in `tests/<tier>/`, a `mod` line in `tests/<tier>/main.rs`, and a row with `name = "<tier>"` and
+`module = "<file>"`. Its target is `inillucent-compat::<tier>::<file>`.
 
 When a suite needs a prerequisite the workspace cannot build:
 
@@ -251,6 +266,6 @@ Read three neighbouring files before you write a new one. Then follow these rule
    - the chapter in `src/data/documentation.ts` in the `inillucent-site` repository, which is
      published at https://inillucent.com/docs.
 7. `node tools/doc-style/check.mjs` reports no problems, and
-   `cargo test -p inillucent-compat --test documentation` passes.
+   `cargo test -p inillucent-compat --test tooling documentation::` passes.
 8. If you measured something, say what the number is and how you took it. If you did not measure,
    do not write a number.

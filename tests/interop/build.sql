@@ -2,7 +2,7 @@
 --
 -- `tools/build-interop-fixture.ps1 <version>` runs this file with that
 -- release's own `inillucent.exe` and leaves the result in
--- `tests/interop/<version>/`. `crates/inillucent-compat/tests/release_format.rs`
+-- `tests/interop/<version>/`. `crates/inillucent-compat/tests/e2e/release_format.rs`
 -- opens those files with the current build and asks `verify.sql`'s questions of
 -- them.
 --

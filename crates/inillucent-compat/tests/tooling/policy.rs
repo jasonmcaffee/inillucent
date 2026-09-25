@@ -266,7 +266,7 @@ fn unsafe_code_is_confined_and_justified() {
         for file in rust_files(&crate_directory(&root, crate_name)) {
             let name = relative(&root, &file);
             // This file names the word in every check it makes.
-            if name.ends_with("tests/policy.rs") {
+            if name.ends_with("tests/tooling/policy.rs") {
                 continue;
             }
             let text = std::fs::read_to_string(&file).expect("the source reads");
@@ -1864,7 +1864,7 @@ fn announces_by_saying_so(block: &str) -> bool {
     code_of(block).any(|code| {
         code.contains("skipping(")
             // **Qualified, because the bare name was a hole (task-1969,
-            // 4.2).** `crates/inillucent-compat/tests/differential.rs` - the
+            // 4.2).** `crates/inillucent-compat/tests/differential/differential.rs` - the
             // file the differential tier is named after - defined its own
             // `announce_skip` that printed neither the marker nor the panic,
             // and this check waved through all nine of its call sites because
@@ -2993,7 +2993,7 @@ fn no_function_grows_past_the_length_it_is_recorded_at() {
 /// No test file may define its own skip helper.
 ///
 /// **The defect this refuses shipped and hid nine tests (task-1969, 4.2).**
-/// `crates/inillucent-compat/tests/differential.rs` defined
+/// `crates/inillucent-compat/tests/differential/differential.rs` defined
 ///
 /// a private helper of its own named `announce_skip`, whose whole body was an
 /// `eprintln!` of the sentence the library helper prints - and which therefore

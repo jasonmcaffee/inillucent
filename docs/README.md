@@ -10,7 +10,7 @@ The tables below list the pages in reading order for a programmer who has used a
 never written one. Start with what inillucent is, then the terms, then how to run it, then how the
 two engines work.
 
-`cargo test -p inillucent-compat --test documentation` fails when a page in `docs/` is missing from
+`cargo test -p inillucent-compat --test tooling documentation::` fails when a page in `docs/` is missing from
 this index.
 
 ## Start here

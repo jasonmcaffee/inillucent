@@ -204,7 +204,7 @@ is NULL in a `LEFT JOIN` row with no match. SQLite does the same.
 | `win.filter` | Aggregate with FILTER over a window | same |
 | `win.named` | Named WINDOW clause reused | same |
 
-`windows_match_the_oracle` in `crates/inillucent-compat/tests/advanced_sql.rs` also compares window
+`windows_match_the_oracle` in `crates/inillucent-compat/tests/differential/advanced_sql.rs` also compares window
 queries with the reference row for row. A window function inside a derived table in `FROM` is
 refused with exit code 3. Write the same query with a common table expression, which runs.
 
@@ -474,7 +474,7 @@ does. The answer depends on the operating system's time zone data and on the zon
 in, so the same query gives different answers on two machines. That is true in SQLite too. If a
 query must give the same answer everywhere, store the offset with the value and convert it in the
 application. `date_and_time_functions_match_the_oracle` in
-`crates/inillucent-compat/tests/advanced_sql.rs` compares both engines on one machine.
+`crates/inillucent-compat/tests/differential/advanced_sql.rs` compares both engines on one machine.
 
 ### Math functions
 
@@ -819,9 +819,9 @@ Six cases answer differently from SQLite. Two of them come from one choice, the 
 other four print numbers that describe how SQLite itself is built, which inillucent cannot print
 because SQLite is not linked into it.
 
-`crates/inillucent-compat/tests/semantics.rs` has a case for each difference that expects the
+`crates/inillucent-compat/tests/differential/semantics.rs` has a case for each difference that expects the
 difference. If one of them starts to match SQLite, or changes in another way, that test fails.
-`crates/inillucent-compat/tests/escapes.rs` checks that this page and `semantics.rs` name the same
+`crates/inillucent-compat/tests/tooling/escapes.rs` checks that this page and `semantics.rs` name the same
 differences.
 
 | Difference | Cases | Can it be closed? |
@@ -930,7 +930,7 @@ four modules only inillucent lists are `inillucent_search`, `ivfflat`, `json_eac
 The 18 functions only inillucent lists are the vector functions, such as `vector_distance_cos` and
 `l2_distance`.
 
-`cargo test --release -p inillucent-compat --test registers` runs the same comparison on every
+`cargo test --release -p inillucent-compat --test differential registers::` runs the same comparison on every
 build, against the SQLite library. A name that differs must be listed in that test with the reason,
 or the test fails.
 
@@ -1027,7 +1027,7 @@ These cannot be tested with a SQL script. Each row comes from the source code or
 tables, generated columns, partial indexes, foreign keys, views, triggers, FTS5 indexes and
 `sqlite_sequence`. It checks each table's row count and a digest of every stored column before it
 publishes the new file. A `VIRTUAL` generated column is not stored by either engine, so the digest
-leaves it out, and `crates/inillucent-compat/tests/migrate_realistic.rs` compares those columns
+leaves it out, and `crates/inillucent-compat/tests/e2e/migrate_realistic.rs` compares those columns
 value by value with SQLite.
 
 An FTS5 index declared with `content=''` or with `content=` naming another table keeps no copy of
@@ -1122,7 +1122,7 @@ It stops when it has `k` rows or has read the whole index. This does the same jo
 `hnsw.iterative_scan` and needs no setting.
 
 `a_filtered_vector_search_keeps_every_row_the_exhaustive_plan_finds` in
-`crates/inillucent-compat/tests/vector.rs` checks it on 400 rows. With filters that keep 100%, 50%,
+`crates/inillucent-compat/tests/engine/vector.rs` checks it on 400 rows. With filters that keep 100%, 50%,
 5% and 1% of the rows, at `LIMIT` 1, 10 and 100, the indexed search returns the same rows as a full
 scan in all 12 combinations.
 
@@ -1195,7 +1195,7 @@ On Windows, `pwsh tools/sqlite-reference.ps1` fetches the pinned SQLite. The pro
 outputs and the result, and names the commit it ran against. `tools/feature-probe/README.md`
 explains how to add a case.
 
-`crates/inillucent-compat/tests/semantics.rs` holds 242 cases that run in the test suite and compare
+`crates/inillucent-compat/tests/differential/semantics.rs` holds 242 cases that run in the test suite and compare
 both engines the same way. A difference the probe finds becomes a case there.
 
 The retrieval numbers come from `inillucent-bench grade`, and the speed and memory numbers from

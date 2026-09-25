@@ -101,7 +101,7 @@
 //! the 4,096 byte cost per row to 0.76 times it. The cause was the order the
 //! delete visited the trees, not work inside a leaf: see `delete_unwatched` in
 //! `crates/inillucent-exec/src/dml/delete.rs` and
-//! `crates/inillucent-compat/tests/delete_order.rs`.
+//! `crates/inillucent-compat/tests/engine/delete_order.rs`.
 //!
 //! **Before task-2077**, measured on 2026-09-23 in a quiet window (task-2075): every other agent on
 //! the box paused, CPU at 17% from browsers and terminals at the start, the

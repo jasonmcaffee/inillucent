@@ -33,7 +33,7 @@ problems come from those two inputs.
   set.
 - **Escaping `--root`.** The command line and the MCP server can be confined to one directory with
   `--root DIR`. A path that reaches a file outside `DIR` is a vulnerability.
-  `crates/inillucent-compat/tests/confinement.rs` tests that no command can do this.
+  `crates/inillucent-compat/tests/e2e/confinement.rs` tests that no command can do this.
 - **The migration transport.** `inillucent migrate` connects to PostgreSQL and MySQL over TLS. These
   are in scope: a downgrade the caller did not ask for, a certificate that is not checked, and a
   password that appears in a log, a manifest, a report or an MCP result.
@@ -69,7 +69,7 @@ This list shows a reporter what has already been checked.
   security advisories, licences and the resolved dependency graph. `deny.toml` in the repository
   root lists what is allowed and why.
 - **A dependency policy** that refuses another database engine, SQL parser, storage engine, B-tree,
-  transaction manager, log or query optimizer. `cargo test -p inillucent-compat --test policy`
+  transaction manager, log or query optimizer. `cargo test -p inillucent-compat --test tooling policy::`
   enforces the dependency policy.
 
 ## Supported versions

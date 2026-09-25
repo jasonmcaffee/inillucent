@@ -8,7 +8,7 @@
 //!
 //! ## Why they are in a file of their own
 //!
-//! `bind.rs` reached the ceiling `crates/inillucent-compat/tests/policy.rs`
+//! `bind.rs` reached the ceiling `crates/inillucent-compat/tests/tooling/policy.rs`
 //! records for it, and that check's message says what to do about it: extract
 //! something rather than raise the number, because the way a module reaches
 //! eight thousand lines is that every individual addition to it was reasonable.

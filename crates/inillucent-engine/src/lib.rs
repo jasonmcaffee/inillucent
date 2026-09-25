@@ -426,7 +426,7 @@ impl ImportedDatabase {
     /// an open would replay and which it would never look at. A test reasoning
     /// about what the log can repair has to ask, because a record below this
     /// point is one recovery does not read - see
-    /// `crates/inillucent-compat/tests/torn_page_with_image.rs` (task-1962,
+    /// `crates/inillucent-compat/tests/engine/torn_page_with_image.rs` (task-1962,
     /// roadmap item 6).
     pub fn checkpoint_lsn(&self) -> u64 {
         self.storage.database.meta().checkpoint_lsn

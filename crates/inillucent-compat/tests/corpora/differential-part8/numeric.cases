@@ -1,6 +1,6 @@
 # Differential cases, category `numeric`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 num-001	SELECT 7/2, -7/2, 7%2, -7%2, 7%-2, -7%-2
 num-002	SELECT 7/2.0, 7.0/2, typeof(7/2), typeof(7/2.0)
 num-003	SELECT 1/0, 1%0, 1.0/0, typeof(1/0)

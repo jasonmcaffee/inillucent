@@ -1,7 +1,7 @@
 # What `cargo deny check` is allowed to find in the resolved dependency graph.
 #
 # `docs/dependency-policy.md` and `docs/invariants/layering.toml` decide which
-# crates a production crate may *name*; `crates/inillucent-compat/tests/policy.rs`
+# crates a production crate may *name*; `crates/inillucent-compat/tests/tooling/policy.rs`
 # enforces that. Neither of them looks at what an approved crate drags in behind
 # it, and neither knows anything about licences or published advisories - so a
 # dependency with a known vulnerability, or one under a licence this repository

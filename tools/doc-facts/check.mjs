@@ -248,7 +248,7 @@ function probe() {
  * `pragma_list` reports rather than the 68 the register holds - a real
  * distinction that nothing wrote down, so the two numbers read as one being
  * wrong. `docs/pragmas.md` is generated from the register and
- * `cargo test -p inillucent-compat --test harness` fails when they differ;
+ * `cargo test -p inillucent-compat --test tooling harness::` fails when they differ;
  * this fails when a prose document names a number that is neither.
  */
 function pragmaRegisterCount() {

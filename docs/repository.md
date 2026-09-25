@@ -160,13 +160,24 @@ target/debug/inillucent-testrun --tier smoke            # the smallest tier, whi
 target/debug/inillucent-testrun --changed               # what your uncommitted edits can break
 target/debug/inillucent-testrun --changed origin/main   # the same, after you have committed
 target/debug/inillucent-testrun --changed --list        # the selection, without running it
-target/debug/inillucent-testrun                         # everything
+target/debug/inillucent-testrun                         # every tier except nightly
+target/debug/inillucent-testrun --cadence nightly       # every tier
 target/debug/inillucent-testrun --strict                # fail when a prerequisite is missing
 ```
 
 The exit code is the result. Exit code 0 means every selected target passed. Exit code 1 means a
 target failed. Exit code 2 means the run did not happen, for example because the build failed.
 [`AGENTS.md`](../AGENTS.md) section 2 explains each exit code.
+
+Each tier has a cadence. `change` tiers run on every change that can reach them. The `durability`
+and `perf` tiers are `merge`: a change run selects one of their targets only when a crate that
+actually changed is in its `covers`, and CI runs all of them on every push. The `nightly` tier runs
+once a night in `packaging/nightly.ps1`, which also builds the release and runs the gates. The runner
+builds only the targets it selected.
+
+`inillucent-compat`'s integration tests are one binary per tier, with one module per suite:
+`tests/engine/new_engine_log_lead.rs` is the target `inillucent-compat::engine::new_engine_log_lead`.
+The runner still starts each suite in a process of its own.
 
 If you use `cargo test --workspace`, pass `--no-fail-fast`. Without `--no-fail-fast`, cargo stops at
 the first test binary that fails and the rest of the suite never runs.
@@ -178,8 +189,11 @@ its cases and reports success. `--strict` turns each of those skips into a failu
 suite.
 
 So a `--strict` run on a new machine names several suites. The number depends on what is installed.
+A machine that will never have some of them lists them in the gitignored
+`tests/prerequisites.local.toml`, as `absent = ["mysql", "postgres"]`. A strict run then reports the
+suites that need only those under their own heading and does not fail for them.
 The table below lists every prerequisite that a row of `tests/selection.toml` declares, how many rows
-declare it, and how to get it. `cargo test -p inillucent-compat --test documentation` fails when a
+declare it, and how to get it. `cargo test -p inillucent-compat --test tooling documentation::` fails when a
 prerequisite in `tests/selection.toml` is missing from this table or has a different count.
 
 <!-- requires:begin -->
@@ -214,7 +228,7 @@ prerequisite in `tests/selection.toml` is missing from this table or has a diffe
 
 <!-- requires:end -->
 
-A row with no prerequisite runs everywhere. `cargo test -p inillucent-compat --test selection`
+A row with no prerequisite runs everywhere. `cargo test -p inillucent-compat --test tooling selection::`
 fails when a suite can skip and its row declares no prerequisite. It also fails when a row declares
 a prerequisite and its suite cannot skip. Those two checks keep this table equal to the suites.
 
@@ -291,7 +305,7 @@ nightly compiler option, and `rust-toolchain.toml` pins a stable compiler.
 `tools/coverage.mjs --per-crate --write` writes the table between the two marker comments. The
 table has 25 rows and the workspace has 29 crates. Three crates are left out of the run by name, and
 the fourth is `inillucent`, the facade, whose only content is one `pub use` line, so it has no regions to
-measure. `cargo test -p inillucent-compat --test documentation` fails when a workspace member has no
+measure. `cargo test -p inillucent-compat --test tooling documentation::` fails when a workspace member has no
 row, is not in the `EXCLUDED` list in `tools/coverage.mjs`, and is not named in a sentence here.
 
 The three crates left out are `inillucent-core`, `inillucent-bench` and `inillucent-model`. They
@@ -311,10 +325,10 @@ Two groups of rows need an explanation:
 
 | Rule | Where it is written | The test that fails |
 |---|---|---|
-| **Dependencies**: only crates on an allowed list | [`docs/dependency-policy.md`](dependency-policy.md) | `cargo test -p inillucent-compat --test policy` |
+| **Dependencies**: only crates on an allowed list | [`docs/dependency-policy.md`](dependency-policy.md) | `cargo test -p inillucent-compat --test tooling policy::` |
 | **Layering**: which crate may depend on which | `docs/invariants/layering.toml` | `the_workspace_obeys_the_dependency_contract` in the same suite |
-| **Test selection**: every test target has a row | `tests/selection.toml` | `cargo test -p inillucent-compat --test selection`, which names the target |
-| **One command table**: the command line and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `cargo test -p inillucent-compat --test command_parity` |
+| **Test selection**: every test target has a row | `tests/selection.toml` | `cargo test -p inillucent-compat --test tooling selection::`, which names the target |
+| **One command table**: the command line and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `cargo test -p inillucent-compat --test tooling command_parity::` |
 | **The testing standard**: where a new test goes and how the suite runs | [`tests/inillucent-testing-tdd.md`](../tests/inillucent-testing-tdd.md) | none. A reviewer checks it |
 
 ## Reproducing the measurements

@@ -43,6 +43,28 @@
     Passed through to the macOS half: sign and package, submit nothing to
     Apple. Nothing produced under it is publishable.
 
+.PARAMETER Serial
+    Build the targets one after another in the shared target directory, the
+    way every release before the parallel build was made.
+
+.PARAMETER BuildOnly
+    Compile and stop: no staging, no signing, no archives. For measuring the
+    build.
+
+.NOTES
+    THE FIVE BUILDS RUN AT ONCE
+
+    Fat LTO with one codegen unit spends most of its time on one thread, the
+    final optimisation and link of each program. Five of them one after
+    another left most of this machine's 24 threads idle for most of a
+    release, about 100 s per target measured on the native one. They now start
+    together, each with a target directory of its own under
+    <target>/release-all/<triple>, because cargo locks a target directory and
+    five builds in one would wait on each other. Each build's output goes to
+    its own log beside that directory, and a failure prints the end of it.
+    The release profile does not change: fat LTO and one codegen unit are the
+    fairness contract every published ratio was measured under.
+
 .EXAMPLE
     pwsh packaging/release-all.ps1
     pwsh packaging/release-all.ps1 -Targets linux
@@ -53,7 +75,9 @@ param(
     [ValidateSet('all', 'windows', 'linux', 'macos')]
     [string] $Targets = 'all',
     [switch] $SkipBuild,
-    [switch] $SkipNotarize
+    [switch] $SkipNotarize,
+    [switch] $Serial,
+    [switch] $BuildOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -137,6 +161,85 @@ function Invoke-CargoNative {
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $Target with $LASTEXITCODE" }
 }
 
+function Start-ReleaseBuild {
+    <#
+    .SYNOPSIS
+        Starts one target's release build in the background and returns it.
+
+    .PARAMETER Name
+        The triple, used for the target directory and the log.
+
+    .PARAMETER Program
+        cargo or cargo-zigbuild.
+
+    .PARAMETER Arguments
+        Everything after the program.
+    #>
+    param([string] $Name, [string] $Program, [string[]] $Arguments)
+    $directory = Join-Path $parallelRoot $Name
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    $log = Join-Path $parallelRoot "$Name.log"
+    $quoted = @($Arguments + @('--target-dir', $directory)) | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }
+    $process = Start-Process -FilePath $Program -ArgumentList ($quoted -join ' ') -NoNewWindow -PassThru `
+        -WorkingDirectory $root -RedirectStandardOutput "$log.out" -RedirectStandardError $log
+    # Reading the handle now is what makes ExitCode readable after the process has gone.
+    $null = $process.Handle
+    return [pscustomobject]@{ Name = $Name; Process = $process; Log = $log; Started = Get-Date }
+}
+
+function Invoke-ParallelBuilds {
+    <#
+    .SYNOPSIS
+        Builds every wanted target at once and waits for all of them.
+
+    .DESCRIPTION
+        Throws naming every build that failed, with the end of its log, after all of them have
+        finished: stopping at the first would leave the others running with nobody reading them.
+    #>
+    Import-MsvcEnvironment
+    if (-not (Test-Path -LiteralPath $cargoZigbuild) -and ($wantLinux -or $wantMacos)) {
+        throw 'cargo-zigbuild is missing. Run: pwsh tools/cross/fetch-toolchain.ps1'
+    }
+    $previousPath = $env:PATH
+    $env:PATH = "$zigDir;$env:PATH"
+    $manifest = @('--manifest-path', (Join-Path $root 'Cargo.toml'))
+    $builds = @()
+    try {
+        if ($wantWindows) {
+            $builds += Start-ReleaseBuild -Name 'x86_64-pc-windows-msvc' -Program 'cargo' `
+                -Arguments (@('build') + $manifest + @('--release', '--locked', '--target', 'x86_64-pc-windows-msvc') + $packages)
+        }
+        if ($wantLinux) {
+            foreach ($triple in @('x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu')) {
+                $builds += Start-ReleaseBuild -Name $triple -Program $cargoZigbuild `
+                    -Arguments (@('zigbuild') + $manifest + @('--release', '--locked', '--target', "$triple.2.28") + $packages)
+            }
+        }
+        if ($wantMacos) {
+            foreach ($triple in @('aarch64-apple-darwin', 'x86_64-apple-darwin')) {
+                $builds += Start-ReleaseBuild -Name $triple -Program $cargoZigbuild `
+                    -Arguments (@('zigbuild') + $manifest + @('--release', '--locked', '--target', $triple, '--config', ($appleLinkArgs -f $triple)) + $packages)
+            }
+        }
+    } finally {
+        $env:PATH = $previousPath
+    }
+    $failed = @()
+    foreach ($build in $builds) {
+        $build.Process.WaitForExit()
+        $seconds = [math]::Round(((Get-Date) - $build.Started).TotalSeconds, 1)
+        $code = $build.Process.ExitCode
+        Write-Host ("   {0,-28} exit {1}, done {2} s after the builds started" -f $build.Name, $code, $seconds)
+        if ($code -ne 0) {
+            $tail = (Get-Content -LiteralPath $build.Log -Tail 30 -ErrorAction SilentlyContinue) -join "`n"
+            $failed += "$($build.Name) exited $code; the end of $($build.Log):`n$tail"
+        }
+    }
+    if ($failed.Count -gt 0) { throw ($failed -join "`n`n") }
+}
+
 if (-not $Version) { $Version = Get-WorkspaceVersion -Root $root }
 $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
@@ -147,12 +250,47 @@ $wantMacos = $Targets -in @('all', 'macos')
 
 Write-Host "inillucent $Version"
 
+# Where each target's release build is: its own directory when the builds ran in parallel, the shared
+# target directory when they ran one after another.
+$parallelRoot = Join-Path $targetDir 'release-all'
+$parallel = -not $Serial -and -not $SkipBuild
+$builtFromParallel = -not $Serial -and (Test-Path -LiteralPath $parallelRoot)
+
+function Get-ReleaseDir {
+    <#
+    .SYNOPSIS
+        The release output directory of one triple.
+
+    .PARAMETER Triple
+        The triple, without a glibc suffix.
+    #>
+    param([string] $Triple)
+    if ($builtFromParallel) { return Join-Path $parallelRoot "$Triple/$Triple/release" }
+    return Join-Path $targetDir "$Triple/release"
+}
+
+if ($parallel) {
+    Write-Host '== building every target at once'
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    Invoke-ParallelBuilds
+    $builtFromParallel = $true
+    Write-Host ("   every build finished in {0:N1} s" -f $clock.Elapsed.TotalSeconds)
+    if ($wantMacos) {
+        Write-Host '== macos-pkg'
+        & cargo build --manifest-path (Join-Path $root 'tools/macos-pkg/Cargo.toml') --release `
+            --target-dir (Join-Path $targetDir 'macos-pkg')
+        if ($LASTEXITCODE -ne 0) { throw "building macos-pkg failed with $LASTEXITCODE" }
+    }
+}
+if ($BuildOnly) { return }
+$built = $parallel -or $SkipBuild
+
 if ($wantWindows) {
     $target = 'x86_64-pc-windows-msvc'
     Write-Host "== $target"
-    if (-not $SkipBuild) { Invoke-CargoNative -Target $target }
+    if (-not $built) { Invoke-CargoNative -Target $target }
     $stage = New-InillucentStage -Root $root -Version $Version -Target $target `
-        -BuiltDir (Join-Path $targetDir "$target/release") -Dist $dist
+        -BuiltDir (Get-ReleaseDir -Triple $target) -Dist $dist
     $archive = New-InillucentZip -Stage $stage -Dist $dist
     Write-Host "   $archive"
 }
@@ -163,9 +301,9 @@ if ($wantLinux) {
         @{ Triple = 'aarch64-unknown-linux-gnu'; Build = 'aarch64-unknown-linux-gnu.2.28' }
     )) {
         Write-Host "== $($pair.Build)"
-        if (-not $SkipBuild) { Invoke-CargoZigbuild -Target $pair.Build }
+        if (-not $built) { Invoke-CargoZigbuild -Target $pair.Build }
         $stage = New-InillucentStage -Root $root -Version $Version -Target $pair.Triple `
-            -BuiltDir (Join-Path $targetDir "$($pair.Triple)/release") -Dist $dist
+            -BuiltDir (Get-ReleaseDir -Triple $pair.Triple) -Dist $dist
         $archive = New-InillucentTarGz -Stage $stage -Dist $dist
         Write-Host "   $archive"
     }
@@ -181,7 +319,8 @@ if ($wantMacos) {
     # three steps later when macos-pkg refused `--version -Version` as `unexpected argument '-V'`.
     # Hash splatting binds by name and cannot do that.
     $macosArguments = @{ Version = $Version }
-    if ($SkipBuild) { $macosArguments['SkipBuild'] = $true }
+    if ($built) { $macosArguments['SkipBuild'] = $true }
+    if ($builtFromParallel) { $macosArguments['BuiltRoot'] = $parallelRoot }
     if ($SkipNotarize) { $macosArguments['SkipNotarize'] = $true }
     & (Join-Path $PSScriptRoot 'macos/release-macos.ps1') @macosArguments
     if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "the macOS release failed with $LASTEXITCODE" }

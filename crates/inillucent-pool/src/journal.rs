@@ -381,7 +381,7 @@ impl Journal {
     /// checkpoint saved therefore sat in the file's buffers while that same
     /// loop overwrote the pages they belonged to, and a power loss in the
     /// middle left a torn database page whose only copy of the old bytes was
-    /// in a cache that the power loss emptied. `crates/inillucent-compat/tests/durability.rs`
+    /// in a cache that the power loss emptied. `crates/inillucent-compat/tests/durability/durability.rs`
     /// caught it in TRUNCATE and PERSIST mode as `page 3 checksum ... is not
     /// the computed ...` after a failure the engine had itself reported.
     ///
@@ -673,7 +673,7 @@ fn hold_the_database(target: &dyn VfsFile) -> bool {
 /// first page write, so a power loss leaves the ones written since that seal
 /// torn, dropped or garbled - and a replay that trusts them puts garbage over
 /// a database that the same power loss left perfectly intact. That is a
-/// recovery corrupting a good file, and `crates/inillucent-compat/tests/durability.rs`
+/// recovery corrupting a good file, and `crates/inillucent-compat/tests/durability/durability.rs`
 /// caught it in `truncate` and `persist` mode as `page 3 checksum ... is not
 /// the computed ...` on a database whose page 3 was, on the media, exactly
 /// right.

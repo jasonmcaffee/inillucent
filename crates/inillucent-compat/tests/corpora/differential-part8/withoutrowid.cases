@@ -1,6 +1,6 @@
 # Differential cases, category `withoutrowid`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 wor-001	CREATE TABLE t(a TEXT PRIMARY KEY, b) WITHOUT ROWID; INSERT INTO t VALUES('x',1),('a',2); SELECT * FROM t ORDER BY a
 wor-002	CREATE TABLE t(a TEXT PRIMARY KEY, b) WITHOUT ROWID; INSERT INTO t VALUES('x',1); SELECT rowid FROM t
 wor-003	CREATE TABLE t(a,b) WITHOUT ROWID

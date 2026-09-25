@@ -8,7 +8,7 @@
 //! `crates/inillucent-pool/src/journal.rs`, stated at the top of it, and until
 //! task-1946's M10 nothing cut a machine between the two writes to check it. The
 //! free map has exactly this kind of test
-//! (`crates/inillucent-compat/tests/free_map_checkpoint_crash.rs`); the journal,
+//! (`crates/inillucent-compat/tests/durability/free_map_checkpoint_crash.rs`); the journal,
 //! which is what makes `PRAGMA journal_mode = delete` safe at all, did not.
 //! `crates/inillucent-pool/tests/fault_campaign.rs` said so in as many words:
 //! "Crash recovery. There is no WAL in Phase 2, so there is nothing to recover
@@ -47,7 +47,7 @@
 //! Redo is `inillucent-txn`'s, one layer above this crate. A campaign here has no
 //! log to re-apply anything with, so it counts that outcome and names it rather
 //! than calling it a mixture. What the layer above does with it is
-//! `crates/inillucent-compat/tests/durability.rs`'s question.
+//! `crates/inillucent-compat/tests/durability/durability.rs`'s question.
 //!
 //! Which is why the sharpest test in this file is not a campaign at all:
 //! `every_pre_image_is_durable_before_the_first_new_image` reads the simulator's

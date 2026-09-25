@@ -173,7 +173,7 @@ const SURFACE: &[(&str, &str, Answers)] = &[
         "SELECT name FROM pragma_database_list",
         Yes,
     ),
-    // Abandoning a transaction. `crates/inillucent-compat/tests/new_engine_rollback.rs`
+    // Abandoning a transaction. `crates/inillucent-compat/tests/engine/new_engine_rollback.rs`
     // is where the undo is checked; these rows only record that the statements
     // are answered.
     ("savepoint", "SAVEPOINT s1", Yes),
@@ -185,7 +185,7 @@ const SURFACE: &[(&str, &str, Answers)] = &[
         Yes,
     ),
     // Subqueries used as values. Uncorrelated ones are folded once per
-    // execution; `crates/inillucent-compat/tests/new_engine_subquery.rs` is
+    // execution; `crates/inillucent-compat/tests/engine/new_engine_subquery.rs` is
     // where their answers are checked against SQLite's.
     ("subquery.scalar", "SELECT (SELECT max(b) FROM t) AS m", Yes),
     (

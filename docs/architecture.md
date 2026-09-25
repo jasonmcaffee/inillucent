@@ -462,7 +462,7 @@ The `format` row in `<name>_config` is 1 for a table with no facet column and 2 
 facet column. A build that meets a format it cannot read refuses that table on every read and every
 write, with the status `unsupported`. The message names the format and the release that wrote it.
 The command line exits with code 3. The rest of the database still opens, so the table can be
-dropped. The test `crates/inillucent-compat/tests/release_format_history.rs` runs every published
+dropped. The test `crates/inillucent-compat/tests/nightly/release_format_history.rs` runs every published
 release against a table written by the current build, and checks that each one gives the same
 answers.
 

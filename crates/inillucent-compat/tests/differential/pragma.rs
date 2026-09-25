@@ -209,7 +209,7 @@ fn the_documented_pager_choices_are_what_was_measured() {
         own_answer("pager-locking-mode", "PRAGMA locking_mode"),
         OwnedDatum::Text(b"normal".to_vec()),
         "PRAGMA locking_mode is `normal` so a second process can open the file - see \
-         docs/feature-comparison.md and crates/inillucent-compat/tests/process_concurrency.rs"
+         docs/feature-comparison.md and crates/inillucent-compat/tests/durability/process_concurrency.rs"
     );
     assert_eq!(
         own_answer("pager-cache-size", "PRAGMA cache_size"),

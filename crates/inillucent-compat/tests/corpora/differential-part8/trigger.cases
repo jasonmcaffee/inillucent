@@ -1,6 +1,6 @@
 # Differential cases, category `trigger`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 trg-001	CREATE TABLE t(a); CREATE TABLE log(m); CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO log VALUES('ins '||NEW.a); END; INSERT INTO t VALUES(1),(2); SELECT * FROM log
 trg-002	CREATE TABLE t(a); CREATE TABLE log(m); CREATE TRIGGER tr BEFORE DELETE ON t BEGIN INSERT INTO log VALUES('del '||OLD.a); END; INSERT INTO t VALUES(1); DELETE FROM t; SELECT * FROM log
 trg-003	CREATE TABLE t(a); CREATE TABLE log(m); CREATE TRIGGER tr AFTER UPDATE OF a ON t BEGIN INSERT INTO log VALUES(OLD.a||'->'||NEW.a); END; INSERT INTO t VALUES(1); UPDATE t SET a=2; SELECT * FROM log

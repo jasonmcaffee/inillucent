@@ -1039,7 +1039,7 @@ fn table_names(table: &str) -> Vec<String> {
 /// Every ratio and speed claim in the roadmap also appears in the performance page.
 ///
 /// **Nothing tested `docs/roadmap.md` at all (task-1961, section 9.1).**
-/// `grep -n roadmap tools/doc-facts/check.mjs crates/inillucent-compat/tests/documentation.rs`
+/// `grep -n roadmap tools/doc-facts/check.mjs crates/inillucent-compat/tests/tooling/documentation.rs`
 /// returned nothing, and two of the thirteen items it carried had been built
 /// inside the ticket that wrote them without the text being updated. The case
 /// this catches is the one that was found by reading: the roadmap said
@@ -1315,6 +1315,21 @@ fn the_per_tier_table_matches_the_map() {
                 "`{}`: the table says {} and the map has {held}",
                 tier.name,
                 line.split('|').nth(2).unwrap_or("").trim()
+            ));
+        }
+        // The cadence column says when the tier runs, and the runner reads
+        // the map's `cadence`, so a table that disagreed would tell a reader
+        // the crash suites run on every change when they do not.
+        let cadence = line
+            .split('|')
+            .nth(4)
+            .map(|cell| cell.trim().trim_matches('`').to_string())
+            .unwrap_or_default();
+        if cadence != tier.cadence.as_str() {
+            wrong.push(format!(
+                "`{}`: the table's cadence is `{cadence}` and the map's is `{}`",
+                tier.name,
+                tier.cadence.as_str()
             ));
         }
     }

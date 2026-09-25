@@ -1,6 +1,6 @@
 # Differential cases, category `alter`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 alt-001	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t ADD COLUMN b DEFAULT 7; SELECT a,b FROM t
 alt-002	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t ADD COLUMN b; SELECT a,b,typeof(b) FROM t
 alt-003	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t RENAME TO u; SELECT a FROM u

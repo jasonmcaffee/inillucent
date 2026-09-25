@@ -14,7 +14,8 @@
 
         1. preflight   read every credential and tool, decide which routes can run, print the plan.
                        Mutates nothing.
-        2. tests       `inillucent-testrun --strict`. Refuses the release on any non-zero exit.
+        2. tests       the nightly's evidence for this commit, or a merge cadence run of what
+                       changed since the last green nightly. Refuses the release otherwise.
         3. version     write the new version into every file that carries it, in one step, and
                        refuse to continue if a seventh file is found holding the old one.
         4. build       compile, sign, package, notarise. Local; nothing has left the machine.
@@ -25,6 +26,12 @@
     Nothing reaches it until the script knows which routes will run.
 
     TESTS ARE SECOND, AND -Only CANNOT SKIP THEM
+
+    The suite a release relies on is the nightly's (packaging/nightly.ps1), for the same commit.
+    Running `inillucent-testrun --strict` here could never pass on this machine, which has no
+    MySQL, no live PostgreSQL, no Go and no openssl, so every release was cut with -SkipTests. The
+    nightly declares those absences and runs every tier; this reads what it found. See
+    packaging/nightly-evidence.ps1 for the three cases.
 
     This script published to twelve destinations without running a test, for seven releases. The
     phase sits above `version` rather than below it because the version phase rewrites eight files
@@ -111,6 +118,7 @@ $root = Split-Path -Parent $PSScriptRoot
 if ($Only) { $Only = @($Only -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 if ($Skip) { $Skip = @($Skip -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 . (Join-Path $PSScriptRoot 'stage-layout.ps1')
+. (Join-Path $PSScriptRoot 'nightly-evidence.ps1')
 # The DPAPI sealing helpers live in apple-credentials.ps1 because that is where sealing was first
 # needed. Nothing about `Protect-AppleSecret` is Apple-specific: it is `ConvertFrom-SecureString`,
 # which encrypts under one Windows account, and the project's minisign and OpenPGP keys want exactly
@@ -118,8 +126,9 @@ if ($Skip) { $Skip = @($Skip -split ',' | ForEach-Object { $_.Trim() } | Where-O
 . (Join-Path $PSScriptRoot 'macos/apple-credentials.ps1')
 
 $script:Outcomes = [ordered]@{}
-# Empty unless -SkipTests was given. Read by `Publish-GitHubRelease`, which puts it in the notes.
-$script:UntestedNote = ''
+# What the release notes say about tests: the nightly run that verified this commit, or the
+# untested sentence under -SkipTests. Read by `Publish-GitHubRelease`, which puts it in the notes.
+$script:TestNote = ''
 $script:Dist = Join-Path $root 'dist'
 
 # **Script scope, and that is not a style choice.** Each route's `Needs`, `Run` and `Verify` is a
@@ -898,7 +907,7 @@ function Publish-InteropFixture {
 
     .DESCRIPTION
         `tests/interop/<version>/` holds a database written by that release's
-        own binary, and `crates/inillucent-compat/tests/release_format.rs` opens
+        own binary, and `crates/inillucent-compat/tests/e2e/release_format.rs` opens
         every one of them with the build under test. It is the only check that
         answers "can today's engine still read what we shipped two releases
         ago", and it can only answer it if the directory has a row for every
@@ -1003,43 +1012,78 @@ function Get-MirrorRepo {
 function Invoke-ReleaseTests {
     <#
     .SYNOPSIS
-        Runs the suite, and returns the sentence to put in the release notes.
+        Decides whether this commit is tested, from the nightly's evidence, and returns the sentence
+        to put in the release notes.
 
     .DESCRIPTION
-        Empty when the suite ran and passed. A sentence when -SkipTests was given, which the GitHub
-        release notes then carry. Anything else throws, because a release is not cut over a red
-        suite.
+        The nightly (packaging/nightly.ps1) runs every tier strictly, with the prerequisites this
+        machine lacks declared, and writes `_agent_output/nightly/latest.json` in the main checkout.
+        Resolve-ReleaseTestPlan reads it:
 
-        **The three exit codes are three different answers** (task-2047), and collapsing them is the
-        confusion the runner was changed to remove:
+          green, same commit     no suite runs; the notes say "Verified by the nightly run of ..."
+          green, older commit    `inillucent-testrun --changed <that commit> --cadence merge --strict`
+                                 runs over what changed since, and the notes name both commits
+          red, or no evidence    the release is refused, unless -SkipTests
+
+        -SkipTests returns the untested sentence, which the GitHub release notes then carry.
+
+        **The runner's three exit codes are three different answers** (task-2047):
 
           0  every selected target ran and passed
-          1  the run happened and was red - a target failed, or --strict found a suite whose
-             prerequisite was absent
-          2  the run did not happen. The build failed, or cargo could not say what it had built.
-             Nothing was graded, so nothing in that run may be read as a pass
+          1  the run happened and was red
+          2  the run did not happen, so nothing was graded
 
         A `2` is reported as a run that did not happen rather than as a failing test, because they
         need different things done about them and an agent read one as the other once already.
 
-        **--strict rather than a plain run.** Several suites report success when a prerequisite is
-        absent, which is correct for a fresh clone and wrong for a release: it is exactly how a
-        release goes out with the binding conformance suite, the oracle-graded suites and the live
-        server suites all reporting green having run nothing.
-
     .PARAMETER Root
-        The checkout to run in.
+        The checkout the release is cut from.
 
     .PARAMETER Skip
-        Whether the run was waived.
+        Whether the suite was waived.
+
+    .PARAMETER WhatIf
+        Print the decision and run nothing.
     #>
-    param([string] $Root, [bool] $Skip)
+    param([string] $Root, [bool] $Skip, [bool] $WhatIf)
 
     if ($Skip) {
         $sentence = 'This release was published without running the test suite.'
+        if ($WhatIf) {
+            Write-Host '   would NOT run the suite (-SkipTests), and would say so in the release notes.' -ForegroundColor Yellow
+            return $sentence
+        }
         Write-Host "   $sentence" -ForegroundColor Yellow
         Write-Host '   It will be said again in the GitHub release notes.' -ForegroundColor Yellow
         return $sentence
+    }
+
+    $evidencePath = Get-NightlyEvidencePath -MainCheckout (Get-MainCheckout -Root $Root)
+    $head = (& git -C $Root rev-parse HEAD).Trim()
+    $plan = Resolve-ReleaseTestPlan -Evidence (Read-NightlyEvidence -Path $evidencePath) -Head $head
+    Write-Host "   evidence: $evidencePath"
+
+    switch ($plan.Action) {
+        'refuse' {
+            if ($WhatIf) {
+                Write-Host "   would refuse the release: $($plan.Reason)" -ForegroundColor Red
+                return ''
+            }
+            throw $plan.Reason
+        }
+        'verified' {
+            Write-Host "   $($plan.Note)" -ForegroundColor Green
+            if ($WhatIf) { Write-Host '   would run no suite of its own.' }
+            return $plan.Note
+        }
+    }
+
+    # 'changed': the nightly was green on an older commit, so what moved since is tested here.
+    $arguments = $plan.Command
+    if ($WhatIf) {
+        Write-Host "   the nightly of $($plan.Date) was green at $($plan.Commit), which is not HEAD ($head)."
+        Write-Host "   would run: inillucent-testrun $($arguments -join ' ')"
+        return $plan.Note
     }
 
     # The runner is behind `required-features = ["testrun"]`, so it is built here rather than
@@ -1048,23 +1092,20 @@ function Invoke-ReleaseTests {
     & cargo build --manifest-path (Join-Path $Root 'Cargo.toml') -p inillucent-compat --bin inillucent-testrun --features testrun
     if ($LASTEXITCODE -ne 0) { throw 'inillucent-testrun would not build, so the suite could not be run. Fix the build, or pass -SkipTests and accept an untested release.' }
 
-    $runner = Join-Path $Root 'target/debug/inillucent-testrun.exe'
-    if (-not (Test-Path -LiteralPath $runner)) {
-        # A worktree redirects CARGO_TARGET_DIR through its own .cargo/config.toml, so the binary
-        # is not under the checkout at all. Ask cargo where it put it rather than guessing.
-        $located = & cargo metadata --manifest-path (Join-Path $Root 'Cargo.toml') --format-version 1 --no-deps 2>$null |
-            ConvertFrom-Json
-        $targetDir = if ($located) { $located.target_directory } else { $null }
-        if ($targetDir) { $runner = Join-Path $targetDir 'debug/inillucent-testrun.exe' }
-    }
+    # A worktree redirects the target directory through its own .cargo/config.toml, so ask cargo
+    # where it put the runner rather than guessing.
+    $located = & cargo metadata --manifest-path (Join-Path $Root 'Cargo.toml') --format-version 1 --no-deps 2>$null |
+        ConvertFrom-Json
+    $targetDir = if ($located -and $located.target_directory) { $located.target_directory } else { Join-Path $Root 'target' }
+    $runner = Join-Path $targetDir 'debug/inillucent-testrun.exe'
     if (-not (Test-Path -LiteralPath $runner)) { throw "inillucent-testrun built and then could not be found. Looked at $runner." }
 
-    Write-Host "   $runner --strict"
-    & $runner --strict
+    Write-Host "   $runner $($arguments -join ' ')"
+    & $runner @arguments
     $code = $LASTEXITCODE
     switch ($code) {
-        0 { Write-Host '   the suite ran and passed.' -ForegroundColor Green; return '' }
-        1 { throw 'the suite is red: a target failed, or --strict named a suite whose prerequisite was absent. A release is not cut over it. Read the run above, fix it, and run this again.' }
+        0 { Write-Host '   the changes since the nightly ran and passed.' -ForegroundColor Green; return $plan.Note }
+        1 { throw 'the run over the changes since the nightly is red: a target failed, or --strict named a suite whose prerequisite was absent. A release is not cut over it. Read the run above, fix it, and run this again.' }
         2 { throw 'the run did not happen - the build failed, a selection matched nothing, or cargo could not say what it had built. Nothing was graded, so this is not evidence of anything. It is not a failing test and should not be treated as one.' }
         default { throw "inillucent-testrun answered $code, which is not one of its three exit codes. Read the run above." }
     }
@@ -1093,9 +1134,9 @@ function Publish-GitHubRelease {
     if ($exists) {
         & gh release upload "v$Version" @assets @repo --clobber
     } else {
-        # The untested sentence rides in the notes rather than being printed once on the machine
+        # The sentence about tests rides in the notes rather than being printed once on the machine
         # that cut the release, because the people who need it are the ones downloading the file.
-        $notes = if ($script:UntestedNote) { "inillucent $Version`n`n$script:UntestedNote" } else { "inillucent $Version" }
+        $notes = if ($script:TestNote) { "inillucent $Version`n`n$script:TestNote" } else { "inillucent $Version" }
         & gh release create "v$Version" @assets @repo --title "inillucent $Version" --notes $notes
     }
     if ($LASTEXITCODE -ne 0) { throw "the GitHub release for v$Version failed" }
@@ -1376,17 +1417,9 @@ foreach ($route in $routes) {
 }
 
 Write-Phase 'tests'
-if ($WhatIf) {
-    # The plan says what would run, and running the suite is not a plan. What it prints is the one
-    # thing a reader of `-WhatIf` needs: whether this release would be graded.
-    if ($SkipTests) {
-        Write-Host '   would NOT run the suite (-SkipTests), and would say so in the release notes.' -ForegroundColor Yellow
-    } else {
-        Write-Host '   would run inillucent-testrun --strict, and refuse the release on any non-zero exit.'
-    }
-} else {
-    $script:UntestedNote = Invoke-ReleaseTests -Root $root -Skip ([bool]$SkipTests)
-}
+# Under -WhatIf this prints what it would do with the nightly's evidence and runs nothing: the plan
+# says what would run, and running the suite is not a plan.
+$script:TestNote = Invoke-ReleaseTests -Root $root -Skip ([bool]$SkipTests) -WhatIf ([bool]$WhatIf)
 
 if ($WhatIf) {
     Write-Phase 'version'
@@ -1438,8 +1471,8 @@ foreach ($name in $script:Outcomes.Keys) {
 
 $failed = @($script:Outcomes.Values | Where-Object { $_.State -eq 'failed' })
 Write-Host ''
-if ($script:UntestedNote) {
-    Write-Host $script:UntestedNote -ForegroundColor Yellow
+if ($script:TestNote) {
+    Write-Host $script:TestNote -ForegroundColor Yellow
 }
 if ($failed.Count -gt 0) {
     Write-Host "$($failed.Count) route(s) failed. Re-run just those with -Only." -ForegroundColor Red

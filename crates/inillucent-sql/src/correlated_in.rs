@@ -109,7 +109,7 @@ fn liftable(block: &BoundSelect) -> bool {
 /// What one `IN` was written as, which is what the lowering needs.
 ///
 /// A struct rather than six parameters, because
-/// `crates/inillucent-compat/tests/policy.rs` refuses an
+/// `crates/inillucent-compat/tests/tooling/policy.rs` refuses an
 /// `#[allow(clippy::too_many_arguments)]`: the threshold is set once in
 /// `clippy.toml` with the argument for where it is, and an attribute moves the
 /// bar for one function and says nothing about why.

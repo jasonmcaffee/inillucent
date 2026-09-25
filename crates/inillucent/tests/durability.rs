@@ -24,7 +24,7 @@
 //!
 //! `durability_arms.rs` beside it holds the cases that run at every arm of
 //! `inillucent_compat::matrix`, and the split is not a preference:
-//! `crates/inillucent-compat/tests/scenarios.rs` refuses a file holding both a
+//! `crates/inillucent-compat/tests/tooling/scenarios.rs` refuses a file holding both a
 //! `scenario!` and a bare `#[test]`, because a file that grades one story six
 //! ways and another once produces output nobody can read. What both files build
 //! is in `inillucent_compat::durable`.

@@ -4,7 +4,7 @@ This folder holds sixteen `cargo-fuzz` targets. A fuzz target feeds a parser ran
 reports any input that makes the parser crash. The targets need a nightly Rust toolchain.
 
 The `fuzz` folder is left out of the workspace. That keeps `libfuzzer-sys` out of the dependency
-graph that the layering check in `crates/inillucent-compat/tests/harness.rs` reads.
+graph that the layering check in `crates/inillucent-compat/tests/tooling/harness.rs` reads.
 
 ## Running them
 

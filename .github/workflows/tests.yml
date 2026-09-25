@@ -35,6 +35,21 @@
 # Several suites report success when a prerequisite is absent. That is correct
 # for a fresh clone and useless as evidence, so `--strict` counts them and names
 # them. A CI job without it would go green on a machine that built nothing.
+#
+# ## Which tiers run here, and which run in nightly.yml
+#
+# Every tier in `tests/selection.toml` has a cadence: `change`, `merge` or
+# `nightly`. This workflow runs the `merge` cadence, which is every tier except
+# `nightly`. The nightly tier (a ledger day of 100,000 transactions, every
+# released format read back, a large table story) was 7,348 s of processor time
+# and ran on every push until the cadence existed. It now runs once a day in
+# `nightly.yml`.
+#
+# A push runs the whole merge cadence. A pull request runs
+# `--changed origin/<base> --cadence merge`: what the change can break, by the
+# dependency closure, including the crash suites below the crates it touched.
+# That is the rule an agent runs locally with `--changed`, widened to the
+# `merge` tiers, and the push that merges the pull request runs everything.
 
 name: tests
 
@@ -42,7 +57,7 @@ on:
   push:
   pull_request:
 
-# A second push to the same branch cancels the first. The suite is about 45
+# A second push to the same branch cancels the first. The suite takes tens of
 # minutes, so without this a branch pushed to three times holds three runners.
 concurrency:
   group: tests-${{ github.ref }}
@@ -55,24 +70,21 @@ env:
   # A runner has a network, so the HTTP client's test fetches the real files
   # the installer fetches instead of skipping.
   INILLUCENT_NETWORK_TESTS: 1
-  # The suite builds every crate in several feature sets, and
-  # `gates_fail_closed` builds the runner's whole selection a second time in a
-  # directory of its own. With full debug information that came to 126 GB on
-  # Linux, and the first Linux run of the suite stopped with "No space left on
-  # device". Line tables keep a file and line number in every backtrace, which
-  # is all a failure report here reads.
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # With full debug information the suite came to 126 GB on Linux, and the
+  # first Linux run stopped with "No space left on device". The workspace's
+  # `[profile.dev]` now keeps line tables only, which `profile.test` inherits,
+  # so a backtrace still has its file and line.
   CARGO_INCREMENTAL: 0
 
 jobs:
   suite:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # The oracle build, the fixtures and 231 targets. The first Windows run to
-    # reach the suite took 98 minutes end to end, 77 of them in the suite, so
-    # 120 left too little room. The default 360 would hide a suite that started
-    # taking twice as long.
+    # The oracle build, the fixtures and every change and merge tier target.
+    # The first Windows run to reach the suite took 98 minutes end to end, 77 of
+    # them in the suite, and that included the nightly tier, which now runs in
+    # nightly.yml. The default 360 would hide a suite that started taking twice
+    # as long.
     timeout-minutes: 150
     strategy:
       # Both operating systems always run. `fail-fast` would cancel Linux the
@@ -113,7 +125,11 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost
           df -h /
 
+      # The whole history, so a pull request can ask what changed against its
+      # base branch. A shallow clone has no base to compare with.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # The toolchain is pinned in `rust-toolchain.toml` and rustup honours it,
       # so nothing here names a version. A new compiler brings new lints, and
@@ -215,11 +231,12 @@ jobs:
       # a test target with no row in the map, a command in the table and not in
       # MCP.
       - name: the contracts
-        run: cargo test -p inillucent-compat --test policy --test selection --test command_parity --test documentation
+        run: cargo test -p inillucent-compat --test tooling -- policy:: selection:: command_parity:: documentation::
 
-      # The whole suite. The runner's own exit code is read rather than the
-      # shell's: `$?` after a pipeline is the last command's status, which is
-      # how a run that went red was once reported as a pass.
+      # The merge cadence: every tier but `nightly` on a push, and what the
+      # change can break on a pull request. The runner's own exit code is read
+      # rather than the shell's: `$?` after a pipeline is the last command's
+      # status, which is how a run that went red was once reported as a pass.
       - name: the suite
         shell: bash
         run: |
@@ -229,7 +246,11 @@ jobs:
           else
             RUNNER=target/debug/inillucent-testrun
           fi
-          "$RUNNER" --strict ${{ matrix.absent }}
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            "$RUNNER" --changed "origin/${{ github.base_ref }}" --cadence merge --strict ${{ matrix.absent }}
+          else
+            "$RUNNER" --cadence merge --strict ${{ matrix.absent }}
+          fi
           code=$?
           echo "inillucent-testrun exited $code"
           case "$code" in

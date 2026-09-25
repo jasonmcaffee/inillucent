@@ -153,53 +153,93 @@ fn run(gate: &str, arguments: &[&str]) -> Output {
         .unwrap_or_else(|error| panic!("{gate} did not start: {error}"))
 }
 
-/// The target directory a nested `inillucent-testrun` builds into.
+/// Runs a nested `inillucent-testrun` over the outer run's artifact list, with
+/// no cargo it could start.
 ///
-/// **Not the one the outer run is executing out of** (task-2066 §4.4.16). A
-/// nested runner calls `locate`, which runs `cargo test --no-run`, and cargo
-/// then wants to relink whatever is stale - including
-/// `inillucent-testrun.exe`, which is the *outer* runner's own running image,
-/// and `inillucent-scorecard.exe`, which a sibling case in this file executes.
+/// **The nested runner builds nothing (task-2114 C2).** It used to call
+/// `locate`, which runs `cargo test --no-run`, and cargo then relinks whatever
+/// is stale - including `inillucent-testrun.exe`, the outer runner's own
+/// running image, and `inillucent-scorecard.exe`, which a sibling case here
+/// executes. Windows refuses that, so the nested runs built a whole second
+/// workspace under `CARGO_TARGET_TMPDIR`, which took minutes, and the target
+/// ran alone at the end of every run for 36 minutes of 37.
 ///
-/// When that collides it does not collide quietly. A full gate run died
-/// mid-target and left `gates_fail_closed-*.exe` and `inillucent-scorecard.exe`
-/// running with no parent; an orphan holding `inillucent-scorecard.exe` open
-/// makes every later cargo build in that directory fail with
-/// `Access is denied (os error 5)`, so the *next* run reports "the build
-/// failed" and grades nothing. One run's leftovers poisoning the following
-/// run's build is worse than either failure on its own.
+/// The outer runner now writes the executables it located to an artifact list
+/// and names it in `INILLUCENT_TESTRUN_ARTIFACTS`. The nested runner is given
+/// that list with `--artifacts`, and `CARGO` is pointed at the runner itself,
+/// which exits 2 for any cargo command line. So a nested case that started a
+/// cargo would fail on it, and every case here proves on each run that none
+/// did.
 ///
-/// The three cases share one directory, so the cold build is paid once. It is a
-/// real cost - minutes - and it buys a nested run that cannot reach back into
-/// the run that started it.
-fn nested_target_dir() -> std::path::PathBuf {
-    let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("nested-testrun");
-    let _ = std::fs::create_dir_all(&directory);
-    directory
-}
-
-/// Runs a nested `inillucent-testrun`, building somewhere of its own.
+/// Under a plain `cargo test` the variable is absent and the case skips with
+/// the marker, because there is no outer run to have located anything.
 ///
 /// @param gate - the built runner
 /// @param arguments - the command line
-fn run_nested(gate: &str, arguments: &[&str]) -> Output {
-    run_nested_without(gate, arguments, &[])
+fn run_nested(gate: &str, arguments: &[&str]) -> Option<Output> {
+    let Some(list) = std::env::var_os(inillucent_compat::testplan::ARTIFACTS_VARIABLE) else {
+        inillucent_compat::differential::skipping(&no_artifact_list());
+        return None;
+    };
+    Some(nested(gate, &list, arguments, None))
 }
 
-/// Runs a nested `inillucent-testrun` with some variables taken out of its
-/// environment.
+/// Runs a nested `inillucent-testrun` as [`run_nested`] does, reading a
+/// declaration of absent prerequisites from a file of the case's own.
 ///
-/// @param gate - the program to run
-/// @param arguments - its arguments
-/// @param unset - environment variables the nested run must not see
-fn run_nested_without(gate: &str, arguments: &[&str], unset: &[&str]) -> Output {
+/// @param gate - the built runner
+/// @param arguments - the command line
+/// @param declaration - the `tests/prerequisites.local.toml` stand in
+fn run_nested_declaring(gate: &str, arguments: &[&str], declaration: &Path) -> Option<Output> {
+    let Some(list) = std::env::var_os(inillucent_compat::testplan::ARTIFACTS_VARIABLE) else {
+        inillucent_compat::differential::skipping(&no_artifact_list());
+        return None;
+    };
+    Some(nested(gate, &list, arguments, Some(declaration)))
+}
+
+/// The sentence a nested case skips with when no outer run is there.
+fn no_artifact_list() -> String {
+    format!(
+        "{} is not set, so no outer inillucent-testrun located the executables a nested run \
+         starts; run this through `inillucent-testrun`",
+        inillucent_compat::testplan::ARTIFACTS_VARIABLE
+    )
+}
+
+/// Starts the nested runner over an artifact list.
+///
+/// @param gate - the built runner
+/// @param list - the artifact list the outer run wrote
+/// @param arguments - the command line
+/// @param declaration - the `tests/prerequisites.local.toml` stand in, if any
+fn nested(
+    gate: &str,
+    list: &std::ffi::OsStr,
+    arguments: &[&str],
+    declaration: Option<&Path>,
+) -> Output {
     let mut command = Command::new(gate);
     command
+        .arg("--artifacts")
+        .arg(list)
+        .arg("--no-build")
         .args(arguments)
-        .env("CARGO_TARGET_DIR", nested_target_dir());
-    for name in unset {
-        command.env_remove(name);
-    }
+        .env("CARGO", gate)
+        // No server URLs, so the two live database suites go without their
+        // prerequisite on every machine, including a CI runner that starts
+        // both servers. The red run and the declared absence case rely on
+        // that; the other cases never select those suites.
+        .env_remove("INILLUCENT_TEST_POSTGRES_URL")
+        .env_remove("INILLUCENT_TEST_MYSQL_URL");
+    // Set either way, so a declaration file in the checkout never changes
+    // what a case here measures: with no declaration of its own, a case reads
+    // a file that is not there, which declares nothing.
+    let nothing = std::env::temp_dir().join("inillucent-declares-nothing.toml");
+    command.env(
+        inillucent_compat::testplan::DECLARED_ABSENCES_VARIABLE,
+        declaration.unwrap_or(&nothing),
+    );
     command
         .output()
         .unwrap_or_else(|error| panic!("{gate} did not start: {error}"))
@@ -1092,29 +1132,26 @@ fn testrun_measures_the_smoke_tier_selection() {
 // last pair is the distinction the whole change is for, and neither case can
 // hold it alone.
 //
-// **Three of the five start a real nested run, and a nested run competes with
-// its own siblings.** `locate` asks cargo what it built and cargo answers by
-// building, so on a stale workspace it relinks - and Windows will not replace
-// an image that is running. `testrun_passes_a_real_run_with_code_zero` failed
-// exactly that way while `scorecard_measures_a_lever_it_knows`, a case in this
-// same binary, was executing `inillucent-scorecard.exe`:
+// **Four of them start a real nested run, and a nested run starts no cargo.**
+// `locate` asks cargo what it built and cargo answers by building, so on a
+// stale workspace it relinks, and Windows will not replace an image that is
+// running. `testrun_passes_a_real_run_with_code_zero` failed exactly that way
+// while `scorecard_measures_a_lever_it_knows`, a case in this same binary, was
+// executing `inillucent-scorecard.exe`:
 //
 //     error: failed to remove file `.../debug/inillucent-scorecard.exe`
 //     Caused by: Access is denied. (os error 5)
 //     inillucent-testrun: cargo could not list the built targets
 //
-// Through `inillucent-testrun` the outer build has already made every target
-// fresh, so `locate` has nothing to relink and this cannot happen. Through a
-// plain `cargo test --test gates_fail_closed` after an edit it can, which is
-// how it was found. Those three cases therefore announce a skip on that exact
-// signature rather than assert: an exit code read off a run that never started
-// is a statement about the machine, and this is the last file in the tree that
-// should make one.
+// The nested runs then built in a directory of their own, which cost a whole
+// second workspace build. They now read the outer run's artifact list with
+// `--artifacts` and have `CARGO` pointed at a program that refuses every cargo
+// command line, so none of them can reach cargo at all. `run_nested` says more.
 //
 // `testrun_measures_the_smoke_tier_selection` above asserts `code == 0` on a
-// `--list`, which needs no cargo at all - so even with all three skipped, "the
-// runner refuses everything" is still falsified. What is lost while they skip
-// is the `1` assertion, and `1` is the one code this ticket did not change.
+// `--list`, which needs no cargo at all - so even under a plain `cargo test`,
+// where the nested cases skip, "the runner refuses everything" is still
+// falsified.
 //
 // **Why `1` is asserted on a run that went red rather than on a failing test.**
 // This repository has no test that fails, so a case wanting one would have to
@@ -1162,7 +1199,7 @@ fn testrun_exits_two_when_the_build_does_not_complete() {
 
 /// A selection whose names do not overlap is refused, not reported green.
 ///
-/// `--target inillucent-compat::dml --tier smoke` names a real target and a
+/// `--target inillucent-compat::engine::dml --tier smoke` names a real target and a
 /// real tier, so neither of the two guards above fires - they catch a name the
 /// map does not hold at all - and the intersection is empty. The runner printed
 /// `nothing selected` and exited 0, which is rule 1.5's shape exactly: a gate
@@ -1189,7 +1226,9 @@ fn testrun_refuses_a_selection_whose_names_do_not_overlap() {
     // builds anything: a runner spawned from inside a run should never be able
     // to reach the target directory the outer one is executing from, and a rule
     // with an exception is one somebody has to re-derive.
-    let output = run_nested(gate, &["--target", &outside, "--tier", "smoke"]);
+    let Some(output) = run_nested(gate, &["--target", &outside, "--tier", "smoke"]) else {
+        return;
+    };
     let text = said(&output);
     assert_eq!(
         code(&output),
@@ -1219,21 +1258,19 @@ fn testrun_refuses_a_filter_that_matches_no_test() {
     let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
         return;
     };
-    // **Nested, like every other case here that reaches cargo (task-2106).**
-    // `--no-build` still runs `locate`, which is `cargo test --no-run`, and this
-    // case ran it in the target directory the outer run executes from. A build
-    // there that had to relink a program the outer run was executing failed
-    // with `Access is denied`, and this case then skipped.
-    let output = run_nested(
-        gate,
-        &[
-            "--no-build",
-            "--tier",
-            "smoke",
-            "--filter",
-            "no_test_is_called_this_task_2047",
-        ],
-    );
+    // **Nested, like every other case here that runs targets (task-2106).**
+    // `--no-build` alone still ran `locate`, which is `cargo test --no-run`, in
+    // the target directory the outer run executes from, and a relink there
+    // failed with `Access is denied`. `run_nested` starts no cargo at all.
+    let arguments = [
+        "--tier",
+        "smoke",
+        "--filter",
+        "no_test_is_called_this_task_2047",
+    ];
+    let Some(output) = run_nested(gate, &arguments) else {
+        return;
+    };
     let text = said(&output);
     refuse_a_contended_run("a filter that matches no test", &text);
     assert_eq!(
@@ -1268,7 +1305,9 @@ fn testrun_passes_a_real_run_with_code_zero() {
     let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
         return;
     };
-    let output = run_nested(gate, &["--no-build", "--tier", "smoke"]);
+    let Some(output) = run_nested(gate, &["--tier", "smoke"]) else {
+        return;
+    };
     let text = said(&output);
     refuse_a_contended_run("a real run that passes", &text);
     assert_eq!(
@@ -1293,28 +1332,24 @@ fn testrun_passes_a_real_run_with_code_zero() {
 ///
 /// `--strict` over the two suites that need a database server is a red run
 /// already in the tree. They run, their tests execute and report nothing, and
-/// `--strict` turns that into a failure.
-///
-/// The nested run is given no server URLs, so it goes red on every machine.
-/// This case used to skip wherever both servers were configured, and the first
-/// GitHub Linux run, which starts both servers, was exactly such a machine.
+/// `--strict` turns that into a failure. A machine with both servers running
+/// gets a green and the case skips, because a prerequisite that is present is
+/// not a reason to assert the opposite.
 #[test]
 fn testrun_exits_one_when_the_run_went_red() {
     let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
         return;
     };
-    let output = run_nested_without(
-        gate,
-        &[
-            "--no-build",
-            "--strict",
-            "--target",
-            "inillucent-remote::live_postgres",
-            "--target",
-            "inillucent-remote::live_mysql",
-        ],
-        &["INILLUCENT_TEST_POSTGRES_URL", "INILLUCENT_TEST_MYSQL_URL"],
-    );
+    let arguments = [
+        "--strict",
+        "--target",
+        "inillucent-remote::live_postgres",
+        "--target",
+        "inillucent-remote::live_mysql",
+    ];
+    let Some(output) = run_nested(gate, &arguments) else {
+        return;
+    };
     let text = said(&output);
     refuse_a_contended_run("a real run that goes red", &text);
     assert!(
@@ -1327,6 +1362,71 @@ fn testrun_exits_one_when_the_run_went_red() {
         1,
         "a run whose suites started and evidenced nothing has to exit 1: 2 is reserved for a \
          run that did not happen. It printed:\n{text}"
+    );
+}
+
+/// A strict run passes when every missing prerequisite is declared absent, and
+/// fails when one is not.
+///
+/// The same two suites as the red run above, which have no database server
+/// here. Declaring both makes the run green and lists them under the
+/// declaration heading. Declaring one of the two leaves the other a hollow
+/// suite, and the run exits 1 as before. The nested runs get no server URL,
+/// so this holds on a machine with both servers running too.
+#[test]
+fn testrun_excuses_a_declared_absence_and_nothing_else() {
+    let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
+        return;
+    };
+    let directory = std::env::temp_dir().join(format!(
+        "inillucent-declared-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::create_dir_all(&directory);
+    let both = directory.join("both.toml");
+    let one = directory.join("one.toml");
+    std::fs::write(&both, "absent = [\"postgres\", \"mysql\"]\n").expect("a scratch file");
+    std::fs::write(&one, "absent = [\"postgres\"]\n").expect("a scratch file");
+    let arguments = [
+        "--strict",
+        "--target",
+        "inillucent-remote::live_postgres",
+        "--target",
+        "inillucent-remote::live_mysql",
+    ];
+
+    let Some(excused) = run_nested_declaring(gate, &arguments, &both) else {
+        return;
+    };
+    let text = said(&excused);
+    refuse_a_contended_run("a run whose absences are declared", &text);
+    assert!(
+        text.contains("by declaration"),
+        "the nested run was given no server URL and did not list the two suites under the \
+         declaration heading. It printed:\n{text}"
+    );
+    assert_eq!(
+        code(&excused),
+        0,
+        "every missing prerequisite was declared absent and the strict run still failed. It \
+         printed:\n{text}"
+    );
+
+    let Some(partly) = run_nested_declaring(gate, &arguments, &one) else {
+        return;
+    };
+    let text = said(&partly);
+    let _ = std::fs::remove_dir_all(&directory);
+    assert_eq!(
+        code(&partly),
+        1,
+        "`mysql` was not declared absent, so its suite is hollow and a strict run has to exit \
+         1. It printed:\n{text}"
+    );
+    assert!(
+        text.contains("ran without a prerequisite"),
+        "the undeclared absence was not reported as a suite that evidenced nothing:\n{text}"
     );
 }
 
@@ -1388,20 +1488,51 @@ fn cargo_could_not_replace_a_running_binary(text: &str) -> bool {
 /// a skip is a missing prerequisite, so a build that could not replace a file
 /// was reported as a machine that lacked something. It said "through
 /// `inillucent-testrun` this cannot happen", and task-2101's run through
-/// `inillucent-testrun` hit it. Every nested run now builds in
-/// [`nested_target_dir`], which no outer run executes from, so a collision here
-/// is a defect in how the cases share that directory, and cargo's own words are
-/// what a reader needs to find it.
+/// `inillucent-testrun` hit it. Every nested run now reads the outer run's
+/// artifact list and has `CARGO` pointed at a program that refuses, so a nested
+/// run that reached cargo at all is a defect in the runner's `--artifacts`
+/// path, and what the run printed is what a reader needs to find it.
 ///
 /// @param case - what the case was trying to measure
 /// @param text - everything the nested run printed
 fn refuse_a_contended_run(case: &str, text: &str) {
     assert!(
-        !cargo_could_not_replace_a_running_binary(text),
-        "{case}: cargo could not replace a file in {} while building for the nested run, so \
-         the nested run never started. This is a failure and not a missing prerequisite. It \
-         printed:\n{text}",
-        nested_target_dir().display()
+        !cargo_could_not_replace_a_running_binary(text) && !text.contains("the build failed"),
+        "{case}: the nested run reached cargo, which a run given `--artifacts` never starts. \
+         This is a failure and not a missing prerequisite. It printed:\n{text}"
+    );
+}
+
+/// A nested run given an artifact list that is not there exits 2 and names it.
+///
+/// The list is the only thing a nested run has to go on, so a missing one is a
+/// run that cannot happen, which is what 2 means. Reading it as an empty list
+/// would be a run that selects its targets and then finds none of them.
+#[test]
+fn testrun_exits_two_when_the_artifact_list_is_missing() {
+    let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
+        return;
+    };
+    let missing = std::env::temp_dir().join(format!(
+        "inillucent-no-artifacts-{}.json",
+        std::process::id()
+    ));
+    let output = Command::new(gate)
+        .arg("--artifacts")
+        .arg(&missing)
+        .args(["--tier", "smoke"])
+        .env("CARGO", gate)
+        .output()
+        .unwrap_or_else(|error| panic!("{gate} did not start: {error}"));
+    let text = said(&output);
+    assert_eq!(
+        code(&output),
+        2,
+        "a run with no artifact list to read has to exit 2. It printed:\n{text}"
+    );
+    assert!(
+        text.contains(&missing.display().to_string()),
+        "the refusal did not name the list it could not read:\n{text}"
     );
 }
 

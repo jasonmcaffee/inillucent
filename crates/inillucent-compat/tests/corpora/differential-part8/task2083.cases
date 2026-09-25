@@ -1,6 +1,6 @@
 # Differential cases, category `task2083`: a seek whose key is converted the way SQLite converts it.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 #
 # task-2083 found that an index join into an untyped column returned no rows, and a sweep over
 # every pair of declared types found three more defects of the same kind. The join probe was

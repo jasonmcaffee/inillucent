@@ -88,7 +88,7 @@ mod tests {
     /// alone.
     ///
     /// The pairs are what the reference writes, which is what
-    /// `crates/inillucent-compat/tests/json.rs` compares this engine against
+    /// `crates/inillucent-compat/tests/differential/json.rs` compares this engine against
     /// case by case; this is the same claim at the level of the function.
     #[test]
     fn every_escape_json_quote_produces() {

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Records the two MCP transcripts `crates/inillucent-compat/tests/mcp_replay.rs`
+# Records the two MCP transcripts `crates/inillucent-compat/tests/e2e/mcp_replay.rs`
 # replays, through `tools/record-mcp-transcript.py`.
 #
 # Usage, from anywhere:

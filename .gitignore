@@ -171,3 +171,9 @@ __pycache__/
 # exist. `tests/selection.toml` has a rule for it too, so a change to it selects
 # nothing rather than every suite in the workspace.
 /.cargo/
+
+# The prerequisites one machine declares it does not have, read by
+# `inillucent-testrun --strict` (see `testplan::DECLARED_ABSENCES_FILE`). A strict
+# run reports a suite excused by it under its own heading instead of failing.
+# It is true of one machine, so it is never committed, and CI has none.
+/tests/prerequisites.local.toml

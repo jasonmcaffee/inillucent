@@ -144,7 +144,7 @@ throws only when the program could not be run at all.
 
 ## The API
 
-`cargo test -p inillucent-compat --test documentation` reads this table and fails if a name in the
+`cargo test -p inillucent-compat --test tooling documentation::` reads this table and fails if a name in the
 first column is not declared in `Inillucent.php` or `Error.php`.
 
 | what | one line |

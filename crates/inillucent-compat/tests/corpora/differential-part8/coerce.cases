@@ -1,6 +1,6 @@
 # Differential cases, category `coerce`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 s2n-001	SELECT '.5'+0, '.0'+0, '.'+0, '-.5'+0, '+.5'+0, '.5e2'+0
 s2n-002	SELECT '0.5'+0, '00.5'+0, '5e-1'+0, '5E-1'+0, ' .5 '+0
 s2n-003	SELECT typeof('.5'+0), typeof('.5'*1), '.5'*2, '.5'||''

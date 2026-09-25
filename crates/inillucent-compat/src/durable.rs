@@ -6,7 +6,7 @@
 //! `crates/inillucent/tests/durability.rs` and
 //! `crates/inillucent/tests/durability_arms.rs` are one subject split across two
 //! files, and the split is not a preference:
-//! `crates/inillucent-compat/tests/scenarios.rs` refuses a file that holds both
+//! `crates/inillucent-compat/tests/tooling/scenarios.rs` refuses a file that holds both
 //! a `scenario!` and a bare `#[test]`, because then "the file grades one story
 //! six ways and another once and the run's output cannot tell them apart". The
 //! cases that run at every arm therefore live apart from the cases that pick

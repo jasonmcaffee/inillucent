@@ -1,6 +1,6 @@
 # Differential cases, category `json`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 js-001	SELECT json_extract('{"a":1,"b":[1,2]}','$.a'), json_extract('{"a":1}','$.b'), json_extract('[1,2,3]','$[1]')
 js-002	SELECT json_extract('{"a":1,"b":2}','$.a','$.b'), typeof(json_extract('{"a":1}','$.a'))
 js-003	SELECT json_array(1,'a',NULL,2.5), json_object('a',1,'b','x'), json_array_length('[1,2,3]')

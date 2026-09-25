@@ -481,7 +481,7 @@ fn a_connection_sees_another_connections_commit() {
 // says where this behaviour does live now: "Access from several **processes**
 // works... Threads inside one process do not." The cross-process locking
 // protocol - SHARED, RESERVED, PENDING, EXCLUSIVE - is tested by
-// `crates/inillucent-compat/tests/process_concurrency.rs`, which spawns real
+// `crates/inillucent-compat/tests/durability/process_concurrency.rs`, which spawns real
 // writer processes, rather than here.
 //
 // So the timeout's *waiting* half is not covered by this file any more. Its

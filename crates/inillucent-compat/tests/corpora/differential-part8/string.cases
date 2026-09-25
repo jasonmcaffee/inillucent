@@ -1,6 +1,6 @@
 # Differential cases, category `string`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 str-001	SELECT length('abc'), length(''), length(NULL), length(x'010203'), length(123), length(1.5)
 str-002	SELECT length('café'), length('é'), length('😀'), length('中文')
 str-003	SELECT substr('abcdef',2), substr('abcdef',2,3), substr('abcdef',-2), substr('abcdef',-2,1), substr('abcdef',0,2)

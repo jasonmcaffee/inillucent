@@ -1,0 +1,121 @@
+# The nightly cadence on Linux: every tier, including the long forms.
+#
+# `tests.yml` runs on every push and pull request and leaves out the `nightly`
+# tier, whose targets are the same questions asked at a size nobody waits for:
+# a ledger day of 100,000 transactions, every published release's files read
+# back, a large table story. They were 7,348 s of processor time on every push.
+# This workflow runs them once a day, and is the one place the whole suite runs
+# on Linux every day. The Windows nightly runs on the development machine,
+# through `packaging/nightly.ps1`, because that is also where the release is
+# built and where its gates are measured.
+#
+# The exit codes are the runner's, as in `tests.yml`: 0 passed, 1 the run
+# happened and was red, 2 the run did not happen. Three prerequisites a runner
+# cannot have are declared absent (`onnx`, `nikaya`, `previous-release`), and
+# any other suite that skips is a failure.
+
+name: nightly
+
+on:
+  schedule:
+    # 03:00 UTC, after the development machine's own nightly at 02:00 local.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # The same settings tests.yml uses, for the same reasons: a runner has a
+  # network, and the suite does not fit on its disk with incremental output.
+  INILLUCENT_NETWORK_TESTS: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  suite:
+    name: ubuntu-latest, every tier
+    runs-on: ubuntu-latest
+    # The nightly story alone is over an hour on a shared runner.
+    timeout-minutes: 240
+
+    steps:
+      # About 30 GB of SDKs the image ships and nothing here uses.
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup             /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - name: toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: |
+            .sqlite-ref
+            _agent_output/fixtures
+
+      # The same two steps as tests.yml, for the same reasons: the pinned
+      # oracle every differential suite is graded against, checked against the
+      # SHA3-256 sum SQLite publishes, and the gate fixtures the pinned shell
+      # writes.
+      # Through bash, because the scripts were committed without the executable bit.
+      - name: the pinned SQLite 3.53.4 oracle
+        run: bash tools/sqlite-reference.sh
+
+      - name: the gate fixtures
+        run: bash tools/build-gate-fixtures.sh
+
+      # The same two servers tests.yml starts for the live migration suites.
+      - name: PostgreSQL and MySQL for the live migration suites
+        run: |
+          docker run -d --name pg -p 5432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust             -v "$PWD/crates/inillucent-remote/tests/fixtures:/fixtures:ro" postgres:17
+          docker run -d --name my -p 3306:3306 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes             -v "$PWD/crates/inillucent-remote/tests/fixtures:/fixtures:ro" mysql:8.4
+          for i in $(seq 1 60); do
+            docker exec pg pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break
+            sleep 2
+          done
+          for i in $(seq 1 90); do
+            docker exec my mysql -h 127.0.0.1 -u root -e "SELECT 1" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec pg psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres             -c "CREATE DATABASE inillucent_migrate_test"
+          docker exec pg psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres             -d inillucent_migrate_test -f /fixtures/postgres.sql
+          docker exec my mysql -h 127.0.0.1 -u root             -e "CREATE DATABASE inillucent_migrate_test"
+          docker exec my sh -c "mysql -h 127.0.0.1 -u root inillucent_migrate_test < /fixtures/mysql.sql"
+          echo "INILLUCENT_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/inillucent_migrate_test" >> "$GITHUB_ENV"
+          echo "INILLUCENT_TEST_MYSQL_URL=mysql://root@127.0.0.1:3306/inillucent_migrate_test" >> "$GITHUB_ENV"
+
+      - name: build the runner
+        run: cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
+
+      - name: the suite, every tier
+        shell: bash
+        run: |
+          set +e
+          # The prerequisites a runner cannot have; tests.yml says why for each.
+          target/debug/inillucent-testrun --cadence nightly --strict             --absent onnx --absent nikaya --absent previous-release             --summary nightly-summary.json
+          code=$?
+          echo "inillucent-testrun exited $code"
+          case "$code" in
+            0) echo "::notice::every target ran and passed" ;;
+            1) echo "::error::the run happened and was red" ;;
+            2) echo "::error::THE RUN DID NOT HAPPEN. Nothing was graded." ;;
+            *) echo "::error::inillucent-testrun answered $code, which is not one of its three exit codes" ;;
+          esac
+          exit $code
+
+      - name: the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-summary
+          path: nightly-summary.json
+          if-no-files-found: ignore

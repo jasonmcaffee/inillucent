@@ -1792,7 +1792,7 @@ fn search_finds_the_row_whose_text_matches() {
 ///
 /// The corpus is empty on purpose: what is under test is that the verb reaches
 /// a `VECTOR(3)` column, parses the query vector and renders a distance column.
-/// Ranking is graded by `crates/inillucent-compat/tests/vector.rs` against the
+/// Ranking is graded by `crates/inillucent-compat/tests/engine/vector.rs` against the
 /// engine, which is where a ranking question belongs.
 #[test]
 fn vector_search_answers_with_a_distance_column() {
@@ -2007,7 +2007,7 @@ fn shell_runs_what_is_written_to_its_standard_input() {
 /// `mcp` speaks JSON-RPC on its standard input and answers `initialize`.
 ///
 /// One request, because the twenty-eight tools over the wire are
-/// `crates/inillucent-compat/tests/mcp_wire.rs`. What is asserted here is that
+/// `crates/inillucent-compat/tests/e2e/mcp_wire.rs`. What is asserted here is that
 /// the verb hands the process to the server at all, which is the part that
 /// belongs to the command table.
 #[test]
@@ -2044,7 +2044,7 @@ fn mcp_answers_an_initialize_over_its_standard_input() {
 /// *every* one of them has been built, which is the stale case the design was
 /// guarding against: it says so and asks for another.
 const NOT_BUILT: [&str; 3] = [
-    // The first is the one `crates/inillucent-compat/tests/mcp_wire.rs` drives
+    // The first is the one `crates/inillucent-compat/tests/e2e/mcp_wire.rs` drives
     // the server with, so the two sides of the claim - exit code 3 out of the
     // binary, `unsupported` out of a JSON-RPC result - are about one statement.
     // It names no table on purpose, so neither suite has to build one first.

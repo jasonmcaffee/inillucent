@@ -54,7 +54,7 @@ fn run(program: &PathBuf, name: &str, script: &str) -> String {
 ///
 /// **Not a skip for convenience.** Each of these rests on something the new
 /// engine does not do yet, and each gap is asserted on its own in
-/// `crates/inillucent-compat/tests/new_engine_surface.rs` - by a test that
+/// `crates/inillucent-compat/tests/engine/new_engine_surface.rs` - by a test that
 /// fails the day the gap closes. Comparing here as well would report the same
 /// gap twice, and would report it as a *shell* difference when the shell is
 /// doing exactly what it should with the engine it has.

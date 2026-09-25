@@ -1,6 +1,6 @@
 # Differential cases, category `window`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 win-001	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,row_number() OVER (ORDER BY g,v) FROM t
 win-002	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,rank() OVER (ORDER BY v), dense_rank() OVER (ORDER BY v) FROM t ORDER BY g,v
 win-003	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,percent_rank() OVER (ORDER BY v), cume_dist() OVER (ORDER BY v) FROM t ORDER BY g,v

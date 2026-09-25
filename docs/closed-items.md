@@ -305,7 +305,7 @@ statement.
 Several processes use the same locking protocol as SQLite (SHARED, RESERVED, PENDING, EXCLUSIVE)
 under `PRAGMA locking_mode = normal`, the default. One writer holds the file at a time. A second
 writer waits for `PRAGMA busy_timeout` and then fails with `busy`.
-`crates/inillucent-compat/tests/process_concurrency.rs` starts two real writer processes and checks
+`crates/inillucent-compat/tests/durability/process_concurrency.rs` starts two real writer processes and checks
 that the rows in the file equal the commits the engine acknowledged. Before that test existed, two
 real processes lost 43% of their acknowledged commits on every round.
 
@@ -328,7 +328,7 @@ last two: `%_idx` holds the document list inline, where it used to hold the numb
 Alternating the change in and out with a release build each time, the ratio read 0.50x and 0.56x
 before and 0.55x and 0.53x after. The workload pays for bytes written, and the row count does not
 change the bytes. The change is kept because it is simpler. Files in the old layout still read, and
-`crates/inillucent-compat/tests/fts5_legacy_layout.rs` checks that they give the same answers.
+`crates/inillucent-compat/tests/engine/fts5_legacy_layout.rs` checks that they give the same answers.
 
 **A segment format, built and reverted.** Each flush wrote a new segment, with a manifest at
 `%_data` row `-1` and an automatic merge. It made `fts.build` no faster and roughly halved
@@ -459,7 +459,7 @@ the uncommitted page back, and the tests passed whether the fix was in place or 
 
 ### Four ways a checkpoint lost an intact database
 
-The crash campaigns in `crates/inillucent-compat/tests/durability.rs` were moved to the shipping
+The crash campaigns in `crates/inillucent-compat/tests/durability/durability.rs` were moved to the shipping
 engine. The two modes they had never run against, `PRAGMA journal_mode = truncate` and `persist`,
 failed at the 35th cut point. Four defects were found and fixed:
 
@@ -539,7 +539,7 @@ adds the row and writes the leaf back. When a crash tore a page, redo failed at 
 that read that page, even when a later record in the same log held the whole page.
 
 The cause was found by naming every read in `open_file`. At cut 8 of the `journal_mode = off` sweep
-in `crates/inillucent-compat/tests/free_map_checkpoint_crash.rs`, the error reads
+in `crates/inillucent-compat/tests/durability/free_map_checkpoint_crash.rs`, the error reads
 `replaying the log: page 4 checksum ... is not the computed ...`. The three reads before redo (the
 first open, attaching the catalog, reading the catalog) are named in the error text, and none of
 them was the cause. The names stay in the code.
@@ -554,7 +554,7 @@ The images are applied only after a failure. Applying them on every open changed
 started from, and in the `wal_crash` commit campaign one cut of 23 then lost a committed
 transaction.
 
-**Test.** `crates/inillucent-compat/tests/torn_page_with_image.rs` has two cases. Both choose the
+**Test.** `crates/inillucent-compat/tests/engine/torn_page_with_image.rs` has two cases. Both choose the
 page by reading the log, and both crash the fixture without closing it:
 
 | Case | Result |

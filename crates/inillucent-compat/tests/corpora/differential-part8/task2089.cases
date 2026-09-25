@@ -1,6 +1,6 @@
 # Differential cases, category `task2089`: an explicit COLLATE inside an operand reaches the comparison.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 #
 # task-2089: SQLite marks an expression EP_Collate when any operand carries an explicit COLLATE,
 # and sqlite3ExprCollSeq reads the collation from the first marked operand, left first. A CAST and

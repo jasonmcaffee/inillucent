@@ -49,7 +49,10 @@ struct Source {
     text: String,
 }
 
-/// Reads every `.rs` file directly inside the test directories.
+/// Reads every `.rs` file inside the test directories, and one level down.
+///
+/// One level down because `inillucent-compat`'s suites are modules of one
+/// binary per tier, in `tests/<tier>/<suite>.rs`.
 fn sources() -> Vec<Source> {
     let root = inillucent_compat::workspace_root();
     let mut found = Vec::new();
@@ -58,8 +61,18 @@ fn sources() -> Vec<Source> {
         let Ok(entries) = std::fs::read_dir(&path) else {
             continue;
         };
+        let mut files: Vec<PathBuf> = Vec::new();
         for entry in entries.flatten() {
             let file: PathBuf = entry.path();
+            if file.is_dir() {
+                if let Ok(inner) = std::fs::read_dir(&file) {
+                    files.extend(inner.flatten().map(|entry| entry.path()));
+                }
+                continue;
+            }
+            files.push(file);
+        }
+        for file in files {
             if file.extension().map(|end| end != "rs").unwrap_or(true) {
                 continue;
             }
@@ -67,9 +80,9 @@ fn sources() -> Vec<Source> {
                 continue;
             };
             let name = file
-                .file_name()
-                .map(|name| format!("{directory}/{}", name.to_string_lossy()))
-                .unwrap_or_else(|| directory.to_string());
+                .strip_prefix(&root)
+                .map(|inside| inside.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| directory.to_string());
             found.push(Source { name, text });
         }
     }

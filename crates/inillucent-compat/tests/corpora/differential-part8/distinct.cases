@@ -1,6 +1,6 @@
 # Differential cases, category `distinct`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 dis-001	CREATE TABLE t(a); INSERT INTO t VALUES(1),(1.0),('1'),(x'31'); SELECT count(*) FROM (SELECT DISTINCT a FROM t)
 dis-002	SELECT DISTINCT 1 AS a, 2 AS b UNION ALL SELECT 1,2
 dis-003	CREATE TABLE t(a,b); INSERT INTO t VALUES(1,2),(1,3),(1,2); SELECT DISTINCT a,b FROM t ORDER BY a,b

@@ -9,7 +9,7 @@
 //!
 //! Two suites build this corpus: `crates/inillucent/tests/story_nikaya.rs`,
 //! which runs the startup migration in process at every arm, and
-//! `crates/inillucent-compat/tests/story_nikaya_crash.rs`, which kills a real
+//! `crates/inillucent-compat/tests/durability/story_nikaya_crash.rs`, which kills a real
 //! shell between the `ALTER TABLE` and the `CREATE INDEX` that follows it. They
 //! read the same rows back, so the two failures are comparable.
 

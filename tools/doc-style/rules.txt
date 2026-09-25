@@ -3,7 +3,7 @@
 # One phrase per line, matched case-insensitively against prose: text outside fenced code blocks,
 # inline code, link targets and HTML comments. `docs/writing-style.md` explains each group and says
 # what to write instead. Both `tools/doc-style/check.mjs` and
-# `crates/inillucent-compat/tests/documentation.rs` read this file, so a phrase added here is
+# `crates/inillucent-compat/tests/tooling/documentation.rs` read this file, so a phrase added here is
 # checked by both.
 #
 # Every line is a literal phrase. There are no regular expressions, because the Rust test that reads

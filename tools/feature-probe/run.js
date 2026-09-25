@@ -3,7 +3,7 @@
 // Every case is a whole SQL script. It is run through `inillucent-shell` and
 // through the pinned `sqlite3` 3.53.4, each over its own fresh database in its
 // own directory, and every byte of stdout and stderr is compared. That is the
-// same comparison `crates/inillucent-compat/tests/semantics.rs` makes, widened
+// same comparison `crates/inillucent-compat/tests/differential/semantics.rs` makes, widened
 // from the 110 constructs earlier reviews probed to the whole feature surface
 // this document has to speak for.
 //

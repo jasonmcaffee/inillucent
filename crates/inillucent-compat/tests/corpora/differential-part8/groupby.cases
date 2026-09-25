@@ -1,6 +1,6 @@
 # Differential cases, category `groupby`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 gb-001	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g ORDER BY g
 gb-002	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g, v FROM t GROUP BY g ORDER BY g
 gb-003	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g HAVING count(*)>0 ORDER BY g

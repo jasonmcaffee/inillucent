@@ -1,6 +1,6 @@
 # Differential cases, category `check`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 chk-001	CREATE TABLE t(a CHECK(a>0)); INSERT INTO t VALUES(1); INSERT INTO t VALUES(-1)
 chk-002	CREATE TABLE t(a CHECK(a>0)); INSERT INTO t VALUES(NULL); SELECT count(*) FROM t
 chk-003	CREATE TABLE t(a,b, CHECK(a<b)); INSERT INTO t VALUES(1,2); INSERT INTO t VALUES(2,1)

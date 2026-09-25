@@ -6,7 +6,7 @@
 //! over two gate runs each (task-2025). The gate is the binary that decides
 //! whether a family cleared its bar, so a default that records is a gate
 //! measuring instrumented code and publishing the number as the engine's.
-//! `crates/inillucent-compat/tests/module_stages.rs` asserts the default.
+//! `crates/inillucent-compat/tests/engine/module_stages.rs` asserts the default.
 //!
 //! On the harness's side like [`crate::StageTimings`], and nothing in the engine
 //! reads what it writes.

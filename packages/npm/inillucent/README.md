@@ -152,7 +152,7 @@ the same command table as the command line. `--readonly` refuses every statement
 
 ## The API
 
-`cargo test -p inillucent-compat --test documentation` reads this table and fails if a name in the
+`cargo test -p inillucent-compat --test tooling documentation::` reads this table and fails if a name in the
 first column is not declared in `index.mjs` or `resolve.mjs`.
 
 | what | one line |

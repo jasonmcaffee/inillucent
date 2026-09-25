@@ -1,6 +1,6 @@
 # Differential cases, category `cte`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 cte-001	WITH x(a) AS (SELECT 1 UNION ALL SELECT 2) SELECT * FROM x
 cte-002	WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<5) SELECT * FROM n
 cte-003	WITH RECURSIVE n(i) AS (SELECT 1 UNION SELECT (i+1)%3 FROM n) SELECT * FROM n ORDER BY i

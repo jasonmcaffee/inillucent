@@ -42,7 +42,7 @@
 use std::collections::BTreeSet;
 
 use inillucent_compat::layering;
-use inillucent_compat::selection::{self, Kind, Map, Target};
+use inillucent_compat::selection::{self, Cadence, Kind, Map, Target};
 use inillucent_compat::workspace_root;
 
 /// Loads the shipped map.
@@ -150,7 +150,9 @@ fn no_test_hides_outside_the_map() {
 /// and is quoted with its line number.
 #[test]
 fn every_line_of_the_map_is_one_the_parser_reads() {
-    const KEYS: [&str; 13] = [
+    const KEYS: [&str; 16] = [
+        "builds",
+        "module",
         "package",
         "kind",
         "name",
@@ -160,6 +162,7 @@ fn every_line_of_the_map_is_one_the_parser_reads() {
         // asking for the run. See `selection::Row::alone` for why the level
         // matters.
         "exclusive",
+        "cadence",
         "alone",
         "covers",
         "requires",
@@ -384,7 +387,7 @@ fn an_undeclared_path_is_loud() {
 ///   `gates_fail_closed` shape: seven of its fifteen cases could not run and
 ///   the run said `ok`.
 /// - **A `requires` on a suite that cannot skip** is a false entry in that same
-///   table. `inillucent-compat::sql` and `::storage` declared `fixtures` and
+///   table. `inillucent-compat::engine::sql` and `::storage` declared `fixtures` and
 ///   neither skips - both `.expect()` on tracked files - and so did
 ///   `inillucent-migrate::corpus` and `::equivalence`, which build their
 ///   corpora themselves. A reader on a machine without the gate fixtures would
@@ -465,7 +468,14 @@ fn every_target_that_can_skip_declares_it_and_vice_versa() {
 fn sources_of(root: &std::path::Path, target: &Target) -> Vec<std::path::PathBuf> {
     let directory = package_directory(root, &target.package);
     match target.kind {
-        Kind::Test => vec![directory.join("tests").join(format!("{}.rs", target.name))],
+        // A suite module is one file in the directory named after its binary.
+        Kind::Test => match &target.module {
+            Some(module) => vec![directory
+                .join("tests")
+                .join(&target.name)
+                .join(format!("{module}.rs"))],
+            None => vec![directory.join("tests").join(format!("{}.rs", target.name))],
+        },
         // A program under `src/bin/` is its own file. A `main.rs` beside a
         // `lib.rs` is one file too: the modules under `src/` belong to the
         // library, which has its own row, and counting them twice would put a
@@ -607,7 +617,7 @@ fn calls_the_skip_helper(file: &std::path::Path) -> bool {
 /// Returns one line of source with its comment and its string literals removed.
 ///
 /// **This file names the helper it looks for, so it would find itself.** It did:
-/// the first run reported `inillucent-compat::selection` as a suite that skips
+/// the first run reported `inillucent-compat::tooling::selection` as a suite that skips
 /// without declaring a prerequisite, because `calls_the_skip_helper` contains
 /// the string `"differential::skipping("` as the thing it matches on. A scan
 /// for a call has to read code rather than text, and the two things that are
@@ -818,13 +828,13 @@ fn a_change_to_the_transaction_crate_selects_the_segment_suites() {
     );
     let selected: BTreeSet<String> = selection::select(&map, &changed, &graph)
         .iter()
-        .map(|row| format!("{}::{}", row.target.package, row.target.name))
+        .map(|row| row.target.label())
         .collect();
 
     for suite in [
-        "inillucent-compat::segmented_generations",
-        "inillucent-compat::segment_merge_bound",
-        "inillucent-compat::segment_delta_chain",
+        "inillucent-compat::engine::segmented_generations",
+        "inillucent-compat::engine::segment_merge_bound",
+        "inillucent-compat::engine::segment_delta_chain",
     ] {
         assert!(
             selected.contains(suite),
@@ -850,11 +860,7 @@ fn a_change_to_the_transaction_crate_selects_the_segment_suites() {
 fn every_timing_row_names_a_live_target() {
     let text = std::fs::read_to_string(workspace_root().join("tests/timings.toml"))
         .expect("the timing ledger is in the repository");
-    let live: BTreeSet<String> = map()
-        .rows
-        .iter()
-        .map(|row| format!("{}::{}", row.target.package, row.target.name))
-        .collect();
+    let live: BTreeSet<String> = map().rows.iter().map(|row| row.target.label()).collect();
 
     let mut named = 0usize;
     let mut dead = Vec::new();
@@ -887,5 +893,200 @@ fn every_timing_row_names_a_live_target() {
         "these rows in tests/timings.toml name a target that tests/selection.toml does not \
          declare, so the runner reads a number it can never use:\n{}",
         dead.join("\n")
+    );
+}
+
+/// Every tier says when it runs, and the three the design names run when it
+/// says they do.
+///
+/// The parser already refuses a tier with no cadence. What this adds is the
+/// assignment itself: the nightly tier running on a change is the 3,991 s story
+/// back in every ticket, and a crash tier at `change` is the crash suites back
+/// on every parser edit.
+#[test]
+fn every_tier_has_the_cadence_the_design_gives_it() {
+    let map = map();
+    for tier in &map.tiers {
+        let expected = match tier.name.as_str() {
+            "nightly" => Cadence::Nightly,
+            "durability" | "perf" => Cadence::Merge,
+            _ => Cadence::Change,
+        };
+        assert_eq!(
+            tier.cadence,
+            expected,
+            "tier `{}` has cadence `{}`",
+            tier.name,
+            tier.cadence.as_str()
+        );
+    }
+}
+
+/// Returns what a change to one file selects at one cadence, as labels.
+///
+/// @param path - the changed file, relative to the workspace root
+/// @param cadence - the cadence of the run
+fn chosen_at(path: &str, cadence: Cadence) -> Vec<(String, String, Vec<String>)> {
+    let map = map();
+    let members = members();
+    let manifests =
+        layering::read_members(&workspace_root(), &members).expect("the manifests parse");
+    let graph = selection::dependents(&manifests);
+    let choice = selection::seeds_of(&map, &members, &manifests, &[path.to_string()]);
+    selection::select_at(&map, &choice, &graph, cadence)
+        .iter()
+        .map(|row| {
+            (
+                row.target.label(),
+                row.tier.clone(),
+                row.covers.iter().cloned().collect(),
+            )
+        })
+        .collect()
+}
+
+/// A parser change runs no nightly story and no crash suite that does not say
+/// it exercises the parser.
+///
+/// This is the four file change in `inillucent-engine/src/ddl/` and
+/// `inillucent-sql/src/directive.rs` that selected 178 of 231 targets and took
+/// 37 minutes, reduced to its `inillucent-sql` half.
+#[test]
+fn a_parser_change_runs_no_nightly_and_no_unrelated_merge_row() {
+    let map = map();
+    let chosen = chosen_at("crates/inillucent-sql/src/directive.rs", Cadence::Change);
+    assert!(!chosen.is_empty(), "a parser change selected nothing");
+    let wrong: Vec<String> = chosen
+        .iter()
+        .filter(|(_, tier, covers)| match map.cadence_of(tier) {
+            Cadence::Nightly => true,
+            Cadence::Merge => !covers.iter().any(|package| package == "inillucent-sql"),
+            Cadence::Change => false,
+        })
+        .map(|(label, tier, _)| format!("{label} ({tier})"))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "a change to inillucent-sql selected these, which its cadence rule excludes:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
+/// A change to the log runs the log's crash suite in a change run.
+///
+/// The other half of the rule above: narrowing the crash suites must not stop
+/// them running for the change they exist to catch.
+#[test]
+fn a_log_change_runs_the_log_crash_suite() {
+    let chosen = chosen_at("crates/inillucent-wal/src/lib.rs", Cadence::Change);
+    assert!(
+        chosen
+            .iter()
+            .any(|(label, _, _)| label == "inillucent-compat::durability::wal_crash"),
+        "a change to inillucent-wal did not select inillucent-compat::durability::wal_crash"
+    );
+}
+
+/// The merge run selects by the closure, so it runs the crash suites a parser
+/// change reaches and never the nightly tier.
+#[test]
+fn the_merge_run_selects_merge_rows_by_the_closure() {
+    let map = map();
+    let chosen = chosen_at("crates/inillucent-sql/src/directive.rs", Cadence::Merge);
+    assert!(
+        chosen
+            .iter()
+            .any(|(_, tier, _)| map.cadence_of(tier) == Cadence::Merge),
+        "the merge run for a parser change selected no crash suite"
+    );
+    assert!(
+        chosen
+            .iter()
+            .all(|(_, tier, _)| map.cadence_of(tier) != Cadence::Nightly),
+        "the merge run selected a nightly row"
+    );
+}
+
+/// Every label a row names in `builds` is a row in the map.
+///
+/// A label that names nothing is an executable the outer run never builds, and
+/// the nested run that wanted it then fails to find it in the artifact list.
+#[test]
+fn every_built_label_names_a_row() {
+    let map = map();
+    let labels: BTreeSet<String> = map.rows.iter().map(|row| row.target.label()).collect();
+    let unknown: Vec<String> = map
+        .rows
+        .iter()
+        .flat_map(|row| {
+            row.builds
+                .iter()
+                .filter(|label| !labels.contains(*label))
+                .map(move |label| format!("{} builds `{label}`", row.target.label()))
+        })
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "these `builds` entries name no target in tests/selection.toml:\n  {}",
+        unknown.join("\n  ")
+    );
+}
+
+/// Only the packages `testplan::PROGRAM_PACKAGES` names have tests that start
+/// the programs the runner builds.
+///
+/// The runner builds `inillucent-cli` only when a selected row is in one of
+/// those packages or declares `shell`. A suite elsewhere that started using
+/// `cliproc` would find no program under a narrowed build and fail on a missing
+/// file, so this reads every test file outside those packages and fails on the
+/// first one that uses it.
+#[test]
+fn only_the_listed_packages_start_the_built_programs() {
+    let root = workspace_root();
+    let map = map();
+    let mut read = 0usize;
+    let mut outside: Vec<String> = Vec::new();
+    for member in members() {
+        let package = member.rsplit('/').next().unwrap_or(&member).to_string();
+        if inillucent_compat::testplan::PROGRAM_PACKAGES.contains(&package.as_str()) {
+            continue;
+        }
+        for file in under(&root.join(&member).join("tests"))
+            .into_iter()
+            .chain(under(&root.join(&member).join("src")))
+        {
+            read = read.saturating_add(1);
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            // Code only: `python_conformance.rs` names `cliproc` in a comment
+            // to explain why it does something similar itself.
+            let uses = text
+                .lines()
+                .map(str::trim_start)
+                .any(|line| !line.starts_with("//") && line.contains("cliproc"));
+            if !uses {
+                continue;
+            }
+            let declared = map.rows.iter().any(|row| {
+                row.target.package == package
+                    && row
+                        .requires
+                        .iter()
+                        .any(|need| need == "shell" || need == "programs")
+            });
+            if !declared {
+                outside.push(file.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    assert!(
+        read > 100,
+        "read {read} source files, which means this is looking in the wrong place"
+    );
+    assert!(
+        outside.is_empty(),
+        "these files use `cliproc` in a package the runner does not build the programs for:\n  {}\n\
+         Add the package to `testplan::PROGRAM_PACKAGES`, or declare `requires = [\"shell\"]` on \
+         its row.",
+        outside.join("\n  ")
     );
 }

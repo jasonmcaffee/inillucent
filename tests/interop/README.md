@@ -2,7 +2,7 @@
 
 Each folder here holds a database written by one published release of `inillucent`, using that
 release's own binary. The folder also holds the write ahead log segment the release left, and the
-answers the release gave. `crates/inillucent-compat/tests/release_format.rs` opens each database
+answers the release gave. `crates/inillucent-compat/tests/e2e/release_format.rs` opens each database
 with the current build and asks the same questions again.
 
 These fixtures answer one question: can the current build still read a file that an older release
@@ -114,7 +114,7 @@ Since 0.1.8, each FTS5 index carries a layout record: one `%_data` row that name
 release that wrote it. An `inillucent_search` table's `%_config` names its release beside its format
 number. A reader that finds a layout or a format it does not know refuses with the status
 `unsupported` and names both. [Relational architecture](../../docs/relational-architecture.md)
-describes what each format version promises. `crates/inillucent-compat/tests/format_refusal.rs`
+describes what each format version promises. `crates/inillucent-compat/tests/engine/format_refusal.rs`
 checks each refusal, including the exit code from the command line.
 
 ## Searching a file a newer build wrote

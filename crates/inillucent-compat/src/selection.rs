@@ -5,7 +5,7 @@
 //! whose map has drifted does not report an error - it silently runs less than
 //! it should, and a suite that stops being selected stops being a test. So the
 //! map is compared against the file system rather than trusted, by
-//! `crates/inillucent-compat/tests/selection.rs`, and a target added without a
+//! `crates/inillucent-compat/tests/tooling/selection.rs`, and a target added without a
 //! row fails that test on the machine that added it.
 //!
 //! ## Why a declared map rather than a derived one
@@ -40,10 +40,29 @@
 //! - `dev-dependencies` count as edges, because a change to the simulator has
 //!   to re-run the campaigns that inject faults through it.
 //!
-//! The tier a target belongs to never affects whether it is *selected*. Tiers
-//! are for asking "run the quick ones", and selection is for asking "run what
-//! this change can break"; conflating them would let a tier choice quietly
-//! narrow a correctness question.
+//! ## Cadence: when a tier runs
+//!
+//! Every tier declares a [`Cadence`]: `change`, `merge` or `nightly`. The
+//! dependency closure answers "what can this change break", and the cadence
+//! answers "is this the run that should find out". They are separate because
+//! the closure alone selected 178 of 231 targets for a four file change in
+//! `inillucent-sql`, one of them a 3,991 s nightly story, and it ran the crash
+//! suites on a parser edit because 23 of them named `inillucent-engine`, which
+//! the closure reaches from almost anywhere.
+//!
+//! - A `change` tier row is selected by the closure, as it always was.
+//! - A `merge` tier row is selected in a change run only when a package that
+//!   actually changed (a **seed**, before the closure) is one it covers, or its
+//!   own crate or its own file changed. CI's merge run and the nightly select it
+//!   by the closure. So a crash suite runs for the ticket that edits the log,
+//!   and on every merge, and not for the ticket that edits the parser.
+//! - A `nightly` tier row is never selected by a change run. It runs on the
+//!   schedule, or when it is named with `--tier` or `--target`.
+//!
+//! What this costs is written down in `tasks/task-2114-inillucent-build-times-tdd.md`
+//! section 6.2: a merge row whose `covers` is too narrow is caught by the merge
+//! run in CI and by the nightly, hours later rather than minutes. A change run
+//! was never the only run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -100,14 +119,40 @@ pub struct Target {
     pub package: String,
     /// Whether it is the lib harness or an integration file.
     pub kind: Kind,
-    /// The target name, which for [`Kind::Test`] is the file stem.
+    /// The target name, which for [`Kind::Test`] is the file stem, and the
+    /// name of the binary cargo builds.
     pub name: String,
+    /// The module inside that binary, when the binary holds one suite per
+    /// module.
+    ///
+    /// `inillucent-compat`'s integration tests are one binary per tier, and
+    /// each former file is a module of it: `tests/differential.rs` declares
+    /// `mod semantics;` and the suite is `tests/differential/semantics.rs`. A
+    /// target is still one suite, so the runner starts the binary once per
+    /// module with that module's test names and `--exact`, and the suite keeps
+    /// its own process, timing row and kill budget. One binary instead of 149
+    /// is one link of the compat library and its 23 crates instead of 149.
+    pub module: Option<String>,
 }
 
 impl Target {
-    /// Returns the `package::name` form used in reports and on the command line.
+    /// Returns the `package::name` form used in reports and on the command
+    /// line, or `package::name::module` for a module target.
     pub fn label(&self) -> String {
-        format!("{}::{}", self.package, self.name)
+        match &self.module {
+            Some(module) => format!("{}::{}::{module}", self.package, self.name),
+            None => format!("{}::{}", self.package, self.name),
+        }
+    }
+
+    /// Returns the binary this target runs in: itself with no module.
+    pub fn binary(&self) -> Target {
+        Target {
+            package: self.package.clone(),
+            kind: self.kind,
+            name: self.name.clone(),
+            module: None,
+        }
     }
 }
 
@@ -148,13 +193,56 @@ pub struct Row {
     /// the tree that does this, and it sits in `tooling` beside forty targets
     /// that have no reason to run one at a time.
     ///
-    /// The three cases concerned used to announce a skip on that exact cargo
-    /// error rather than assert, which is right as far as it goes - an exit code
-    /// read off a run that never started is a statement about the machine. What
-    /// it cost is that every strict run in a `git worktree` named three skips a
-    /// person could not clear, and the `1` those cases assert is the one exit
-    /// code task-2047 did not change.
+    /// No row sets it today. `gates_fail_closed` did until its nested runner
+    /// stopped starting cargo: it now reads the outer run's artifact list (see
+    /// `testplan`), so there is no relink to race and it runs beside the rest.
+    /// The field stays for the next target that genuinely has to run alone.
     pub alone: bool,
+    /// Other targets, by label, whose executables this suite starts itself.
+    ///
+    /// `gates_fail_closed` runs a nested `inillucent-testrun` over the smoke
+    /// tier and the two live database suites. The nested runner reads the
+    /// outer runner's artifact list and starts no cargo, so those executables
+    /// have to be built by the outer run whether or not it selected them.
+    /// `testplan::build_set` adds them to the build and not to the run.
+    pub builds: Vec<String>,
+}
+
+/// When a tier runs.
+///
+/// Ordered: a run at one cadence includes every tier at that cadence and below
+/// it, so `Merge` includes the `change` tiers and `Nightly` includes everything.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Cadence {
+    /// On every change, in the ticket loop: `inillucent-testrun --changed`.
+    Change,
+    /// On every merge, in CI; in a change run only for a seed the row covers.
+    Merge,
+    /// On the schedule only, or when named.
+    Nightly,
+}
+
+impl Cadence {
+    /// Returns the word the map and the command line spell this cadence with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Cadence::Change => "change",
+            Cadence::Merge => "merge",
+            Cadence::Nightly => "nightly",
+        }
+    }
+
+    /// Reads a cadence from the map's or the command line's spelling.
+    ///
+    /// @param text - the word
+    pub fn parse(text: &str) -> Option<Cadence> {
+        match text {
+            "change" => Some(Cadence::Change),
+            "merge" => Some(Cadence::Merge),
+            "nightly" => Some(Cadence::Nightly),
+            _ => None,
+        }
+    }
 }
 
 /// One tier: a named reason to run a subset.
@@ -189,6 +277,13 @@ pub struct Tier {
     /// `crates/inillucent/tests/budget.rs` now asserts on counts. This flag
     /// protects the one ceiling left in that file.
     pub exclusive: bool,
+    /// When the tier runs: see [`Cadence`] and this module's documentation.
+    ///
+    /// Required in the map. A tier with no cadence would have to default to
+    /// one, and either default is wrong for some tier: `change` puts a nightly
+    /// story back into every ticket, and `nightly` stops a new tier running on
+    /// a change without anybody deciding that it should not.
+    pub cadence: Cadence,
 }
 
 /// One non-crate path prefix, and what changing it selects.
@@ -244,10 +339,18 @@ impl Map {
                 .get("exclusive")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let cadence_text = row
+                .get("cadence")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("tier `{name}` has no cadence"))?;
+            let cadence = Cadence::parse(cadence_text).ok_or_else(|| {
+                format!("tier `{name}` has cadence `{cadence_text}`; it must be change, merge or nightly")
+            })?;
             map.tiers.push(Tier {
                 name,
                 purpose,
                 exclusive,
+                cadence,
             });
         }
         for row in document.array("target") {
@@ -296,17 +399,33 @@ impl Map {
                 .map(<[String]>::to_vec)
                 .unwrap_or_default();
             let alone = row.get("alone").and_then(Value::as_bool).unwrap_or(false);
+            let builds = row
+                .get("builds")
+                .and_then(Value::as_list)
+                .map(<[String]>::to_vec)
+                .unwrap_or_default();
+            let module = row
+                .get("module")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if module.is_some() && kind != Kind::Test {
+                return Err(format!(
+                    "{kind_text} row for `{package}::{name}` has a module; only a test binary holds modules"
+                ));
+            }
             map.rows.push(Row {
                 target: Target {
                     package,
                     kind,
                     name,
+                    module,
                 },
                 tier,
                 covers,
                 requires,
                 features,
                 alone,
+                builds,
             });
         }
         for row in document.array("path") {
@@ -342,6 +461,34 @@ impl Map {
     /// @param target - the target to look up
     pub fn row(&self, target: &Target) -> Option<&Row> {
         self.rows.iter().find(|row| &row.target == target)
+    }
+
+    /// Returns the cadence of a tier by name.
+    ///
+    /// A tier the map does not declare counts as `change`, so a row in an
+    /// undeclared tier is still selected by the closure. `every_tier_is_declared`
+    /// in the selection suite fails on such a row anyway.
+    ///
+    /// @param tier - the tier name
+    pub fn cadence_of(&self, tier: &str) -> Cadence {
+        self.tiers
+            .iter()
+            .find(|declared| declared.name == tier)
+            .map(|declared| declared.cadence)
+            .unwrap_or(Cadence::Change)
+    }
+
+    /// Returns every row whose tier runs at a cadence or below it.
+    ///
+    /// This is the selection for a run with no `--changed`: `Merge` is every
+    /// tier except `nightly`, and `Nightly` is the whole map.
+    ///
+    /// @param cadence - the highest cadence to include
+    pub fn rows_up_to(&self, cadence: Cadence) -> Vec<&Row> {
+        self.rows
+            .iter()
+            .filter(|row| self.cadence_of(&row.tier) <= cadence)
+            .collect()
     }
 
     /// Returns every tier name the rows use, whether or not it is declared.
@@ -402,6 +549,7 @@ pub fn discover(root: &Path, members: &[String]) -> Result<Vec<Target>, String> 
                 package: package.clone(),
                 kind: Kind::Lib,
                 name: "lib".to_string(),
+                module: None,
             });
         }
         for name in binary_names(&directory, &package)? {
@@ -409,21 +557,103 @@ pub fn discover(root: &Path, members: &[String]) -> Result<Vec<Target>, String> 
                 package: package.clone(),
                 kind: Kind::Bin,
                 name,
+                module: None,
             });
         }
-        for name in integration_names(&directory)? {
-            targets.push(Target {
-                package: package.clone(),
-                kind: Kind::Test,
-                name,
-            });
+        for (target, _) in integration_targets(&directory, &package)? {
+            targets.push(target);
         }
     }
     targets.sort();
     Ok(targets)
 }
 
-/// Returns the stems of one crate's `tests/*.rs` files, sorted.
+/// Returns one crate's integration targets, each with the file that holds it.
+///
+/// A `tests/<name>.rs` is one target, unless it is a binary of suite modules:
+/// then each module is a target and its file is `tests/<name>/<module>.rs`.
+///
+/// @param directory - the crate directory
+/// @param package - the crate's package name
+pub fn integration_targets(
+    directory: &Path,
+    package: &str,
+) -> Result<Vec<(Target, PathBuf)>, String> {
+    let mut found = Vec::new();
+    for name in integration_names(directory)? {
+        let root = integration_root(directory, &name);
+        let modules = suite_modules(directory, &name, &root)?;
+        if modules.is_empty() {
+            found.push((
+                Target {
+                    package: package.to_string(),
+                    kind: Kind::Test,
+                    name,
+                    module: None,
+                },
+                root,
+            ));
+            continue;
+        }
+        for module in modules {
+            let file = directory
+                .join("tests")
+                .join(&name)
+                .join(format!("{module}.rs"));
+            found.push((
+                Target {
+                    package: package.to_string(),
+                    kind: Kind::Test,
+                    name: name.clone(),
+                    module: Some(module),
+                },
+                file,
+            ));
+        }
+    }
+    Ok(found)
+}
+
+/// Returns the suite modules a test binary's root file declares.
+///
+/// A binary of suite modules holds no test of its own and declares
+/// `mod <module>;` for each `tests/<name>/<module>.rs`. A root that holds a
+/// test is an ordinary suite, and any `mod` it declares is a helper it
+/// includes, not a target.
+///
+/// @param directory - the crate directory
+/// @param name - the binary's name, which is the root file's stem
+/// @param root - the root file
+fn suite_modules(directory: &Path, name: &str, root: &Path) -> Result<Vec<String>, String> {
+    if holds_a_test(root)? {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(root)
+        .map_err(|error| format!("cannot read {}: {error}", root.display()))?;
+    let mut modules = Vec::new();
+    for line in text.lines() {
+        let Some(module) = line
+            .trim()
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+        else {
+            continue;
+        };
+        if directory
+            .join("tests")
+            .join(name)
+            .join(format!("{module}.rs"))
+            .is_file()
+        {
+            modules.push(module.to_string());
+        }
+    }
+    modules.sort();
+    Ok(modules)
+}
+
+/// Returns one crate's integration target names, sorted: the stem of each
+/// `tests/*.rs`, and the directory name of each `tests/*/main.rs`.
 ///
 /// @param directory - the crate directory
 fn integration_names(directory: &Path) -> Result<Vec<String>, String> {
@@ -438,6 +668,14 @@ fn integration_names(directory: &Path) -> Result<Vec<String>, String> {
         let path = entry
             .map_err(|error| format!("cannot read {}: {error}", tests.display()))?
             .path();
+        // cargo takes `tests/<name>/main.rs` as a test target called <name>,
+        // which is how a binary of suite modules is laid out.
+        if path.is_dir() && path.join("main.rs").is_file() {
+            if let Some(name) = path.file_name().and_then(|text| text.to_str()) {
+                names.push(name.to_string());
+            }
+            continue;
+        }
         if path.extension().and_then(|text| text.to_str()) != Some("rs") {
             continue;
         }
@@ -447,6 +685,18 @@ fn integration_names(directory: &Path) -> Result<Vec<String>, String> {
     }
     names.sort();
     Ok(names)
+}
+
+/// Returns the file cargo compiles as the root of an integration target.
+///
+/// @param directory - the crate directory
+/// @param name - the target name
+fn integration_root(directory: &Path, name: &str) -> PathBuf {
+    let flat = directory.join("tests").join(format!("{name}.rs"));
+    if flat.is_file() {
+        return flat;
+    }
+    directory.join("tests").join(name).join("main.rs")
 }
 
 /// Returns the names of one crate's bin targets, sorted.
@@ -573,6 +823,7 @@ pub fn targets_holding_tests(root: &Path, members: &[String]) -> Result<BTreeSet
                     package: package.clone(),
                     kind: Kind::Bin,
                     name,
+                    module: None,
                 });
                 continue;
             }
@@ -581,6 +832,7 @@ pub fn targets_holding_tests(root: &Path, members: &[String]) -> Result<BTreeSet
                     package: package.clone(),
                     kind: Kind::Lib,
                     name: "lib".to_string(),
+                    module: None,
                 });
             } else {
                 for name in binary_names(&directory, &package)? {
@@ -588,18 +840,14 @@ pub fn targets_holding_tests(root: &Path, members: &[String]) -> Result<BTreeSet
                         package: package.clone(),
                         kind: Kind::Bin,
                         name,
+                        module: None,
                     });
                 }
             }
         }
-        for name in integration_names(&directory)? {
-            let file = directory.join("tests").join(format!("{name}.rs"));
+        for (target, file) in integration_targets(&directory, &package)? {
             if holds_a_test(&file)? {
-                holding.insert(Target {
-                    package: package.clone(),
-                    kind: Kind::Test,
-                    name,
-                });
+                holding.insert(target);
             }
         }
     }
@@ -780,7 +1028,7 @@ pub fn seeds_of(
             .iter()
             .find(|(prefix, _)| path.starts_with(prefix.as_str()))
         {
-            match integration_target(&path, prefix, package) {
+            match integration_target(map, &path, prefix, package) {
                 Some(target) => {
                     choice.direct.insert(target);
                 }
@@ -815,27 +1063,47 @@ pub fn seeds_of(
 
 /// Returns the integration target a changed path *is*, when it is one.
 ///
-/// Only a file directly under `tests/` counts. A file in a subdirectory of
-/// `tests/` is a shared module several suites include, so changing it has to
-/// seed the whole package rather than name one suite.
+/// A file directly under `tests/` is its own target, unless it is the root of a
+/// binary of suite modules: that file is the list of `mod` lines, and changing
+/// it seeds the whole package. A file one directory down is a suite module when
+/// the map has a row for it, which is how `inillucent-compat`'s suites are laid
+/// out. Anything else in a subdirectory of `tests/` is a shared helper several
+/// suites include, so changing it seeds the whole package rather than naming
+/// one suite.
 ///
+/// @param map - the selection map, to tell a suite module from a helper
 /// @param path - the changed path, with forward slashes
 /// @param prefix - the member directory it is inside, ending in a slash
 /// @param package - that member's package name
-fn integration_target(path: &str, prefix: &str, package: &str) -> Option<Target> {
+fn integration_target(map: &Map, path: &str, prefix: &str, package: &str) -> Option<Target> {
     let inside = path.strip_prefix(prefix)?;
     let name = inside.strip_prefix("tests/")?.strip_suffix(".rs")?;
-    if name.contains('/') {
-        return None;
-    }
-    Some(Target {
+    let (name, module) = match name.split_once('/') {
+        Some((binary, module)) if !module.contains('/') => (binary, Some(module.to_string())),
+        Some(_) => return None,
+        None => (name, None),
+    };
+    let target = Target {
         package: package.to_string(),
         kind: Kind::Test,
         name: name.to_string(),
-    })
+        module,
+    };
+    let holds_modules = map
+        .rows
+        .iter()
+        .any(|row| row.target.binary() == target.binary() && row.target.module.is_some());
+    match (&target.module, holds_modules) {
+        (Some(_), _) if map.row(&target).is_none() => None,
+        (None, true) => None,
+        _ => Some(target),
+    }
 }
 
-/// Chooses the targets a change has to run.
+/// Chooses every target a change can break, whatever its tier's cadence.
+///
+/// This is the closure alone, which is what a nightly run asks. A change run
+/// asks [`select_at`] with [`Cadence::Change`] instead.
 ///
 /// @param map - the selection map
 /// @param choice - what the changed paths selected
@@ -845,13 +1113,53 @@ pub fn select<'map>(
     choice: &Choice,
     graph: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<&'map Row> {
+    select_at(map, choice, graph, Cadence::Nightly)
+}
+
+/// Chooses the targets a change has to run at one cadence.
+///
+/// A row whose tier runs at `cadence` or below is selected by the closure. A
+/// `merge` row in a `change` run is selected only by a seed it covers, its own
+/// crate or its own file. A row whose tier runs above that is not selected at
+/// all. The module documentation says why.
+///
+/// A change that selects everything (a path no rule covers, or a rule that says
+/// `*`) still honours the cadence: it is every row up to `cadence`, and at
+/// least every `merge` row, because a change nobody can place is exactly the
+/// case the crash suites are for.
+///
+/// @param map - the selection map
+/// @param choice - what the changed paths selected
+/// @param graph - the reverse-dependency graph
+/// @param cadence - the cadence of the run
+pub fn select_at<'map>(
+    map: &'map Map,
+    choice: &Choice,
+    graph: &BTreeMap<String, BTreeSet<String>>,
+    cadence: Cadence,
+) -> Vec<&'map Row> {
     if choice.selects_everything {
-        return map.rows.iter().collect();
+        return map.rows_up_to(cadence.max(Cadence::Merge));
     }
     let reached = affected(graph, &choice.seeds);
     map.rows
         .iter()
         .filter(|row| {
+            let tier = map.cadence_of(&row.tier);
+            let own =
+                choice.seeds.contains(&row.target.package) || choice.direct.contains(&row.target);
+            if tier > cadence {
+                // Only a `merge` row in a `change` run is still selectable
+                // here: it runs when the change is in something it says it
+                // exercises, and never because the closure walked up to it.
+                return tier == Cadence::Merge
+                    && cadence == Cadence::Change
+                    && (own
+                        || row
+                            .covers
+                            .iter()
+                            .any(|package| choice.seeds.contains(package)));
+            }
             // Three independent reasons to run a suite, and a row needs only
             // one of them.
             //
@@ -871,9 +1179,7 @@ pub fn select<'map>(
             // any engine change puts it in the closure - and a rule that read
             // the owning package out of the closure would select all 74 of its
             // suites for every change, which is the same as having no selector.
-            row.covers.iter().any(|package| reached.contains(package))
-                || choice.seeds.contains(&row.target.package)
-                || choice.direct.contains(&row.target)
+            row.covers.iter().any(|package| reached.contains(package)) || own
         })
         .collect()
 }
@@ -1092,6 +1398,164 @@ mod tests {
             "{choice:?}"
         );
         assert!(!choice.seeds.contains("inillucent-driver"), "{choice:?}");
+    }
+
+    /// The map the cadence tests share: one tier at each cadence, and one
+    /// suite in each, all covering `top`, which sits above `bottom`.
+    fn cadenced() -> (Map, Vec<String>, Vec<CrateManifest>) {
+        let map = Map::parse(
+            "[[tier]]\nname = \"engine\"\ncadence = \"change\"\n\
+             [[tier]]\nname = \"durability\"\ncadence = \"merge\"\n\
+             [[tier]]\nname = \"nightly\"\ncadence = \"nightly\"\n\
+             [[target]]\npackage = \"harness\"\nkind = \"test\"\nname = \"quick\"\ntier = \"engine\"\ncovers = [\"top\"]\n\
+             [[target]]\npackage = \"harness\"\nkind = \"test\"\nname = \"crash\"\ntier = \"durability\"\ncovers = [\"top\"]\n\
+             [[target]]\npackage = \"harness\"\nkind = \"test\"\nname = \"story\"\ntier = \"nightly\"\ncovers = [\"top\"]\n",
+        )
+        .expect("the map parses");
+        let members = vec![
+            "crates/bottom".to_string(),
+            "crates/top".to_string(),
+            "crates/harness".to_string(),
+        ];
+        let manifests = vec![
+            manifest("bottom", &[], &[]),
+            manifest("top", &["bottom"], &[]),
+            manifest("harness", &["top"], &[]),
+        ];
+        (map, members, manifests)
+    }
+
+    /// Returns the names a change to one file selects at one cadence.
+    fn names_at(path: &str, cadence: Cadence) -> Vec<String> {
+        let (map, members, manifests) = cadenced();
+        let choice = seeds_of(&map, &members, &manifests, &[path.to_string()]);
+        let graph = dependents(&manifests);
+        select_at(&map, &choice, &graph, cadence)
+            .iter()
+            .map(|row| row.target.name.clone())
+            .collect()
+    }
+
+    /// A change below a `merge` row's cover reaches it by the closure, and a
+    /// change run does not run it for that. The merge run does.
+    #[test]
+    fn a_merge_row_needs_a_seed_in_a_change_run() {
+        assert_eq!(
+            names_at("crates/bottom/src/lib.rs", Cadence::Change),
+            vec!["quick".to_string()]
+        );
+        assert_eq!(
+            names_at("crates/bottom/src/lib.rs", Cadence::Merge),
+            vec!["quick".to_string(), "crash".to_string()]
+        );
+    }
+
+    /// A change in the package a `merge` row covers selects it in a change run.
+    #[test]
+    fn a_merge_row_runs_when_its_cover_changed() {
+        assert_eq!(
+            names_at("crates/top/src/lib.rs", Cadence::Change),
+            vec!["quick".to_string(), "crash".to_string()]
+        );
+    }
+
+    /// A `nightly` row is never selected by a change or a merge run, even by
+    /// its own file, and the nightly run selects it by the closure.
+    #[test]
+    fn a_nightly_row_runs_only_at_the_nightly_cadence() {
+        assert!(!names_at("crates/top/src/lib.rs", Cadence::Merge).contains(&"story".to_string()));
+        assert!(!names_at("crates/harness/tests/story.rs", Cadence::Change)
+            .contains(&"story".to_string()));
+        assert!(
+            names_at("crates/bottom/src/lib.rs", Cadence::Nightly).contains(&"story".to_string())
+        );
+    }
+
+    /// A path no rule covers selects every `change` and `merge` row, and no
+    /// `nightly` row, unless the run is the nightly one.
+    #[test]
+    fn selecting_everything_still_leaves_the_nightly_rows_to_the_nightly() {
+        assert_eq!(
+            names_at("newthing/x.rs", Cadence::Change),
+            vec!["quick".to_string(), "crash".to_string()]
+        );
+        assert_eq!(names_at("newthing/x.rs", Cadence::Nightly).len(), 3);
+    }
+
+    /// A tier with no cadence is refused, so nobody has to guess which default
+    /// was meant.
+    #[test]
+    fn a_tier_without_a_cadence_is_refused() {
+        let refused = Map::parse(
+            "[[tier]]\nname = \"engine\"\n\
+             [[target]]\npackage = \"a\"\nkind = \"lib\"\ntier = \"engine\"\n",
+        );
+        assert_eq!(
+            refused.err(),
+            Some("tier `engine` has no cadence".to_string())
+        );
+    }
+
+    /// Editing a suite module runs that module's target, editing the binary's
+    /// list of modules seeds the package, and a helper one directory down that
+    /// is not a suite seeds the package too.
+    #[test]
+    fn a_suite_module_is_its_own_target() {
+        let map = Map::parse(
+            "[[target]]\npackage = \"a\"\nkind = \"test\"\nname = \"engine\"\nmodule = \"one\"\ntier = \"engine\"\ncovers = [\"z\"]\n\
+             [[target]]\npackage = \"a\"\nkind = \"test\"\nname = \"engine\"\nmodule = \"two\"\ntier = \"engine\"\ncovers = [\"z\"]\n",
+        )
+        .expect("the map parses");
+        let members = vec!["crates/a".to_string()];
+        let manifests = vec![manifest("a", &[], &[])];
+        let module = seeds_of(
+            &map,
+            &members,
+            &manifests,
+            &["crates/a/tests/engine/one.rs".to_string()],
+        );
+        assert!(module.seeds.is_empty(), "{module:?}");
+        let labels: Vec<String> = module.direct.iter().map(Target::label).collect();
+        assert_eq!(labels, vec!["a::engine::one".to_string()]);
+
+        let list = seeds_of(
+            &map,
+            &members,
+            &manifests,
+            &["crates/a/tests/engine.rs".to_string()],
+        );
+        assert!(
+            list.seeds.contains("a") && list.direct.is_empty(),
+            "{list:?}"
+        );
+
+        let helper = seeds_of(
+            &map,
+            &members,
+            &manifests,
+            &["crates/a/tests/engine/common.rs".to_string()],
+        );
+        assert!(
+            helper.seeds.contains("a") && helper.direct.is_empty(),
+            "{helper:?}"
+        );
+    }
+
+    /// A module row's label names the binary and the module, and only a test
+    /// row may have one.
+    #[test]
+    fn a_module_row_is_labelled_by_binary_and_module() {
+        let map = Map::parse(
+            "[[target]]\npackage = \"a\"\nkind = \"test\"\nname = \"engine\"\nmodule = \"one\"\ntier = \"engine\"\n",
+        )
+        .expect("the map parses");
+        let row = map.rows.first().expect("one row");
+        assert_eq!(row.target.label(), "a::engine::one");
+        assert_eq!(row.target.binary().label(), "a::engine");
+        assert!(Map::parse(
+            "[[target]]\npackage = \"a\"\nkind = \"lib\"\nmodule = \"one\"\ntier = \"unit\"\n"
+        )
+        .is_err());
     }
 
     /// A row with no `covers` covers its own package, which is what makes the

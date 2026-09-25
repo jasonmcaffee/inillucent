@@ -42,7 +42,7 @@
 //! because their crates have no library to put them in.
 //!
 //! That is a claim about every file rather than a habit, so it is checked:
-//! `crates/inillucent-compat/tests/selection.rs` attributes every source file
+//! `crates/inillucent-compat/tests/tooling/selection.rs` attributes every source file
 //! carrying a `#[test]` to the target that compiles it and fails if one lands
 //! on a target the map does not name. A test cannot hide in a binary here.
 //!
@@ -55,7 +55,10 @@
 //!   `durability`, `e2e`, `perf`, `tooling`.
 //! - `--target` runs one suite by name, for when you already know which.
 //!
-//! With none of them, it runs everything.
+//! With none of them, it runs every tier whose cadence is `change` or `merge`,
+//! which is everything but the `nightly` tier. `--cadence` says which cadence a
+//! run is at; `selection::Cadence` says what each one selects and why the
+//! nightly and crash suites stopped running on every change.
 //!
 //! ## The failure this runner is most careful about
 //!
@@ -95,12 +98,13 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use inillucent_compat::layering;
-use inillucent_compat::selection::{self, Kind, Map, Row, Target};
+use inillucent_compat::selection::{self, Cadence, Kind, Map, Row, Target};
 use inillucent_compat::supervise::{self, Limits, Stopped};
+use inillucent_compat::testplan::{self, json_field, json_text, Artifact};
 use inillucent_compat::verdict::{self, Undetermined, Verdict};
 use inillucent_compat::workspace_root;
 use inillucent_scalar::json::node::Node;
-use inillucent_scalar::json::{parse, render};
+use inillucent_scalar::json::parse;
 
 /// How long a target is assumed to take when the ledger has never seen it.
 ///
@@ -118,6 +122,9 @@ struct Options {
     targets: Vec<String>,
     /// Select from the working tree's changes against this revision.
     changed: Option<String>,
+    /// Which cadence to run at; `None` is `change` with `--changed` and
+    /// `merge` without it. See `selection::Cadence`.
+    cadence: Option<Cadence>,
     /// How many test binaries to run at once.
     jobs: usize,
     /// How many threads each test binary uses internally.
@@ -130,14 +137,19 @@ struct Options {
     strict: bool,
     /// Prerequisites this machine declares it cannot have, from `--absent`.
     ///
-    /// A suite that skipped for want of one of these is reported under its
-    /// own heading and does not make a strict run red. Every other missing
-    /// prerequisite still does.
+    /// Added to what `tests/prerequisites.local.toml` declares. A suite that
+    /// skipped for want of one of these is reported under its own heading and
+    /// does not make a strict run red. Every other missing prerequisite still
+    /// does. CI passes them here, per runner, because it has no local file.
     absent: Vec<String>,
     /// Write the measured times back to the ledger.
     record: bool,
     /// Skip the build step, because the caller has just built.
     no_build: bool,
+    /// Read what was built from this artifact list and start no cargo at all.
+    artifacts: Option<PathBuf>,
+    /// Write the verdict as JSON here, for the nightly and the release.
+    summary: Option<PathBuf>,
     /// Pass a filter through to each test binary.
     filter: Option<String>,
     /// What `--timeout` asked for, in seconds.
@@ -159,6 +171,7 @@ impl Options {
             tiers: other.tiers.clone(),
             targets: other.targets.clone(),
             changed: other.changed.clone(),
+            cadence: other.cadence,
             jobs: other.jobs,
             test_threads: other.test_threads,
             list: other.list,
@@ -167,6 +180,8 @@ impl Options {
             absent: other.absent.clone(),
             record: other.record,
             no_build: other.no_build,
+            artifacts: other.artifacts.clone(),
+            summary: other.summary.clone(),
             filter: other.filter.clone(),
             timeout: other.timeout,
         }
@@ -179,6 +194,7 @@ impl Default for Options {
             tiers: Vec::new(),
             targets: Vec::new(),
             changed: None,
+            cadence: None,
             jobs: std::thread::available_parallelism()
                 .map(std::num::NonZeroUsize::get)
                 .unwrap_or(4),
@@ -195,6 +211,8 @@ impl Default for Options {
             absent: Vec::new(),
             record: false,
             no_build: false,
+            artifacts: None,
+            summary: None,
             filter: None,
             timeout: None,
         }
@@ -250,6 +268,12 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
                     _ => options.changed = Some("HEAD".to_string()),
                 }
             }
+            "--cadence" => {
+                let value = take("--cadence")?;
+                options.cadence = Some(Cadence::parse(&value).ok_or_else(|| {
+                    format!("`--cadence` wants change, merge or nightly, not `{value}`")
+                })?);
+            }
             "--all" => {
                 options.tiers.clear();
                 options.targets.clear();
@@ -261,6 +285,8 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             "--absent" => options.absent.push(take("--absent")?),
             "--record" => options.record = true,
             "--no-build" => options.no_build = true,
+            "--artifacts" => options.artifacts = Some(PathBuf::from(take("--artifacts")?)),
+            "--summary" => options.summary = Some(PathBuf::from(take("--summary")?)),
             "--help" | "-h" => return Err(usage()),
             other => return Err(format!("unknown option `{other}`\n\n{}", usage())),
         }
@@ -275,8 +301,12 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
 fn usage() -> String {
     "inillucent-testrun - run the workspace's tests in parallel\n\
      \n\
-     Narrowing (with none of these, everything runs):\n  \
+     Narrowing (with none of these, every change and merge tier runs):\n  \
        --changed [<rev>]   run what the changes since <rev> (default HEAD) can break\n  \
+       --cadence <when>    change, merge or nightly: the highest cadence to run.\n                      \
+       With --changed the default is change: merge tiers run only for\n                      \
+       a changed crate they cover, nightly tiers never. Without it the\n                      \
+       default is merge: everything but the nightly tier\n  \
        --tier <name>       run one tier; repeatable\n  \
        --target <label>    run one target as `package::name`; repeatable\n  \
        --filter <text>     pass a name filter to each test binary\n\
@@ -285,6 +315,8 @@ fn usage() -> String {
        --jobs <n>          test binaries at once (default: the machine's cores)\n  \
        --test-threads <n>  threads inside each binary (default: 2)\n  \
        --no-build          do not build first\n  \
+       --artifacts <file>  run the executables this artifact list names and start no\n                      \
+       cargo; every run writes one and names it in INILLUCENT_TESTRUN_ARTIFACTS\n  \
        --timeout <secs>    how long one target may run; 0 never stops one\n\
      \n\
      Reporting:\n  \
@@ -293,7 +325,12 @@ fn usage() -> String {
        --strict            fail when a selected suite's prerequisite is missing\n  \
        --absent <name>     a prerequisite this machine cannot have: a suite that\n                      \
        skips for it does not fail --strict; repeatable\n  \
-       --record            write the measured times to tests/timings.toml\n\
+       --record            write the measured times to tests/timings.toml\n  \
+       --summary <file>    write the verdict, the failures and the declared absences as JSON\n\
+     \n\
+     Declared absences: a strict run does not fail for a suite whose every missing\n\
+     prerequisite is listed in the gitignored tests/prerequisites.local.toml as\n\
+     `absent = [\"mysql\", ...]`. It reports those suites under their own heading.\n\
      \n\
      Exit codes:\n  \
        0                   everything selected ran and passed\n  \
@@ -325,6 +362,9 @@ struct Built {
     executable: PathBuf,
     /// The directory `cargo` would run it from.
     directory: PathBuf,
+    /// The test names to pass with `--exact`, for a target that is one module
+    /// of a binary; `None` runs the whole binary.
+    tests: Option<Vec<String>>,
 }
 
 /// What one finished run produced.
@@ -406,17 +446,12 @@ fn main() -> ExitCode {
 fn run(options: &Options) -> Result<bool, String> {
     let root = workspace_root();
     let map = Map::load(&root.join("tests/selection.toml"))?;
-    refuse_unknown_absent(&map, &options.absent)?;
+    // Read before anything runs, so a misspelt name refuses the run instead
+    // of excusing nothing at the end of it.
+    let declared = declared_absent(&root, &map, &options.absent)?;
 
     if options.list_tiers {
-        for tier in &map.tiers {
-            println!(
-                "{:<12} {}{}",
-                tier.name,
-                tier.purpose,
-                if tier.exclusive { "  [runs alone]" } else { "" }
-            );
-        }
+        print_tiers(&map);
         return Ok(true);
     }
 
@@ -426,25 +461,11 @@ fn run(options: &Options) -> Result<bool, String> {
     }
 
     if options.list {
-        for row in &selected {
-            println!(
-                "{:<10} {:<44} covers {}",
-                row.tier,
-                row.target.label(),
-                row.covers.iter().cloned().collect::<Vec<_>>().join(", ")
-            );
-        }
-        println!("\n{} target(s)", selected.len());
+        print_selection(&selected);
         return Ok(true);
     }
 
-    // Before either cargo call, because `locate` compiles too: it asks cargo
-    // what it built, and cargo answers that by building.
-    import_msvc_environment()?;
-    if !options.no_build {
-        build(&root, &selected)?;
-    }
-    let built = locate(&root, &selected)?;
+    let built = executables_for(&root, &map, &selected, options)?;
     let ledger = read_ledger(&root.join("tests/timings.toml"));
     // Kept by target so the retry pass can start one again. The workers take
     // their own clone, so nothing here is a second opinion about what was built.
@@ -455,31 +476,7 @@ fn run(options: &Options) -> Result<bool, String> {
     let ordered = schedule(built, &ledger);
     let budgets = budgets(&executables, &ledger, options);
 
-    // Split off the targets whose tier asked for the machine to itself. They
-    // go last, one at a time: see `selection::Tier::exclusive` for why a timing
-    // guard cannot share a machine, and why widening its threshold instead
-    // would only have made it stop guarding.
-    let exclusive_tiers: BTreeSet<&str> = map
-        .tiers
-        .iter()
-        .filter(|tier| tier.exclusive)
-        .map(|tier| tier.name.as_str())
-        .collect();
-    let mut shared = Vec::new();
-    let mut alone = Vec::new();
-    for built in ordered {
-        // A target runs alone because its tier asked for the machine, or
-        // because the row itself did. The second is for a target that starts a
-        // nested run: see `selection::Row::alone`.
-        let solo = map
-            .row(&built.target)
-            .is_some_and(|row| exclusive_tiers.contains(row.tier.as_str()) || row.alone);
-        if solo {
-            alone.push(built);
-        } else {
-            shared.push(built);
-        }
-    }
+    let (shared, alone) = split_alone(&map, ordered);
 
     println!(
         "running {} target(s), {} at a time, {} thread(s) each{}",
@@ -515,7 +512,16 @@ fn run(options: &Options) -> Result<bool, String> {
     let outcomes = settle_undetermined(outcomes, &executables, options, &budgets);
     let wall = started.elapsed();
 
-    report(&outcomes, wall, &map, options.strict, &options.absent);
+    let absences = absences(&outcomes, &map, &declared);
+    report(&outcomes, wall, options.strict, &absences);
+    if let Some(file) = &options.summary {
+        // Red rather than exit 2, for the reason `--record` gives below: the
+        // run happened, and a summary nobody can read is a run nobody can act on.
+        if let Err(reason) = write_summary(file, &outcomes, wall, options.strict, &absences) {
+            eprintln!("inillucent-testrun: the summary was not written: {reason}");
+            return Ok(false);
+        }
+    }
     if options.record {
         // **A ledger that could not be written is not "the run did not happen"
         // (task-2047).** The targets ran and the report above is what they
@@ -535,30 +541,208 @@ fn run(options: &Options) -> Result<bool, String> {
     // "the runner could not tell" is not evidence that anything passed. What
     // stops that being the old wrong red is the retry above: a target only stays
     // undetermined here when a second, solitary attempt could not read it either.
+    //
+    // A target excused by a declared absence is the one exception. Under
+    // `--strict` its skips panic, so its verdict is FAILED, and every one of
+    // those failures is the strict skip marker naming something this machine
+    // says it does not have. It evidenced nothing, it is reported as such, and
+    // it does not make the run red.
     let red = outcomes.iter().any(is_red);
-    let hollow = options.strict
-        && !unexcused(
-            missing_prerequisites(&outcomes, &map),
-            &map,
-            &options.absent,
-        )
-        .is_empty();
+    let hollow = options.strict && !absences.unexcused.is_empty();
     if !red && nothing_was_graded(&outcomes) {
         return Err(graded_nothing(options, outcomes.len()));
     }
     Ok(!red && !hollow)
 }
 
+/// Prints the tiers, their cadence and what each is for.
+///
+/// @param map - the selection map
+fn print_tiers(map: &Map) {
+    for tier in &map.tiers {
+        println!(
+            "{:<12} {:<8} {}{}",
+            tier.name,
+            tier.cadence.as_str(),
+            tier.purpose,
+            if tier.exclusive { "  [runs alone]" } else { "" }
+        );
+    }
+}
+
+/// Prints the selection, one target per line, for `--list`.
+///
+/// @param selected - the rows the run would start
+fn print_selection(selected: &[&Row]) {
+    for row in selected {
+        println!(
+            "{:<10} {:<44} covers {}",
+            row.tier,
+            row.target.label(),
+            row.covers.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    println!(
+        "
+{} target(s)",
+        selected.len()
+    );
+}
+
+/// Returns the executable for every selected row, building them first unless
+/// the run was handed an artifact list.
+///
+/// **A nested run starts no cargo (task-2114 C2).** Given `--artifacts`, the
+/// executables come from the list the outer runner wrote. Otherwise the rows
+/// are built, located, and the list is written for any nested run a suite
+/// starts. Either way `INILLUCENT_TESTRUN_ARTIFACTS` names the list for the
+/// children.
+///
+/// @param root - the workspace root
+/// @param map - the selection map
+/// @param selected - the rows the run will start
+/// @param options - what the command line asked for
+fn executables_for(
+    root: &Path,
+    map: &Map,
+    selected: &[&Row],
+    options: &Options,
+) -> Result<Vec<Built>, String> {
+    if let Some(file) = &options.artifacts {
+        std::env::set_var(testplan::ARTIFACTS_VARIABLE, file);
+        let mut built = pick(&read_artifact_list(file)?, selected)?;
+        list_module_tests(&mut built, options.filter.as_deref())?;
+        return Ok(built);
+    }
+    let to_build = testplan::build_set(map, selected);
+    // Before either cargo call, because `locate` compiles too: it asks cargo
+    // what it built, and cargo answers that by building.
+    import_msvc_environment()?;
+    if !options.no_build {
+        build(root, &to_build)?;
+    }
+    let located = locate(root, &to_build)?;
+    let file = write_artifact_list(root, &located)?;
+    std::env::set_var(testplan::ARTIFACTS_VARIABLE, &file);
+    let mut built = pick(&located, selected)?;
+    list_module_tests(&mut built, options.filter.as_deref())?;
+    Ok(built)
+}
+
+/// Fills in each module target's test names, listing each binary once.
+///
+/// A listing takes milliseconds, and it is what lets one binary per tier run
+/// one suite at a time: the module's own names go to `--exact`, so the process
+/// runs that suite and no other.
+///
+/// @param built - the targets, some of them modules
+/// @param filter - the runner's `--filter`, if any
+fn list_module_tests(built: &mut [Built], filter: Option<&str>) -> Result<(), String> {
+    let mut listings: BTreeMap<PathBuf, String> = BTreeMap::new();
+    for one in built.iter_mut() {
+        let Some(module) = one.target.module.clone() else {
+            continue;
+        };
+        if !listings.contains_key(&one.executable) {
+            let output = Command::new(&one.executable)
+                .current_dir(&one.directory)
+                .args(["--list", "--format", "terse"])
+                .stderr(Stdio::inherit())
+                .output()
+                .map_err(|error| format!("cannot list {}: {error}", one.executable.display()))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "{} could not list its tests",
+                    one.executable.display()
+                ));
+            }
+            listings.insert(
+                one.executable.clone(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+            );
+        }
+        let listing = listings
+            .get(&one.executable)
+            .map(String::as_str)
+            .unwrap_or("");
+        one.tests = Some(testplan::module_tests(listing, &module, filter));
+    }
+    Ok(())
+}
+
+/// Splits the targets into those that share the machine and those that run
+/// alone at the end.
+///
+/// A target runs alone because its tier asked for the machine, or because the
+/// row itself did. See `selection::Tier::exclusive` for why a timing guard
+/// cannot share a machine, and why widening its threshold instead would only
+/// have made it stop guarding.
+///
+/// @param map - the selection map
+/// @param ordered - the targets, longest first
+fn split_alone(map: &Map, ordered: Vec<Built>) -> (Vec<Built>, Vec<Built>) {
+    let exclusive_tiers: BTreeSet<&str> = map
+        .tiers
+        .iter()
+        .filter(|tier| tier.exclusive)
+        .map(|tier| tier.name.as_str())
+        .collect();
+    let mut shared = Vec::new();
+    let mut alone = Vec::new();
+    for built in ordered {
+        let solo = map
+            .row(&built.target)
+            .is_some_and(|row| exclusive_tiers.contains(row.tier.as_str()) || row.alone);
+        if solo {
+            alone.push(built);
+        } else {
+            shared.push(built);
+        }
+    }
+    (shared, alone)
+}
+
+/// Returns what this machine declares absent: the local file and `--absent`.
+///
+/// A name no row of the map requires is refused, which is exit code 2. A
+/// misspelt name would otherwise excuse nothing and read, in the workflow or
+/// the file that names it, as if it excused something.
+///
+/// @param root - the workspace root
+/// @param map - the selection map, whose rows name every prerequisite
+/// @param absent - what `--absent` named
+fn declared_absent(root: &Path, map: &Map, absent: &[String]) -> Result<Vec<String>, String> {
+    let mut declared = testplan::read_declared_absences(root)?;
+    for name in absent {
+        if !declared.contains(name) {
+            declared.push(name.clone());
+        }
+    }
+    declared.sort();
+    let known = map.prerequisites();
+    let unknown: Vec<String> = declared
+        .iter()
+        .filter(|name| !known.contains(*name))
+        .map(|name| format!("`{name}`"))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(declared);
+    }
+    Err(format!(
+        "{} declared absent, by `--absent` or in {}, and no row of tests/selection.toml \
+         requires it. The names accepted are: {}",
+        unknown.join(", "),
+        testplan::DECLARED_ABSENCES_FILE,
+        known.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
 /// Reports whether a target found a defect or could not be read.
 ///
 /// A target that failed only because `--strict` turned its skips into failed
 /// tests is not red: it evidenced nothing, and `missing_prerequisites` is what
-/// counts it. Everything else that is not green is red, undetermined included.
-///
-/// Counting such a target as red would make `--absent` change the report and
-/// not the exit code: a skip for a prerequisite the workflow declared absent
-/// would still fail the run. `hollow` in `run` is where it is graded instead,
-/// and that is the one place `--absent` can excuse it.
+/// counts it, where a declared absence can excuse it. Everything else that is
+/// not green is red, undetermined included.
 ///
 /// @param outcome - the target that ran
 fn is_red(outcome: &Outcome) -> bool {
@@ -570,6 +754,144 @@ fn is_red(outcome: &Outcome) -> bool {
             &outcome.output,
             failed_count(&outcome.output),
         ))
+}
+
+/// The targets that ran without a prerequisite, split by whether the machine
+/// declared that prerequisite absent.
+struct Absences<'run> {
+    /// Hollow targets nothing excuses; `--strict` fails the run for these.
+    unexcused: Vec<(&'run Outcome, Vec<String>)>,
+    /// Hollow targets whose every missing thing is declared absent.
+    excused: Vec<(&'run Outcome, Vec<String>)>,
+    /// What `tests/prerequisites.local.toml` declares, for the report.
+    declared: Vec<String>,
+    /// How many selected targets declare a prerequisite at all.
+    declaring: usize,
+}
+
+/// Writes the verdict as JSON, for a program that has to act on it.
+///
+/// The nightly reads this to decide green or red and to name the failing
+/// targets in the ticket it files, and the release reads the nightly's copy.
+/// Parsing the text report instead would make its wording an interface.
+///
+/// `result` is `red` when a target failed or could not be read, `hollow` when
+/// nothing failed and a strict run found a suite without its prerequisite that
+/// no declaration excuses, and `green` otherwise.
+///
+/// @param file - where to write it
+/// @param outcomes - what ran
+/// @param wall - how long the run took
+/// @param strict - whether this was a strict run
+/// @param absences - the hollow targets, split by the declaration
+fn write_summary(
+    file: &Path,
+    outcomes: &[Outcome],
+    wall: Duration,
+    strict: bool,
+    absences: &Absences,
+) -> Result<(), String> {
+    let strictly_skipped = |outcome: &Outcome| {
+        inillucent_compat::differential::every_failure_is_a_strict_skip(
+            &outcome.output,
+            failed_count(&outcome.output),
+        )
+    };
+    let failed: Vec<String> = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome.verdict, Verdict::Failed) && !strictly_skipped(outcome))
+        .map(|outcome| testplan::json_string(&outcome.target.label()))
+        .collect();
+    let undetermined: Vec<String> = outcomes
+        .iter()
+        .filter(|outcome| outcome.verdict.undetermined().is_some())
+        .map(|outcome| testplan::json_string(&outcome.target.label()))
+        .collect();
+    let listed = |entries: &[(&Outcome, Vec<String>)]| -> String {
+        entries
+            .iter()
+            .map(|(outcome, said)| {
+                format!(
+                    "{{\"target\": {}, \"missing\": [{}]}}",
+                    testplan::json_string(&outcome.target.label()),
+                    said.iter()
+                        .map(|entry| testplan::json_string(entry))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let result = if !failed.is_empty() || !undetermined.is_empty() {
+        "red"
+    } else if strict && !absences.unexcused.is_empty() {
+        "hollow"
+    } else {
+        "green"
+    };
+    let text = format!(
+        "{{\n  \"result\": \"{result}\",\n  \"strict\": {strict},\n  \"targets\": {},\n  \
+         \"tests\": {},\n  \"wall_seconds\": {:.1},\n  \"failed\": [{}],\n  \
+         \"undetermined\": [{}],\n  \"hollow\": [{}],\n  \"declared_absent\": [{}],\n  \
+         \"not_evidenced_by_declaration\": [{}]\n}}\n",
+        outcomes.len(),
+        outcomes.iter().map(|outcome| outcome.ran).sum::<usize>(),
+        wall.as_secs_f64(),
+        failed.join(", "),
+        undetermined.join(", "),
+        listed(&absences.unexcused),
+        absences
+            .declared
+            .iter()
+            .map(|name| testplan::json_string(name))
+            .collect::<Vec<_>>()
+            .join(", "),
+        listed(&absences.excused),
+    );
+    if let Some(parent) = file.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+        }
+    }
+    std::fs::write(file, text).map_err(|error| format!("cannot write {}: {error}", file.display()))
+}
+
+/// Sorts the hollow targets into excused and not.
+///
+/// @param outcomes - what ran
+/// @param map - the selection map, for what each target requires
+/// @param declared - what this machine declares absent
+fn absences<'run>(outcomes: &'run [Outcome], map: &Map, declared: &[String]) -> Absences<'run> {
+    let mut split = Absences {
+        unexcused: Vec::new(),
+        excused: Vec::new(),
+        declared: declared.to_vec(),
+        declaring: outcomes
+            .iter()
+            .filter(|outcome| {
+                map.row(&outcome.target)
+                    .is_some_and(|row| !row.requires.is_empty())
+            })
+            .count(),
+    };
+    for (outcome, said) in missing_prerequisites(outcomes, map) {
+        // Matched on the row, not on the suite's own skip sentence: the
+        // sentence is prose and the row is a name. A suite requiring two
+        // things, one of them declared, is excused whichever it was missing,
+        // which is why a declaration is for what a machine cannot have and not
+        // for what a setup step forgot to build.
+        if map
+            .row(&outcome.target)
+            .is_some_and(|row| row.needs_any_of(declared))
+        {
+            split.excused.push((outcome, said));
+        } else {
+            split.unexcused.push((outcome, said));
+        }
+    }
+    split
 }
 
 /// Returns whether every target that ran counted no test.
@@ -621,6 +943,7 @@ fn graded_nothing(options: &Options, targets: usize) -> String {
 /// @param map - the selection map
 /// @param options - what the command line asked for
 fn choose<'map>(root: &Path, map: &'map Map, options: &Options) -> Result<Vec<&'map Row>, String> {
+    let cadence = run_cadence(map, options);
     let mut rows: Vec<&Row> = if let Some(revision) = &options.changed {
         let members = layering::workspace_members(root)?;
         let manifests = layering::read_members(root, &members)?;
@@ -649,9 +972,9 @@ fn choose<'map>(root: &Path, map: &'map Map, options: &Options) -> Result<Vec<&'
                 selection::affected(&graph, &choice.seeds).len()
             );
         }
-        selection::select(map, &choice, &graph)
+        selection::select_at(map, &choice, &graph, cadence)
     } else {
-        map.rows.iter().collect()
+        map.rows_up_to(cadence)
     };
 
     if !options.targets.is_empty() {
@@ -675,10 +998,37 @@ fn choose<'map>(root: &Path, map: &'map Map, options: &Options) -> Result<Vec<&'
     Ok(rows)
 }
 
+/// Returns the cadence this run selects at.
+///
+/// `--cadence` when given. Otherwise `change` for `--changed`, which is the
+/// ticket loop, and `merge` for a run with no `--changed`, which is everything
+/// but the nightly tier. A tier or a target named on the command line raises it
+/// to that tier's own cadence, so `--tier nightly` still runs the nightly tier
+/// and `--target` still runs a nightly story by name.
+///
+/// @param map - the selection map
+/// @param options - what the command line asked for
+fn run_cadence(map: &Map, options: &Options) -> Cadence {
+    let mut cadence = options.cadence.unwrap_or(if options.changed.is_some() {
+        Cadence::Change
+    } else {
+        Cadence::Merge
+    });
+    for tier in &options.tiers {
+        cadence = cadence.max(map.cadence_of(tier));
+    }
+    for row in &map.rows {
+        if options.targets.contains(&row.target.label()) {
+            cadence = cadence.max(map.cadence_of(&row.tier));
+        }
+    }
+    cadence
+}
+
 /// Answers a selection that came back empty.
 ///
 /// **A request that could not be honoured is not a passing run (task-2047).**
-/// `--target inillucent-compat::dml --tier smoke` names a real target and a
+/// `--target inillucent-compat::engine::dml --tier smoke` names a real target and a
 /// real tier, so neither guard in `choose` fires - those catch a name the map
 /// does not hold at all - and the intersection of the two is empty. The runner
 /// printed `nothing selected` and exited zero, which is the shape
@@ -875,34 +1225,55 @@ fn changed_paths(root: &Path, revision: &str) -> Result<Vec<String>, String> {
     Ok(paths.into_iter().collect())
 }
 
-/// Builds every test binary, and the two programs the shell suites run.
+/// Builds the selected test targets, and the programs when a selected suite
+/// starts one.
 ///
-/// The second half is the only build of the programs in a run. The suites that
-/// drive a *program* rather than a library find it through
+/// **Only what was selected (task-2114 C3).** This was `cargo test --workspace
+/// --no-run --lib --tests` whatever the selection, so a one line change in
+/// `inillucent-cli` linked all 227 test binaries and every run compiled
+/// `inillucent-bench` with `ort`, `tokenizers` and oniguruma. The arguments now
+/// come from `testplan::test_arguments`, which names each selected package and
+/// target once. A run that selects no `inillucent-bench` row does not compile
+/// it, and so does not need the MSVC environment either.
+///
+/// `--lib` and named targets and not a bare `--no-run`. A bare one also builds
+/// the plain binaries, and one of those is *this program*: cargo cannot replace
+/// an executable that is currently running, so the runner's own build step
+/// failed with "Access is denied" trying to overwrite itself. `--bin <name>`
+/// builds the test harness compiled from that binary's sources, which is where
+/// `inillucent-bench` and `inillucent-shell` keep their tests.
+///
+/// The second half builds the programs the shell suites run, and is the only
+/// build of them in a run. The suites that drive a program find it through
 /// `cliproc::program`, and `run_one` sets `cliproc::PROGRAMS_BUILT` so that
 /// function builds nothing: a build from inside one suite that had to relink a
 /// program another suite was running failed on Windows (task-2106).
 ///
+/// **The features ride on the same build (task-1913).** A test behind a feature
+/// the build does not turn on is in no binary at all, and `inillucent-core` had
+/// twenty-seven such tests that had never run. The rows that name a feature put
+/// it in the argument list, so the one build compiles them.
+///
 /// @param root - the workspace root
-/// @param rows - the rows that were selected, for the features they name
+/// @param rows - the rows to build, from `testplan::build_set`
 fn build(root: &Path, rows: &[&Row]) -> Result<(), String> {
-    println!("building test targets");
+    let arguments = testplan::test_arguments(rows);
+    println!(
+        "building test targets: cargo test --no-run {}",
+        arguments.join(" ")
+    );
     let status = Command::new(cargo())
         .current_dir(root)
-        // `--lib --tests` and not a bare `--no-run`. A bare one also builds the
-        // plain binaries, and one of those is *this program*: cargo cannot
-        // replace an executable that is currently running, so the runner's own
-        // build step failed with "Access is denied" trying to overwrite itself.
-        // `--tests` still builds the test harness compiled from each binary's
-        // sources, which is what `inillucent-bench` and `inillucent-shell` keep
-        // their tests in; it just does not build the binaries themselves. The
-        // two programs the shell suites actually execute are built below, by
-        // name.
-        .args(["test", "--workspace", "--no-run", "--lib", "--tests"])
+        .args(["test", "--no-run"])
+        .args(&arguments)
         .status()
         .map_err(|error| format!("cannot run cargo: {error}"))?;
     if !status.success() {
         return Err("the build failed".to_string());
+    }
+    if !testplan::needs_programs(rows) {
+        println!("no selected suite starts a program, so inillucent-cli is not built");
+        return Ok(());
     }
     let status = Command::new(cargo())
         .current_dir(root)
@@ -918,47 +1289,7 @@ fn build(root: &Path, rows: &[&Row]) -> Result<(), String> {
     if !status.success() {
         return Err("building the shell and the C ABI failed".to_string());
     }
-    // **A second pass for the targets whose tests are behind a feature
-    // (task-1913).** The build above is the default one, and a test behind a
-    // feature it does not turn on is in no binary at all - not skipped, not
-    // reported, simply absent, while its source reads as coverage.
-    // `inillucent-core` had twenty-seven such tests and `inillucent-search`
-    // three, and none of them had ever run.
-    let features = wanted_features(rows);
-    if !features.is_empty() {
-        println!("building the feature targets: {}", features.join(", "));
-        let status = Command::new(cargo())
-            .current_dir(root)
-            .args(["test", "--workspace", "--no-run", "--lib", "--tests"])
-            .arg("--features")
-            .arg(features.join(","))
-            .status()
-            .map_err(|error| format!("cannot run cargo: {error}"))?;
-        if !status.success() {
-            return Err(format!(
-                "building with the features {} failed",
-                features.join(", ")
-            ));
-        }
-    }
     Ok(())
-}
-
-/// Returns every feature the selected rows ask for, in one sorted list.
-///
-/// One list rather than one build per row: cargo unifies features across a
-/// workspace build anyway, so asking for them together is the same compilation
-/// and one pass instead of several.
-///
-/// @param rows - the rows that were selected
-fn wanted_features(rows: &[&Row]) -> Vec<String> {
-    let mut wanted: BTreeSet<String> = BTreeSet::new();
-    for row in rows {
-        for feature in &row.features {
-            wanted.insert(feature.clone());
-        }
-    }
-    wanted.into_iter().collect()
 }
 
 /// Returns the cargo to invoke.
@@ -972,28 +1303,24 @@ fn cargo() -> String {
 /// JSON parser. Guessing at `target/debug/deps/<name>-<hash>` would be guessing
 /// at a hash and at which of several stale copies is the current one.
 ///
+/// **The same arguments the build used, or this finds the wrong binaries.** A
+/// different feature set is a different compilation with a different hash, so
+/// asking without them returns the default executables, which is how a run
+/// could build the feature tests and then not run them (task-1913). A wider
+/// target set would build what the narrowed build left out.
+///
+/// Every executable cargo reports comes back, not only the rows asked for:
+/// `--lib` builds the library harness of every named package, and the artifact
+/// list a nested run reads should hold everything that exists.
+///
 /// @param root - the workspace root
-/// @param rows - the rows that were selected
-fn locate(root: &Path, rows: &[&Row]) -> Result<Vec<Built>, String> {
-    let mut command = Command::new(cargo());
-    command.current_dir(root).args([
-        "test",
-        "--workspace",
-        "--no-run",
-        "--lib",
-        "--tests",
-        "--message-format=json",
-    ]);
-    // **The same features the build used, or this finds the wrong binaries.**
-    // A different feature set is a different compilation with a different
-    // hash, so asking without them returns the default executables - which is
-    // how a run could build the feature tests and then not run them
-    // (task-1913).
-    let features = wanted_features(rows);
-    if !features.is_empty() {
-        command.arg("--features").arg(features.join(","));
-    }
-    let output = command
+/// @param rows - the rows that were built
+fn locate(root: &Path, rows: &[&Row]) -> Result<Vec<Artifact>, String> {
+    let output = Command::new(cargo())
+        .current_dir(root)
+        .args(["test", "--no-run"])
+        .args(testplan::test_arguments(rows))
+        .arg("--message-format=json")
         .stderr(Stdio::inherit())
         .output()
         .map_err(|error| format!("cannot run cargo: {error}"))?;
@@ -1001,21 +1328,32 @@ fn locate(root: &Path, rows: &[&Row]) -> Result<Vec<Built>, String> {
         return Err("cargo could not list the built targets".to_string());
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut found: BTreeMap<Target, (PathBuf, PathBuf)> = BTreeMap::new();
+    let mut found: BTreeMap<Target, Artifact> = BTreeMap::new();
     for line in text.lines() {
-        let Some(artifact) = read_artifact(line) else {
-            continue;
-        };
-        found.insert(artifact.0, (artifact.1, artifact.2));
+        if let Some(artifact) = read_artifact(line) {
+            found.insert(artifact.target.clone(), artifact);
+        }
     }
+    Ok(found.into_values().collect())
+}
+
+/// Returns the executable for each selected row, or names the rows with none.
+///
+/// @param artifacts - what was built, from `locate` or from an artifact list
+/// @param rows - the rows the run will start
+fn pick(artifacts: &[Artifact], rows: &[&Row]) -> Result<Vec<Built>, String> {
     let mut built = Vec::new();
     let mut missing = Vec::new();
     for row in rows {
-        match found.get(&row.target) {
-            Some((executable, directory)) => built.push(Built {
+        match artifacts
+            .iter()
+            .find(|artifact| artifact.target == row.target.binary())
+        {
+            Some(artifact) => built.push(Built {
                 target: row.target.clone(),
-                executable: executable.clone(),
-                directory: directory.clone(),
+                executable: artifact.executable.clone(),
+                directory: artifact.directory.clone(),
+                tests: None,
             }),
             None => missing.push(row.target.label()),
         }
@@ -1029,8 +1367,63 @@ fn locate(root: &Path, rows: &[&Row]) -> Result<Vec<Built>, String> {
     Ok(built)
 }
 
-/// Reads one `compiler-artifact` line, returning the target, its executable and
-/// the directory cargo would run it from.
+/// Writes the artifact list into the target directory and returns its path.
+///
+/// The target directory comes from `cargo metadata`, because a worktree's
+/// `.cargo/config.toml` moves it off the checkout and onto another drive.
+///
+/// @param root - the workspace root
+/// @param artifacts - what `locate` found
+fn write_artifact_list(root: &Path, artifacts: &[Artifact]) -> Result<PathBuf, String> {
+    let output = Command::new(cargo())
+        .current_dir(root)
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|error| format!("cannot run cargo: {error}"))?;
+    if !output.status.success() {
+        return Err("cargo metadata did not say where the target directory is".to_string());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let directory = parse::parse(&text)
+        .ok()
+        .and_then(|parsed| {
+            testplan::json_field(&parsed.node, "target_directory").and_then(testplan::json_text)
+        })
+        .ok_or("cargo metadata named no target directory")?;
+    let path = testplan::artifacts_path(Path::new(&directory));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    std::fs::write(&path, testplan::render_artifacts(artifacts))
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
+/// Reads an artifact list another run wrote.
+///
+/// A list that is not there is a run that cannot happen, so it is an error
+/// naming the path, which `main` turns into exit code 2.
+///
+/// @param file - the list `--artifacts` named
+fn read_artifact_list(file: &Path) -> Result<Vec<Artifact>, String> {
+    let text = std::fs::read_to_string(file).map_err(|error| {
+        format!(
+            "the artifact list {} cannot be read ({error}), so there is nothing to run",
+            file.display()
+        )
+    })?;
+    testplan::parse_artifacts(&text).map_err(|reason| {
+        format!(
+            "the artifact list {} is not readable: {reason}",
+            file.display()
+        )
+    })
+}
+
+/// Reads one `compiler-artifact` line into the target, its executable and the
+/// directory cargo would run it from.
 ///
 /// Two filters matter here and both are load-bearing.
 ///
@@ -1045,22 +1438,25 @@ fn locate(root: &Path, rows: &[&Row]) -> Result<Vec<Built>, String> {
 /// executable, and its test harness is a second artifact that has one.
 ///
 /// @param line - one line of cargo's JSON stream
-fn read_artifact(line: &str) -> Option<(Target, PathBuf, PathBuf)> {
+fn read_artifact(line: &str) -> Option<Artifact> {
     let parsed = parse::parse(line).ok()?;
     let node = parsed.node;
-    if text_of(field(&node, "reason")?)? != "compiler-artifact" {
+    if json_text(json_field(&node, "reason")?)? != "compiler-artifact" {
         return None;
     }
-    if !matches!(field(field(&node, "profile")?, "test")?, Node::True) {
+    if !matches!(
+        json_field(json_field(&node, "profile")?, "test")?,
+        Node::True
+    ) {
         return None;
     }
-    let executable = text_of(field(&node, "executable")?)?;
-    let manifest = text_of(field(&node, "manifest_path")?)?;
-    let target = field(&node, "target")?;
-    let name = text_of(field(target, "name")?)?;
-    let kind = match field(target, "kind")? {
-        Node::Array(items) => text_of(items.first()?)?,
-        other => text_of(other)?,
+    let executable = json_text(json_field(&node, "executable")?)?;
+    let manifest = json_text(json_field(&node, "manifest_path")?)?;
+    let target = json_field(&node, "target")?;
+    let name = json_text(json_field(target, "name")?)?;
+    let kind = match json_field(target, "kind")? {
+        Node::Array(items) => json_text(items.first()?)?,
+        other => json_text(other)?,
     };
     let manifest = PathBuf::from(manifest);
     let directory = manifest.parent()?.to_path_buf();
@@ -1077,15 +1473,16 @@ fn read_artifact(line: &str) -> Option<(Target, PathBuf, PathBuf)> {
         Kind::Lib => "lib".to_string(),
         Kind::Test | Kind::Bin => name,
     };
-    Some((
-        Target {
+    Some(Artifact {
+        target: Target {
             package,
             kind,
             name,
+            module: None,
         },
-        PathBuf::from(executable),
+        executable: PathBuf::from(executable),
         directory,
-    ))
+    })
 }
 
 /// Reads the `name` out of a manifest's `[package]` section.
@@ -1109,35 +1506,6 @@ fn read_package_name(path: &Path) -> Option<String> {
         }
     }
     None
-}
-
-/// Returns one member of a JSON object.
-///
-/// @param node - the object
-/// @param name - the member's label
-fn field<'tree>(node: &'tree Node, name: &str) -> Option<&'tree Node> {
-    match node {
-        Node::Object(members) => members
-            .iter()
-            .find(|(label, _)| render::unescape(label) == name)
-            .map(|(_, value)| value),
-        _ => None,
-    }
-}
-
-/// Returns a JSON string's content, with its escapes resolved.
-///
-/// The escapes are the point: every path in cargo's stream is a Windows path,
-/// so every one of them arrives with doubled backslashes.
-///
-/// @param node - the string node
-fn text_of(node: &Node) -> Option<String> {
-    match node {
-        Node::Text(_) | Node::TextJ(_) | Node::Text5(_) | Node::TextRaw(_) => {
-            Some(render::unescape(node))
-        }
-        _ => None,
-    }
 }
 
 /// Reads the recorded times, ignoring a ledger that is absent or unreadable.
@@ -1342,7 +1710,14 @@ fn execute(
     outcomes
 }
 
-/// Runs one test binary and reads its result.
+/// Runs one target and reads its result.
+///
+/// A whole binary runs once, with the `--filter` text if there is one. A module
+/// target runs its binary with `--exact` and the module's own test names,
+/// which `module_tests` already narrowed by `--filter`. A list too long for
+/// one command line runs as several processes of the same binary one after the
+/// other, and their outcomes are added into one: the target is still one row,
+/// one timing and one verdict.
 ///
 /// @param built - the executable and where to run it
 /// @param threads - what to pass as `--test-threads`
@@ -1353,6 +1728,71 @@ fn run_one(
     built: &Built,
     threads: &str,
     filter: Option<&str>,
+    strict: bool,
+    budget: Option<Duration>,
+) -> Outcome {
+    let Some(names) = &built.tests else {
+        let words: Vec<String> = filter.map(str::to_string).into_iter().collect();
+        return run_process(built, threads, &words, false, strict, budget);
+    };
+    let mut merged: Option<Outcome> = None;
+    for chunk in testplan::exact_chunks(names, testplan::EXACT_LIST_LIMIT) {
+        let outcome = run_process(built, threads, &chunk, true, strict, budget);
+        merged = Some(match merged {
+            None => outcome,
+            Some(earlier) => merge_outcomes(earlier, outcome),
+        });
+    }
+    merged.unwrap_or_else(|| Outcome {
+        target: built.target.clone(),
+        verdict: Verdict::Undetermined(Undetermined::NeverStarted),
+        elapsed: Duration::ZERO,
+        ran: 0,
+        output: "no test list to run".to_string(),
+        status: "never started".to_string(),
+        retry_of: None,
+    })
+}
+
+/// Adds a second process's outcome for the same target to the first.
+///
+/// The worse verdict wins: a target that could not be read in one part could
+/// not be read, and one that failed in one part failed.
+///
+/// @param earlier - the outcome so far
+/// @param later - the next part's outcome
+fn merge_outcomes(earlier: Outcome, later: Outcome) -> Outcome {
+    let verdict = match (earlier.verdict, later.verdict) {
+        (Verdict::Undetermined(reason), _) | (_, Verdict::Undetermined(reason)) => {
+            Verdict::Undetermined(reason)
+        }
+        (Verdict::Failed, _) | (_, Verdict::Failed) => Verdict::Failed,
+        _ => Verdict::Passed,
+    };
+    Outcome {
+        target: earlier.target,
+        verdict,
+        elapsed: earlier.elapsed + later.elapsed,
+        ran: earlier.ran + later.ran,
+        output: format!("{}\n{}", earlier.output, later.output),
+        status: format!("{}; {}", earlier.status, later.status),
+        retry_of: earlier.retry_of,
+    }
+}
+
+/// Runs one process of a test binary and reads its result.
+///
+/// @param built - the executable and where to run it
+/// @param threads - what to pass as `--test-threads`
+/// @param words - a filter, or the exact test names
+/// @param exact - whether `words` are exact names
+/// @param strict - whether a suite that skips should panic rather than pass
+/// @param budget - how long it may run before it is stopped; `None` never stops it
+fn run_process(
+    built: &Built,
+    threads: &str,
+    words: &[String],
+    exact: bool,
     strict: bool,
     budget: Option<Duration>,
 ) -> Outcome {
@@ -1406,9 +1846,10 @@ fn run_one(
         // It costs a noisier transcript, which nobody sees: the output is kept
         // in the `Outcome` and printed only for a failure.
         .args(["--test-threads", threads, "--show-output"]);
-    if let Some(filter) = filter {
-        command.arg(filter);
+    if exact {
+        command.arg("--exact");
     }
+    command.args(words);
     let limits = Limits {
         budget,
         ..Limits::default()
@@ -1711,89 +2152,6 @@ fn missing_prerequisites<'run>(
     hollow
 }
 
-/// Refuses an `--absent` name that no row in the map declares.
-///
-/// A misspelt name would otherwise excuse nothing and read, in the workflow
-/// that passes it, as if it excused something. Refusing it is an `Err`, which
-/// is exit code 2: the run did not happen.
-///
-/// @param map - the selection map, whose rows name every prerequisite
-/// @param absent - what `--absent` named
-fn refuse_unknown_absent(map: &Map, absent: &[String]) -> Result<(), String> {
-    let known = map.prerequisites();
-    let unknown: Vec<&String> = absent
-        .iter()
-        .filter(|name| !known.contains(*name))
-        .collect();
-    if unknown.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "`--absent` names {} that no row of tests/selection.toml requires. The names it \
-         accepts are: {}",
-        unknown
-            .iter()
-            .map(|name| format!("`{name}`"))
-            .collect::<Vec<_>>()
-            .join(", "),
-        known.into_iter().collect::<Vec<_>>().join(", ")
-    ))
-}
-
-/// Keeps the suites that went without a prerequisite this machine did not
-/// declare absent.
-///
-/// **This is what `--absent` changes, and all it changes.** A GitHub runner has
-/// no checkout of the private Nikaya repository and no PostgreSQL on Windows,
-/// so under `--strict` alone the job could never be green, and a job that is
-/// always red is read as noise. Naming those prerequisites in the workflow keeps
-/// them visible - they are printed under their own heading on every run - while
-/// a prerequisite the workflow forgot to provide still fails it.
-///
-/// @param hollow - every suite that evidenced nothing, from `missing_prerequisites`
-/// @param map - the selection map, for what each target requires
-/// @param absent - what `--absent` named
-fn unexcused<'run>(
-    hollow: Vec<(&'run Outcome, Vec<String>)>,
-    map: &Map,
-    absent: &[String],
-) -> Vec<(&'run Outcome, Vec<String>)> {
-    hollow
-        .into_iter()
-        .filter(|(outcome, _)| !declared_absent(outcome, map, absent))
-        .collect()
-}
-
-/// Reports whether a suite's row requires something `--absent` named.
-///
-/// @param outcome - the suite that ran
-/// @param map - the selection map, for what the suite requires
-/// @param absent - what `--absent` named
-fn declared_absent(outcome: &Outcome, map: &Map, absent: &[String]) -> bool {
-    map.row(&outcome.target)
-        .is_some_and(|row| row.needs_any_of(absent))
-}
-
-/// Prints one line per suite that evidenced nothing, with what it lacked.
-///
-/// @param hollow - the suites, each with what it said or its `requires` row
-fn print_hollow(hollow: &[(&Outcome, Vec<String>)]) {
-    for (outcome, requires) in hollow {
-        // **"needs" only in front of a `requires` row.** Those are names of
-        // things - `postgres`, `oracle`, `shell` - and read as a need. A reason
-        // the suite printed is a whole sentence about this machine, and putting
-        // "needs" in front of one produces "needs this platform would not make a
-        // directory link" (task-1932, H10).
-        let said = requires.join(", ");
-        let lead = if said.split_whitespace().count() > 3 {
-            ""
-        } else {
-            "needs "
-        };
-        println!("  {:<44} {lead}{}", outcome.target.label(), said);
-    }
-}
-
 /// Prints what the selected suites needed, and returns how many went without.
 ///
 /// **What a fully provisioned machine gets to say (task-1969, 9).** Until the
@@ -1808,62 +2166,71 @@ fn print_hollow(hollow: &[(&Outcome, Vec<String>)]) {
 /// question: of the targets this selection included that declare a
 /// prerequisite, how many ran with it present.
 ///
-/// @param outcomes - what ran
-/// @param map - the selection map, for what each target requires
+/// **A declared absence gets its own heading (task-2114 C8).** A target whose
+/// every missing thing is in `tests/prerequisites.local.toml` is listed under
+/// "not evidenced on this machine, by declaration", with the declared list, and
+/// does not fail a strict run. The list is printed so a reader of a green run
+/// can see what it did not evidence, and a release note can say so.
+///
 /// @param strict - whether a missing prerequisite is a failure
-/// @param absent - the prerequisites `--absent` declared this machine cannot have
-fn report_prerequisites(outcomes: &[Outcome], map: &Map, strict: bool, absent: &[String]) -> usize {
-    let hollow = missing_prerequisites(outcomes, map);
-    let declared = outcomes
-        .iter()
-        .filter(|outcome| {
-            map.row(&outcome.target)
-                .is_some_and(|row| !row.requires.is_empty())
-        })
-        .count();
+/// @param absences - the hollow targets, split by the declaration
+fn report_prerequisites(strict: bool, absences: &Absences) -> usize {
+    let hollow = &absences.unexcused;
+    let declared = absences.declaring;
     if declared > 0 {
         println!();
         println!(
             "{} of {declared} selected suite(s) that declare a prerequisite had it",
-            declared.saturating_sub(hollow.len())
+            declared.saturating_sub(hollow.len() + absences.excused.len())
         );
     }
-    let (excused, failing): (Vec<_>, Vec<_>) = hollow
-        .into_iter()
-        .partition(|(outcome, _)| declared_absent(outcome, map, absent));
-    if !excused.is_empty() {
+    if !absences.excused.is_empty() {
         println!(
-            "{} suite(s) went without a prerequisite this machine declares it cannot have \
-             (--absent {}), and do not fail the run:",
-            excused.len(),
-            absent.join(", ")
+            "{} suite(s) not evidenced on this machine, by declaration ({} declares absent: {}):",
+            absences.excused.len(),
+            testplan::DECLARED_ABSENCES_FILE,
+            absences.declared.join(", ")
         );
-        print_hollow(&excused);
+        for (outcome, said) in &absences.excused {
+            println!("  {:<44} {}", outcome.target.label(), said.join(", "));
+        }
     }
-    if failing.is_empty() {
+    if hollow.is_empty() {
         return 0;
     }
     println!(
         "{} suite(s) ran without a prerequisite and evidenced nothing{}:",
-        failing.len(),
+        hollow.len(),
         if strict {
             ""
         } else {
             " (--strict makes this a failure)"
         }
     );
-    print_hollow(&failing);
-    failing.len()
+    for (outcome, requires) in hollow {
+        // **"needs" only in front of a `requires` row.** Those are names of
+        // things - `postgres`, `oracle`, `shell` - and read as a need. A reason
+        // the suite printed is a whole sentence about this machine, and putting
+        // "needs" in front of one produces "needs this platform would not make a
+        // directory link" (task-1932, H10).
+        let said = requires.join(", ");
+        let lead = if said.split_whitespace().count() > 3 {
+            ""
+        } else {
+            "needs "
+        };
+        println!("  {:<44} {lead}{}", outcome.target.label(), said);
+    }
+    hollow.len()
 }
 
 /// Prints the summary, and every failure in full.
 ///
 /// @param outcomes - what ran
 /// @param wall - how long the whole run took
-/// @param map - the selection map
 /// @param strict - whether a missing prerequisite is a failure
-/// @param absent - the prerequisites `--absent` declared this machine cannot have
-fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool, absent: &[String]) {
+/// @param absences - the hollow targets, split by the declaration
+fn report(outcomes: &[Outcome], wall: Duration, strict: bool, absences: &Absences) {
     // **A suite whose every failure is a strict skip is not a failure
     // (task-1932, H10).** It is listed under "evidenced nothing" below, with
     // what it was missing, because that is what it did: `--strict` turns a skip
@@ -1944,7 +2311,7 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool, absent:
         );
     }
 
-    let hollow = report_prerequisites(outcomes, map, strict, absent);
+    let hollow = report_prerequisites(strict, absences);
 
     let settled: Vec<&Outcome> = outcomes
         .iter()

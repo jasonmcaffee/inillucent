@@ -6,7 +6,7 @@ pragma the engine recognises.
 
 This page is generated. `cargo run -p inillucent-compat --bin inillucent-obligations`
 writes it from `inillucent_sql::pragma_register::REGISTER`, and
-`cargo test -p inillucent-compat --test harness` fails when the page and the
+`cargo test -p inillucent-compat --test tooling harness::` fails when the page and the
 register differ. Do not edit it by hand.
 
 There are **68 pragmas**. 62 of them take an argument in parentheses.

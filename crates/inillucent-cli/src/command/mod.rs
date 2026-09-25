@@ -8,7 +8,7 @@
 //! - `inillucent-mcp` builds `tools/list` and its JSON Schemas from it;
 //! - `inillucent help` prints it.
 //!
-//! `crates/inillucent-compat/tests/command_parity.rs` fails the build if a
+//! `crates/inillucent-compat/tests/tooling/command_parity.rs` fails the build if a
 //! command loses its description, if a parameter loses one, if a command is
 //! hidden from MCP without a stated reason, or if the two surfaces stop naming
 //! the same set. That test is the whole point of the arrangement: this
@@ -1063,7 +1063,7 @@ mod tests {
     /// A path that reaches outside the root through a link is refused, and the
     /// refusal names where it landed.
     ///
-    /// The unit-level half of `crates/inillucent-compat/tests/confinement.rs`:
+    /// The unit-level half of `crates/inillucent-compat/tests/e2e/confinement.rs`:
     /// that suite proves the shipped binaries refuse it, and this one proves
     /// the message a person reads says which of the two things went wrong.
     #[test]

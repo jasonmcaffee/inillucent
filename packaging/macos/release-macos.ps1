@@ -46,6 +46,11 @@
 .PARAMETER SkipBuild
     Sign and package what is already built.
 
+.PARAMETER BuiltRoot
+    With -SkipBuild: the directory holding one target directory per Apple
+    triple, as release-all.ps1's parallel build leaves them. Without it the
+    builds are read from the shared target directory.
+
 .PARAMETER SkipNotarize
     Stop after signing and packaging. Everything is still signed; nothing is
     submitted to Apple, so nothing is publishable.
@@ -67,6 +72,10 @@
 param(
     [string] $Version,
     [switch] $SkipBuild,
+    # Where release-all.ps1 built each Apple target when it built them in parallel: a directory
+    # holding one target directory per triple, so the release output of a triple is
+    # <BuiltRoot>/<triple>/<triple>/release. Empty means the one shared target directory.
+    [string] $BuiltRoot,
     [switch] $SkipNotarize,
     [switch] $SelfSigned,
     [switch] $Unpublishable,
@@ -201,6 +210,24 @@ function Build-AppleTarget {
     }
 }
 
+function Get-AppleReleaseDir {
+    <#
+    .SYNOPSIS
+        Where one Apple target's release build is.
+
+    .DESCRIPTION
+        In the shared target directory unless -BuiltRoot names the per target directories the
+        parallel build in release-all.ps1 used. Each parallel build has a target directory of its own
+        because cargo locks a target directory, so five builds in one would run one at a time.
+
+    .PARAMETER Target
+        The triple.
+    #>
+    param([string] $Target)
+    if ($BuiltRoot) { return Join-Path $BuiltRoot "$Target/$Target/release" }
+    return Join-Path (Get-CargoTargetDir) "$Target/release"
+}
+
 function New-UniversalBinaries {
     <#
     .SYNOPSIS
@@ -212,14 +239,13 @@ function New-UniversalBinaries {
     #>
     param([string] $Dist)
 
-    $targetDir = Get-CargoTargetDir
     $universal = Join-Path $Dist 'universal-apple-darwin'
     if (Test-Path -LiteralPath $universal) { Remove-Item -LiteralPath $universal -Recurse -Force -Confirm:$false }
     New-Item -ItemType Directory -Force -Path $universal | Out-Null
 
     foreach ($entry in $signables) {
-        $arm = Join-Path $targetDir "aarch64-apple-darwin/release/$($entry.File)"
-        $intel = Join-Path $targetDir "x86_64-apple-darwin/release/$($entry.File)"
+        $arm = Join-Path (Get-AppleReleaseDir -Target 'aarch64-apple-darwin') $entry.File
+        $intel = Join-Path (Get-AppleReleaseDir -Target 'x86_64-apple-darwin') $entry.File
         foreach ($input in @($arm, $intel)) {
             if (-not (Test-Path -LiteralPath $input)) { throw "the build did not produce $input" }
         }

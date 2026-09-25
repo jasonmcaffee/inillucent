@@ -75,7 +75,7 @@ machine.
 | a crate's dependencies | `docs/dependency-policy.md` and `docs/invariants/layering.toml` |
 | a `tests/*.rs` file, or added one | its row in `tests/selection.toml` |
 | the command line or MCP | `crates/inillucent-cli/src/command/registry.rs`. Both are generated from it |
-| a module past its recorded size | split the module. `no_module_grows_past_the_size_it_is_recorded_at` in `crates/inillucent-compat/tests/policy.rs` only lets a recorded size go down |
+| a module past its recorded size | split the module. `no_module_grows_past_the_size_it_is_recorded_at` in `crates/inillucent-compat/tests/tooling/policy.rs` only lets a recorded size go down |
 | a number that a page states | the page. `tools/doc-facts/check.mjs` compares page counts with the built programs |
 
 ## Update the documentation in the same change
@@ -96,7 +96,7 @@ those rules:
 
 ```sh
 node tools/doc-style/check.mjs                              # every page in scope
-cargo test -p inillucent-compat --test documentation        # the same rules, plus links and commands
+cargo test -p inillucent-compat --test tooling documentation::        # the same rules, plus links and commands
 ```
 
 ## What a finished change includes

@@ -241,7 +241,7 @@ if [ "$quick" -eq 1 ] && [ -z "$only" ]; then
 fi
 
 security() {
-    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test confinement \
+    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test e2e confinement:: \
         && cargo test --manifest-path "$root/Cargo.toml" -p inillucent-driver-capi --test abi --test conformance \
         && cargo test --manifest-path "$root/Cargo.toml" -p inillucent-remote --test transport
 }

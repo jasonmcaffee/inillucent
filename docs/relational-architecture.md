@@ -124,7 +124,7 @@ Three rules follow from this table.
   does no file access.
 
 **Checked by:** `docs/invariants/layering.toml` lists which crate may depend on which.
-`cargo test -p inillucent-compat --test policy` reads every crate's manifest and fails on a
+`cargo test -p inillucent-compat --test tooling policy::` reads every crate's manifest and fails on a
 dependency the file does not allow. The same test fails on an unformatted crate, on `unsafe` code
 outside the operating system layer, and on a module that does not state its invariant.
 
@@ -306,7 +306,7 @@ A read only connection replays the log into its own memory and writes nothing to
 only connection finds a journal left by an interrupted checkpoint, it refuses to open, because
 putting the old pages back is a write.
 
-**Checked by:** `crates/inillucent-compat/tests/new_engine_free_map_recovery.rs`,
+**Checked by:** `crates/inillucent-compat/tests/durability/new_engine_free_map_recovery.rs`,
 `new_engine_recovery_shapes.rs`, `wal_crash.rs`, `multi_database_crash.rs`, and the `durability` tier.
 The `durability` tier stops a simulated machine at a chosen write or sync, then reads back what the
 file holds.
@@ -384,7 +384,7 @@ recover and compare the result. Each campaign runs from a fixed seed and writes 
 | `wal-commit.tsv` | 32 cut points in `wal` mode: 29 recovered the old state, 3 the new state, none damaged |
 | `wal-checkpoint.tsv` | 62 cut points in a `wal` checkpoint: 29 old, 33 new, none damaged |
 
-**Checked by:** `crates/inillucent-compat/tests/durability.rs` and `wal_crash.rs` write those files.
+**Checked by:** `crates/inillucent-compat/tests/durability/durability.rs` and `wal_crash.rs` write those files.
 `crash_reports.rs` fails when a campaign reports fewer cut points than the number a person accepted.
 `new_engine_log_retire.rs` checks that a checkpoint deletes the log it no longer needs.
 
@@ -468,7 +468,7 @@ Release 0.1.1 is the one published build that misreads a later file. It answers
 `WHERE note_fts MATCH 'segment'` with no rows on a file whose FTS5 index a later build wrote. Every
 other query on that file answers correctly in 0.1.1.
 
-**Checked by:** `crates/inillucent-compat/tests/release_format_history.rs` runs every published
+**Checked by:** `crates/inillucent-compat/tests/nightly/release_format_history.rs` runs every published
 release's own binary against a file this build wrote. The 0.1.1 `MATCH` answer is a row in its
 `KNOWN_GAPS` list. `tests/interop/<version>/` holds a file each release wrote, and
 `release_format.rs` opens each one, writes to it, crashes, and recovers. `format_refusal.rs` builds a
@@ -495,7 +495,7 @@ it with `Vfs::rename`, and deletes the old log segments through the same `Vfs`. 
 supplies an encrypting or in memory `Vfs` therefore gets a `VACUUM` that stays inside it. The code is
 in `crates/inillucent-engine/src/rebuild.rs`.
 
-**Checked by:** `crates/inillucent-compat/tests/vacuum_on_vfs.rs`, and `vacuum_crash.rs`, which
+**Checked by:** `crates/inillucent-compat/tests/engine/vacuum_on_vfs.rs`, and `vacuum_crash.rs`, which
 crashes a simulated machine inside the rename.
 
 ### `PRAGMA integrity_check` and `PRAGMA quick_check`
@@ -543,7 +543,7 @@ in `crates/inillucent-cli/src/mcp.rs`.
 connection stays usable. `inillucent capabilities` reports `cancel` as `partial`, because an operator
 finishes the piece of work it is in before it sees the flag.
 
-**Checked by:** `crates/inillucent-compat/tests/budgets.rs`, which drives the shipped
+**Checked by:** `crates/inillucent-compat/tests/e2e/budgets.rs`, which drives the shipped
 `inillucent-mcp` over `JSON-RPC`. One case checks that the command line has no limit, so a change
 that put the limit everywhere fails.
 
@@ -564,7 +564,7 @@ Windows junction or a Unix symbolic link inside the root is replaced by its targ
 check. `..` removes the last part of the resolved path. A path that does not exist yet is checked up
 to its deepest existing parent, so a file about to be created can be allowed.
 
-**Checked by:** `crates/inillucent-compat/tests/confinement.rs`, which drives the shipped programs.
+**Checked by:** `crates/inillucent-compat/tests/e2e/confinement.rs`, which drives the shipped programs.
 It first shows that each escape works without `--root`, so a refusal proves the confinement works.
 
 ---

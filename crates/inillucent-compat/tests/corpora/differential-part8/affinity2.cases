@@ -1,6 +1,6 @@
 # Differential cases, category `affinity2`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 cma-001	CREATE TABLE t(n, i INTEGER, r REAL, s TEXT, b BLOB, m NUMERIC); INSERT INTO t VALUES(1,1,1,'1',1,1); SELECT n=i, n=r, n=s, n=b, n=m FROM t
 cma-002	CREATE TABLE t(n, i INTEGER, r REAL, s TEXT, b BLOB, m NUMERIC); INSERT INTO t VALUES(1,1,1,'1',1,1); SELECT i=s, r=s, m=s, b=s, s=b FROM t
 cma-003	CREATE TABLE t(n, i INTEGER, r REAL, s TEXT, b BLOB, m NUMERIC); INSERT INTO t VALUES(1,1,1,'1',1,1); SELECT i=n, s=n, s=i, s=r, s=m FROM t

@@ -657,7 +657,7 @@ pub struct RecordedBatch {
 /// delete takes; see `build_segment_from_batch`) came back alive after a
 /// merge, whenever an older segment folded into the same accumulator still
 /// held a live chunk for that id. `a_row_deleted_while_a_merge_is_in_flight_stays_deleted`
-/// in `inillucent-compat/tests/segment_merge_bound.rs` pins this: it fails
+/// in `inillucent-compat/tests/engine/segment_merge_bound.rs` pins this: it fails
 /// without the `tombstone` loop below, since that is the only line that ever
 /// removes a chunk an *earlier* fold step added.
 ///

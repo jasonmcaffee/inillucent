@@ -172,7 +172,7 @@ choices were considered:
 No cryptography for TLS is written in this repository. `inillucent-remote` uses
 `deny(unsafe_code)` instead of `forbid(unsafe_code)` for the two files that make these calls,
 `src/tls/windows.rs` and `src/tls/unix.rs`. Every `unsafe` block in them has a `SAFETY:` note, and
-`crates/inillucent-compat/tests/policy.rs` checks that each note is there.
+`crates/inillucent-compat/tests/tooling/policy.rs` checks that each note is there.
 
 **A machine with no usable TLS gets an error that says so.** The client does not fall back to an
 unencrypted connection.
@@ -250,7 +250,7 @@ reference it is. Every entry has `production_dependency = false`, and
 ## Unsafe code
 
 21 of the 29 crates forbid `unsafe` with `#![forbid(unsafe_code)]`. The others use `unsafe` only in
-the files named in `UNSAFE_ALLOWED` in `crates/inillucent-compat/tests/policy.rs`. Examples are the
+the files named in `UNSAFE_ALLOWED` in `crates/inillucent-compat/tests/tooling/policy.rs`. Examples are the
 allocator in `inillucent-alloc`, the operating system calls in `inillucent-vfs`, the TLS files in
 `inillucent-remote`, the Ctrl+C handler in `inillucent-cli`, and the AVX2 dot product in
 `crates/inillucent-core/src/distance.rs`.

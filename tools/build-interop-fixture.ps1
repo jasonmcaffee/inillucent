@@ -24,7 +24,7 @@
     4. **Ask** every question in `tests/interop/verify.sql` and record the
        answers as `expected.tsv`.
     5. **Publish** into `tests/interop/<version>/`, where
-       `crates/inillucent-compat/tests/release_format.rs` reads them.
+       `crates/inillucent-compat/tests/e2e/release_format.rs` reads them.
 
     `packaging/ship.ps1` calls this in its publish phase for the version being
     shipped, so the directory never lags a release.

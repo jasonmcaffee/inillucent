@@ -4,7 +4,7 @@
 //! field is filled once per call to `PagedTree::write_row`, which is the write
 //! path an `INSERT` and a virtual table's shadow row both reach, so a timer
 //! that was always on would put fifteen clock reads into the hottest loop the
-//! engine has. `crates/inillucent-compat/tests/put_stages.rs` asserts the
+//! engine has. `crates/inillucent-compat/tests/engine/put_stages.rs` asserts the
 //! default is off.
 //!
 //! ## What this is for

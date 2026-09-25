@@ -1,6 +1,6 @@
 # Differential cases, category `uniondup`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 und-001	SELECT 1 AS a UNION SELECT 1.0
 und-002	SELECT 1.0 AS a UNION SELECT 1
 und-003	SELECT 1 AS a UNION SELECT 1.0 UNION SELECT 1

@@ -815,7 +815,7 @@ impl ImportedDatabase {
 /// torn. SQLite is not exposed to this because its log holds whole page images
 /// and a checkpoint is a copy, so an interrupted one is simply redone.
 ///
-/// `crates/inillucent-compat/tests/wal_crash.rs`'s checkpoint campaign found
+/// `crates/inillucent-compat/tests/durability/wal_crash.rs`'s checkpoint campaign found
 /// it: a crash inside `PRAGMA wal_checkpoint` left pages 2 and 3 written and
 /// unsynced, the meta record correctly still naming the *previous* checkpoint,
 /// and recovery unable to read a page it could not rebuild either -

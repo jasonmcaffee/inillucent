@@ -1,6 +1,6 @@
 # Every test the language packages own, and the command that runs it.
 #
-# Read by `crates/inillucent-compat/tests/bindings.rs`, which fails when a test
+# Read by `crates/inillucent-compat/tests/tooling/bindings.rs`, which fails when a test
 # file under `packages/` or `drivers/bindings/` has no row here, and when a row
 # names a file that is not there. It is `tests/selection.toml`'s
 # `no_test_hides_outside_the_map` for the parts of this repository that cargo

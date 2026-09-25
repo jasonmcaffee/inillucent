@@ -5,7 +5,7 @@
 # `inillucent-testrun` builds and runs cargo targets; these are a Node test
 # file, a Go test, a PHP script and two Python scripts, and none of them is one.
 # So this is the one command that runs them, and
-# `crates/inillucent-compat/tests/bindings.rs` is what fails when a file under
+# `crates/inillucent-compat/tests/tooling/bindings.rs` is what fails when a file under
 # `packages/` is not in the manifest this reads.
 #
 # Usage:

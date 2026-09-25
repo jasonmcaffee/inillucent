@@ -121,9 +121,13 @@ its signature. The macOS zip that `rcodesign` sends to Apple's notary is left ou
 credential `git push` already uses, read through `git credential fill`. Preflight prints the account
 it will publish as.
 
-A release uploaded into a draft stays invisible. `ship.ps1` publishes a draft after the upload. When
-`-SkipTests` was given, the release notes say the release was published without running the test
-suite.
+A release uploaded into a draft stays invisible. `ship.ps1` publishes a draft after the upload. The
+release notes say how the release was tested: "Verified by the nightly run of `<date>` at `<commit>`",
+with the prerequisites that run declared absent. When `-SkipTests` was given, they say the release
+was published without running the test suite.
+
+The nightly also publishes a rolling pre release called `nightly` to the same repository. Its tag is
+`nightly`, which no registry reads as a version, and nothing links to it.
 
 `ship.ps1` checks that the release exists and has assets.
 
@@ -134,7 +138,7 @@ suite.
 `tools/build-interop-fixture.ps1` downloads this release's Windows archive from the GitHub release,
 checks it against `SHA256SUMS` and the minisign signature, runs `tests/interop/build.sql` with it, and
 writes `tests/interop/<version>/`. The route commits that folder and pushes it.
-`crates/inillucent-compat/tests/release_format.rs` opens every folder under `tests/interop/` with the
+`crates/inillucent-compat/tests/e2e/release_format.rs` opens every folder under `tests/interop/` with the
 current build, which checks that the engine still reads files written by each earlier release.
 
 `ship.ps1` checks that `app.rdb`, `expected.tsv` and at least one log segment exist.

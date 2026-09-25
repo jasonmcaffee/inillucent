@@ -26,7 +26,7 @@
 // stopped; a person pasted it into the page, and the prose under it went on
 // saying 40.9% and 47.9% where the table said 40.6% and 48.4%. Nothing read the
 // page back. Writing it between markers makes the page a function of the
-// measurement, and `cargo test -p inillucent-compat --test documentation` reads
+// measurement, and `cargo test -p inillucent-compat --test tooling documentation::` reads
 // the block.
 
 import { spawnSync } from 'node:child_process';

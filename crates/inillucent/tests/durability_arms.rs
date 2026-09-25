@@ -7,7 +7,7 @@
 //!
 //! `durability.rs` beside it is the same subject and holds the cases that pick
 //! their own geometry. Keeping both in one file is refused by
-//! `crates/inillucent-compat/tests/scenarios.rs`: a file that invokes
+//! `crates/inillucent-compat/tests/tooling/scenarios.rs`: a file that invokes
 //! `scenario!` may hold no bare `#[test]`, because then "the file grades one
 //! story six ways and another once and the run's output cannot tell them
 //! apart". What the two files share is in `inillucent_compat::durable`.

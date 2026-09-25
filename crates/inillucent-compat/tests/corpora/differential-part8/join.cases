@@ -1,6 +1,6 @@
 # Differential cases, category `join`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 join-001	CREATE TABLE l(id INTEGER, v TEXT); CREATE TABLE r(id INTEGER, w TEXT); INSERT INTO l VALUES(1,'a'),(2,'b'),(3,'c'); INSERT INTO r VALUES(1,'x'),(1,'y'),(4,'z'); SELECT * FROM l JOIN r ON l.id=r.id ORDER BY l.id, r.w
 join-002	CREATE TABLE l(id INTEGER, v TEXT); CREATE TABLE r(id INTEGER, w TEXT); INSERT INTO l VALUES(1,'a'),(2,'b'),(3,'c'); INSERT INTO r VALUES(1,'x'),(1,'y'),(4,'z'); SELECT * FROM l LEFT JOIN r ON l.id=r.id ORDER BY l.id, r.w
 join-003	CREATE TABLE l(id INTEGER, v TEXT); CREATE TABLE r(id INTEGER, w TEXT); INSERT INTO l VALUES(1,'a'),(2,'b'),(3,'c'); INSERT INTO r VALUES(1,'x'),(1,'y'),(4,'z'); SELECT * FROM l RIGHT JOIN r ON l.id=r.id ORDER BY r.id, r.w

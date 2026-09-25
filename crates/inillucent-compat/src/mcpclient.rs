@@ -9,7 +9,7 @@
 //!
 //! ## Why this is a module rather than a helper in one test file
 //!
-//! `crates/inillucent-compat/tests/mcp_wire.rs` has a `Session` of its own,
+//! `crates/inillucent-compat/tests/e2e/mcp_wire.rs` has a `Session` of its own,
 //! written when it was the only suite that spoke the protocol. There are three
 //! now - `mcp_wire`, `mcp_session` and `mcp_replay` - and the parts that are
 //! easy to get subtly different are the parts that matter: reading a reply by

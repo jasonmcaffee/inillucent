@@ -24,7 +24,7 @@
 //!
 //! What is *not* asserted is BM25's ranking against a second BM25 written here.
 //! A ranking function compared against a reimplementation of itself grades the
-//! reimplementation; `crates/inillucent-compat/tests/fts5_parity.rs` grades the
+//! reimplementation; `crates/inillucent-compat/tests/differential/fts5_parity.rs` grades the
 //! ranking against the pinned SQLite, which is a reference rather than a copy.
 //! What this file adds is that the ranking is **stable across a reopen** and
 //! that every row it returns is a live document, which is the failure a

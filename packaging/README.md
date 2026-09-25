@@ -50,7 +50,7 @@ repository the worktree belongs to. A worktree on another drive needs no extra a
 
 | Parameter | What it does |
 |---|---|
-| `-WhatIf` | Runs preflight, says whether the tests would run, lists every file the version phase would change, and stops. Nothing is written. |
+| `-WhatIf` | Runs preflight, says what the tests phase would do with the nightly evidence, lists every file the version phase would change, and stops. Nothing is written. |
 | `-Part patch`, `-Part minor`, `-Part major` | Raises the workspace version by one step before the release. |
 | `-Version <x.y.z>` | Releases exactly this version. The default is the version in `Cargo.toml`. A version lower than the current one is refused. |
 | `-Only <routes>` | Runs only the named routes. The tests and the version phase still run. |
@@ -65,7 +65,7 @@ repository the worktree belongs to. A worktree on another drive needs no extra a
 
 ```mermaid
 flowchart LR
-    A["preflight: read credentials, print the plan"] --> B["tests: run the suite"]
+    A["preflight: read credentials, print the plan"] --> B["tests: read the nightly evidence"]
     B --> C["version: write the new version into every file"]
     C --> D["build: compile, sign, package, notarise"]
     D --> E["publish: tag, mirror, GitHub, site, registries"]
@@ -75,7 +75,7 @@ flowchart LR
 | Phase | What happens | Why it is in this place |
 |---|---|---|
 | preflight | Decrypts the credentials, checks each route's needs, and prints `[run ]` or `[skip]` for every route with the reason. For npm and GitHub it prints the account it will publish as. | A tag cannot be taken back quietly, so the plan is known before anything is written. |
-| tests | Builds `inillucent-testrun` and runs `inillucent-testrun --strict`. Exit code 1 or 2 stops the release. | A red suite stops the release before the version phase has changed any file. |
+| tests | Reads `_agent_output/nightly/latest.json` in the main checkout. Green for this commit: no suite runs, and the notes name the nightly run. Green for an older commit: runs `inillucent-testrun --changed <that commit> --cadence merge --strict`. Red or missing: refuses. Exit code 1 or 2 from that run stops the release. | A red suite stops the release before the version phase has changed any file. |
 | version | Writes the new version into every file that carries it and refreshes `Cargo.lock`. Warns about any other tracked file that still names the old version. | Every later route reads the version this phase writes. |
 | build | The `build`, `linux-packages` and `signature` routes. Nothing has left the machine yet. | A build failure leaves nothing published. |
 | publish | The routes from `tag` to `homebrew`, in the order in the table below. After each route, `ship.ps1` asks the destination whether the release arrived. | Some destinations read what an earlier route wrote. |
@@ -233,7 +233,11 @@ tagged and left half published for four days, with its GitHub release still a dr
 | Script | What it does |
 |---|---|
 | `ship.ps1` | The whole release |
-| `release-all.ps1` | Builds every target. `-Targets windows`, `linux` or `macos` builds one family |
+| `release-all.ps1` | Builds every target, all five at once, each in its own target directory. `-Targets windows`, `linux` or `macos` builds one family. `-Serial` builds them one after another. `-BuildOnly` stops after the build |
+| `nightly.ps1` | The nightly: every tier, the release build, the gates, the rolling `nightly` pre release, the timings committed, `latest.json`, and a ticket when red. `-WhatIf` prints the plan |
+| `register-nightly.ps1` | Registers `nightly.ps1` as the scheduled task `inillucent nightly` at 02:00. `-Unregister` removes it |
+| `nightly-evidence.ps1` | The functions `nightly.ps1` writes `latest.json` with and `ship.ps1` reads it with. `tests/ship-evidence.Tests.ps1` tests them |
+| `setup-machine.ps1` | The machine settings: `-Linker` for the `rust-lld` linker, `-Sccache`, `-Defender`. `-Remove` undoes the first two |
 | `release.ps1`, `release.sh` | Builds, stages, smoke tests and archives one target |
 | `macos/release-macos.ps1` | Builds, signs and notarises the macOS half |
 | `linux/package-linux.ps1` | Builds the `.deb` and `.rpm` files with `nfpm` and signs them |

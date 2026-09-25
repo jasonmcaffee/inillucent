@@ -45,7 +45,7 @@ pie showData
 | Refused here, answered by SQLite | 0 | no probed case |
 
 The probe is `tools/feature-probe/`. Many of its cases are also checked in as tests in
-`crates/inillucent-compat/tests/semantics.rs`. A change to one of those answers, in either
+`crates/inillucent-compat/tests/differential/semantics.rs`. A change to one of those answers, in either
 direction, fails the build.
 
 The 416 cases are a list somebody wrote. Some constructs are outside that list, and inillucent
@@ -311,7 +311,7 @@ These differences change how an application runs, and they do not show up in a p
 | A `SELECT` result | computed when the first row is stepped. Later steps return rows already computed | computed one row per step |
 
 **Multiple processes.** Two processes can write the same file, one at a time. The number of rows in
-the file equals the number of commits acknowledged. `crates/inillucent-compat/tests/process_concurrency.rs`
+the file equals the number of commits acknowledged. `crates/inillucent-compat/tests/durability/process_concurrency.rs`
 checks this with two real writer processes. [Roadmap](roadmap.md) describes the change that would let a
 reader run while a writer works.
 

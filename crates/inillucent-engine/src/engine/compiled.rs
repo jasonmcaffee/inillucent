@@ -69,7 +69,7 @@ impl crate::ImportedDatabase {
     /// Tells a module to remove each row a query found.
     ///
     /// Its own function because `apply_compiled` has a recorded length in
-    /// `crates/inillucent-compat/tests/policy.rs` and this arm is the one that
+    /// `crates/inillucent-compat/tests/tooling/policy.rs` and this arm is the one that
     /// grew when the change count moved onto the refusal path.
     ///
     /// **The count is recorded on the way out of a refusal too**, for the

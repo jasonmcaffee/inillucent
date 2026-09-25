@@ -320,7 +320,7 @@ impl Registry {
     /// the platform uses for a library it cannot open, and a build that forbids
     /// `unsafe` cannot call `LoadLibrary` anyway. This is the policy the day
     /// something can load one, and the two refusals above are what
-    /// `crates/inillucent-compat/tests/schema_function_policy.rs` checks,
+    /// `crates/inillucent-compat/tests/engine/schema_function_policy.rs` checks,
     /// because those are the guarantee a caller actually has.
     ///
     /// There is no `authorize_module` at all, so nothing there is inert either:

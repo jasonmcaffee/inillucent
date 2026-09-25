@@ -36,7 +36,7 @@ A clone of this repository has the same eight skills in three places:
 | `.agents/skills/<name>/SKILL.md` | Codex and other agents that use the Agent Skills folder layout |
 
 The copies in `.claude/skills/` and `.agents/skills/` are written by `node tools/sync-skills.mjs`.
-`cargo test -p inillucent-compat --test documentation` fails when a copy differs from its source by
+`cargo test -p inillucent-compat --test tooling documentation::` fails when a copy differs from its source by
 one byte. So edit `agent-skills/`, then run the script.
 
 The copies are plain files, not symbolic links. This repository is developed on Windows, and a
@@ -62,5 +62,5 @@ it:
 | `GEMINI.md` | Gemini CLI | the line `@AGENTS.md`, and the rule about ticket numbers |
 | `.cursor/rules/inillucent.mdc` | Cursor | front matter and the line `@AGENTS.md` |
 
-`cargo test -p inillucent-compat --test documentation` fails when a pointer file grows past twenty
+`cargo test -p inillucent-compat --test tooling documentation::` fails when a pointer file grows past twenty
 lines or stops naming `AGENTS.md`. A second copy of the instructions would go out of date.

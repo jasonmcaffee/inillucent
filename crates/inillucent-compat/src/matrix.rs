@@ -57,7 +57,7 @@ pub const SMALL_POOL_FRAMES: u32 = 64;
 ///
 /// The engine takes this as a `PRAGMA` after the file is open rather than as a
 /// constructor option, which is the answer to the TDD's open question: it is
-/// what `crates/inillucent-compat/tests/durability.rs::set_journal` does, and
+/// what `crates/inillucent-compat/tests/durability/durability.rs::set_journal` does, and
 /// doing it a second way here would be a second thing to keep true.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Journal {

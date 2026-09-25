@@ -1,6 +1,6 @@
 # Differential cases, category `collate2`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 clp-001	SELECT ('a'='A') COLLATE NOCASE, ('a'='A' COLLATE NOCASE), 'a'='A' COLLATE NOCASE
 clp-002	SELECT (1=1) COLLATE NOCASE, (0) COLLATE NOCASE, ('b'>'A') COLLATE NOCASE
 clp-003	SELECT ('B'<'a') COLLATE NOCASE, 'B'<'a' COLLATE NOCASE, 'B' COLLATE NOCASE < 'a'

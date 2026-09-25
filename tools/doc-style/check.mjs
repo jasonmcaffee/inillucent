@@ -8,7 +8,7 @@
  * prose is read. Fenced code, inline code, link targets, URLs, paths, file names and HTML comments
  * are removed first, because a command, a file name or a program's output cannot be reworded.
  *
- * `crates/inillucent-compat/tests/documentation.rs` applies the same rules to the same files, read
+ * `crates/inillucent-compat/tests/tooling/documentation.rs` applies the same rules to the same files, read
  * from the same `rules.txt` and `scope.txt`, as part of the test suite. Neither uses a regular
  * expression for the rules themselves, so the two can be kept identical by reading them side by
  * side. This script exists so a writer can check a page in a second, and so the inillucent.com

@@ -578,7 +578,7 @@ pub(crate) const COMPILE_OPTIONS: &[&str] = inillucent_base::COMPILE_OPTIONS;
 /// `inillucent functions embed` listed nothing.
 ///
 /// That is the exact shape this register was audited for once already, and
-/// `crates/inillucent-compat/tests/registers.rs` says why it is worse than an
+/// `crates/inillucent-compat/tests/differential/registers.rs` says why it is worse than an
 /// error: *"a register that under-reports answers every call correctly - it
 /// just does not admit that it can"*. `PRAGMA module_list` two arms above has
 /// merged the registry's modules in all along; this is the same merge for

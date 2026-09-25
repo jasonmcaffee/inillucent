@@ -82,7 +82,7 @@ Documentation goes stale when the code changes and nobody updates the page. Thre
 
 | Check | What it does |
 |---|---|
-| `cargo test -p inillucent-compat --test documentation` | Fails on a broken link, a page missing from the index, a command that does not exist, a skill copy that differs from its source, and any phrase this guide bans |
+| `cargo test -p inillucent-compat --test tooling documentation::` | Fails on a broken link, a page missing from the index, a command that does not exist, a skill copy that differs from its source, and any phrase this guide bans |
 | `node tools/doc-style/check.mjs` | The same writing rules, in a second, for one page or all of them. `--site <path>` also checks the inillucent.com chapters |
 | `node tools/doc-facts/check.mjs --site <path>` | Runs the built programs and fails when a count in a page (commands, MCP tools, functions, capabilities, probe cases) differs from what the programs report |
 

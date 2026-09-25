@@ -1,6 +1,6 @@
 # Differential cases, category `math`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 mth-001	SELECT abs(-3), abs(-3.5), abs('x'), abs(NULL), typeof(abs(-3))
 mth-002	SELECT sign(-3), sign(0), sign(4.5), sign('x')
 mth-003	SELECT ceil(1.2), ceiling(-1.2), floor(1.8), floor(-1.8), typeof(ceil(1.2))

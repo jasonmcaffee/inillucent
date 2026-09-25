@@ -2,7 +2,7 @@
 
 Sits between a client and the server as a stdio proxy, copies every line in both
 directions, and writes both sides out as a transcript
-`crates/inillucent-compat/tests/mcp_replay.rs` replays. That is what lets the
+`crates/inillucent-compat/tests/e2e/mcp_replay.rs` replays. That is what lets the
 replay check the server against what a real client sent rather than against this
 project's idea of what one sends - which is the gap 0.1.2 shipped through: the
 release scripts sent a handshake the server refused, and running the release was

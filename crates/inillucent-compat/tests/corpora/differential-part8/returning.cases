@@ -1,6 +1,6 @@
 # Differential cases, category `returning`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 ret-001	CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t(b) VALUES('x') RETURNING a,b
 ret-002	CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t(b) VALUES('x'); UPDATE t SET b='y' RETURNING *
 ret-003	CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t(b) VALUES('x'); DELETE FROM t RETURNING a,b

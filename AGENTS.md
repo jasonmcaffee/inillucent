@@ -89,10 +89,10 @@ Read the file for a rule before you write the code it covers. Each file is short
 
 | Rule | Where it is written | The test that fails |
 |---|---|---|
-| **Dependencies**: only crates on an allowed list | `docs/dependency-policy.md`, `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test policy` |
-| **Layering**: which crate may depend on which | `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test harness`, `the_workspace_obeys_the_dependency_contract` |
-| **Test selection**: every test target has a row | `tests/selection.toml` | `cargo test -p inillucent-compat --test selection`; `no_test_hides_outside_the_map` names the target |
-| **One command table**: the command line and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `cargo test -p inillucent-compat --test command_parity` |
+| **Dependencies**: only crates on an allowed list | `docs/dependency-policy.md`, `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test tooling policy::` |
+| **Layering**: which crate may depend on which | `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test tooling harness::`, `the_workspace_obeys_the_dependency_contract` |
+| **Test selection**: every test target has a row | `tests/selection.toml` | `cargo test -p inillucent-compat --test tooling selection::`; `no_test_hides_outside_the_map` names the target |
+| **One command table**: the command line and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `cargo test -p inillucent-compat --test tooling command_parity::` |
 | **The testing standard**: where a new test goes and how the suite runs | [`tests/inillucent-testing-tdd.md`](tests/inillucent-testing-tdd.md) | none; a reviewer checks it |
 
 ### Adding a dependency
@@ -121,7 +121,8 @@ target/debug/inillucent-testrun --tier smoke            # the smallest tier, whi
 target/debug/inillucent-testrun --changed               # what your uncommitted edits can break
 target/debug/inillucent-testrun --changed origin/main   # the same, after you have committed
 target/debug/inillucent-testrun --changed --list        # the selection, without running it
-target/debug/inillucent-testrun                         # everything
+target/debug/inillucent-testrun                         # every tier except nightly
+target/debug/inillucent-testrun --cadence nightly       # every tier
 target/debug/inillucent-testrun --strict                # fail when a prerequisite is missing
 ```
 
@@ -130,6 +131,37 @@ binary is in that directory's `debug/` folder.
 
 `--changed` compares against `HEAD` by default. Once your work is committed, `--changed` with no
 revision selects nothing and exits 0. Pass `--changed origin/main`.
+
+**Every tier has a cadence, and `--changed` honours it.** `tests/selection.toml` gives each tier
+`cadence = "change"`, `"merge"` or `"nightly"`:
+
+| Cadence | Tiers | Where it runs |
+|---|---|---|
+| `change` | smoke, unit, engine, differential, e2e, retrieval, tooling | `--changed`, by the dependency closure of what you edited |
+| `merge` | durability, perf | `--changed` only when a crate you edited is in the target's `covers`; every push in CI |
+| `nightly` | nightly | never on a change; the nightly job, or `--tier nightly` by name |
+
+So a parser change does not run the crash suites or the nightly stories, and a change to the write
+ahead log does run `wal_crash`. A durability row's `covers` names every storage crate the suite
+exercises for this reason. `--cadence merge` with `--changed` selects the merge tiers by the closure
+as well, which is what CI does on a pull request.
+
+**The build names only what was selected.** The runner builds with `-p`, `--lib`, `--test` and
+`--bin` for the selected targets instead of `--workspace`. A run that selects no `inillucent-bench`
+row does not compile it, so `ort`, `tokenizers` and oniguruma are not built. The runner builds
+`inillucent-cli` and `inillucent-driver-capi` as programs only when a selected suite starts one.
+
+**`inillucent-compat`'s integration tests are one binary per tier.** `tests/engine/main.rs` declares
+`mod new_engine_log_lead;` and the suite is `tests/engine/new_engine_log_lead.rs`. The target is
+`inillucent-compat::engine::new_engine_log_lead`, and the runner still starts it in a process of its
+own, with `--exact` and only that module's test names. Under a plain cargo:
+
+```sh
+cargo test -p inillucent-compat --test tooling policy::
+```
+
+runs the `policy` suite inside the `tooling` binary. Prefer the runner: a plain `cargo test --test
+tooling` runs every tooling suite in one process.
 
 **The exit code is the result.** Read it, not the last line of output:
 
@@ -153,6 +185,16 @@ a suite reports success when its prerequisite is absent. `--strict` counts those
 them. Setting `INILLUCENT_STRICT=1` in your shell does not do the same thing, because the runner
 overwrites that variable in every child process from its own `--strict` flag.
 
+**A machine declares what it will never have.** The development machine has no MySQL, no live
+PostgreSQL and no Go, so `--strict` could not pass there. The gitignored
+`tests/prerequisites.local.toml` holds `absent = ["mysql", "postgres", "go"]`, and `--absent <name>`
+adds a name for one run. A strict run reports a suite whose row `requires` a declared name under
+"not evidenced on this machine, by declaration", and does not fail for it. A skip for anything else
+still fails. A declared name that no row requires is refused, so a misspelling cannot excuse nothing
+quietly. CI passes `--absent` for what a runner cannot have, per operating system, in
+`.github/workflows/tests.yml`. `--summary <file>` writes the verdict, the failures and the declared
+absences as JSON.
+
 **When the runner stops a target.** The runner stops a target only when both of these are true:
 
 - the target has run for longer than its budget. The budget is eight times the target's recorded
@@ -169,11 +211,23 @@ and prints nothing until it ends.
 programs through `cliproc::program`. Under a plain `cargo test`, `cliproc::program` builds them once
 per test process, and a failed build fails the test with cargo's output.
 
+**A nested runner starts no cargo.** The runner writes the executables it located to
+`<target>/inillucent-testrun/artifacts.json` and names the file in `INILLUCENT_TESTRUN_ARTIFACTS`.
+`inillucent-testrun --artifacts <file>` runs from that list. `gates_fail_closed` runs its nested
+runners this way, so it no longer builds a second workspace or runs alone at the end.
+
 **The runner sets up the MSVC compiler environment.** The `onig_sys` crate compiles C code with
 `cl.exe`, which needs the `INCLUDE` variable that only a Visual Studio developer shell sets. The
 runner finds Visual Studio with `vswhere`, runs `vcvars64.bat`, and passes the result to cargo. It
-does nothing when `INCLUDE` is already set. Other scripts in `packaging/` still need
-`Import-MsvcEnvironment` from `packaging/stage-layout.ps1` loaded by hand.
+does nothing when `INCLUDE` is already set. Since the build names only the selected targets, a run
+that does not select `inillucent-bench` does not compile oniguruma and does not need it. Other
+scripts in `packaging/` still need `Import-MsvcEnvironment` from `packaging/stage-layout.ps1` loaded
+by hand.
+
+**Two optional machine settings.** `pwsh packaging/setup-machine.ps1 -Linker` sets
+`CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER` to the toolchain's `rust-lld.exe`, and `-Sccache`
+sets `RUSTC_WRAPPER=sccache` with its cache on D:. Both are user environment variables, because a
+committed `.cargo/config.toml` would be replaced in a ticket's worktree. `-Remove` takes them out.
 
 ### What a git worktree does not have
 
@@ -183,7 +237,7 @@ success, and hide real failures. Run with `--strict` to see them.
 | Folder | What needs it | How to get it |
 |---|---|---|
 | `.sqlite-ref/` | every suite graded against the pinned SQLite, including `semantics.rs` and everything using `differential::compare` | copy it from the main checkout, or run `pwsh tools/sqlite-reference.ps1` |
-| `_agent_output/fixtures/` | `small.db`, `medium.db` and `large.db`, used by `inillucent-compat::new_engine_log_lead` and `inillucent-compat::gates_fail_closed` | copy it from the main checkout, or run `tools/build-gate-fixtures.sh` |
+| `_agent_output/fixtures/` | `small.db`, `medium.db` and `large.db`, used by `inillucent-compat::engine::new_engine_log_lead` and `inillucent-compat::tooling::gates_fail_closed` | copy it from the main checkout, or run `tools/build-gate-fixtures.sh` |
 
 `new_engine_log_lead` builds an index larger than the buffer pool and reopens it. That tests the
 engine's open and recovery path under real memory pressure. Treat a failure there as a real defect.
@@ -200,7 +254,8 @@ rules. The two broken most often:
   nothing.
 
 A new `tests/*.rs` file needs a row in `tests/selection.toml`, or the `selection` suite fails and
-names it.
+names it. In `inillucent-compat` a new suite is a file in `tests/<tier>/`, a `mod` line in that
+tier's `main.rs`, and a row with `name = "<tier>"` and `module = "<file>"`.
 
 ### House style
 
@@ -246,7 +301,7 @@ Read three neighbouring files before you write a new one. Then follow these rule
    - the chapter in `src/data/documentation.ts` in the `inillucent-site` repository, which is
      published at https://inillucent.com/docs.
 7. `node tools/doc-style/check.mjs` reports no problems, and
-   `cargo test -p inillucent-compat --test documentation` passes.
+   `cargo test -p inillucent-compat --test tooling documentation::` passes.
 
 ---
 
@@ -291,6 +346,36 @@ override them.
 
 The order matters because a tag is the one step that cannot be quietly undone. Everything that can
 fail without a trace runs before it.
+
+### The nightly, and the tests a release relies on
+
+A release runs no full suite of its own. `packaging/nightly.ps1` runs every night at 02:00 as the
+scheduled task `inillucent nightly`, which `pwsh packaging/register-nightly.ps1` registers. It works
+in its own worktree, `J:/build/nightly`, moved to `origin/main`, and:
+
+1. runs `inillucent-testrun --cadence nightly --strict --record`, with this machine's declared
+   absences;
+2. runs `release-all.ps1` for all five targets, which now builds them in parallel, each in its own
+   target directory, still with fat LTO and one codegen unit;
+3. runs `inillucent-fullgate`, `inillucent-writegate` and `inillucent-scorecard` on the medium
+   fixture, built with the release profile;
+4. replaces the rolling `nightly` pre release on the public mirror. It never publishes to a registry;
+5. commits `tests/timings.toml`, `tests/nightly-history.tsv` and `compat/perf/nightly/` to `main`;
+6. writes `_agent_output/nightly/latest.json` in the main checkout: the commit, the date, the result
+   of each step, and the declared absences;
+7. files a ticket on the board when the night is red, unless one for the same failures is open.
+
+`pwsh packaging/nightly.ps1 -WhatIf` prints the plan. The tests phase of `ship.ps1` reads
+`latest.json`:
+
+| `latest.json` | `ship.ps1` |
+|---|---|
+| green, for the commit being released | runs no suite; the notes say "Verified by the nightly run of `<date>` at `<commit>`" |
+| green, for an older commit | runs `inillucent-testrun --changed <that commit> --cadence merge --strict` and names both commits |
+| red, or missing | refuses, unless `-SkipTests` |
+
+`packaging/tests/ship-evidence.Tests.ps1` holds those three cases. Run it with `Invoke-Pester
+packaging/tests`.
 
 ### The routes
 

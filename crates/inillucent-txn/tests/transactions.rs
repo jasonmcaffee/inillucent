@@ -484,7 +484,7 @@ fn a_rollback_after_a_flush_is_not_replayed() {
 /// a refusal, and `waited` rising on an acquisition that succeeded *is* a wait
 /// that ended when the slot freed. What a wall-clock bound adds is a way for
 /// the test to fail on a busy machine, which task-1886 saw a bound of the same
-/// kind do in `inillucent-compat::new_engine_vtab_stream`. The durations are
+/// kind do in `inillucent-compat::engine::new_engine_vtab_stream`. The durations are
 /// still measured, and they are reported in the failure messages, where a
 /// number that cannot decide anything belongs.
 #[test]

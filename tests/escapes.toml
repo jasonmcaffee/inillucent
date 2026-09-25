@@ -1,6 +1,6 @@
 # The escape ledger: every defect that reached a user, and the test that holds it now.
 #
-# Read by `crates/inillucent-compat/tests/escapes.rs`, which fails when a
+# Read by `crates/inillucent-compat/tests/tooling/escapes.rs`, which fails when a
 # `held_by` entry names a test that does not exist, when a row holds nothing and
 # does not say why, and when an escape named in
 # `tests/inillucent-e2e-scenarios-tdd.md` §3.2 has no row here at all.

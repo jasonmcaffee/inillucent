@@ -14,7 +14,7 @@
 // text file containing a path, which no agent follows.
 //
 // So the copies are committed, and
-// `crates/inillucent-compat/tests/documentation.rs` fails when any copy differs
+// `crates/inillucent-compat/tests/tooling/documentation.rs` fails when any copy differs
 // from its source by a byte. `agent-skills/` stays the source of truth: it is
 // the tool-neutral directory anything else can be pointed at.
 

@@ -168,7 +168,7 @@ go install ./cmd/inillucent-install && go test ./...
 
 ## The API
 
-`cargo test -p inillucent-compat --test documentation` reads this table and fails if a name in the
+`cargo test -p inillucent-compat --test tooling documentation::` reads this table and fails if a name in the
 first column is not declared in `inillucent.go`.
 
 | what | one line |

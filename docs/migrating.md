@@ -261,7 +261,7 @@ use the same reader. Other tests check that reader against a third program:
 |---|---|---|
 | PostgreSQL | `crates/inillucent-remote/tests/live_postgres.rs` | `psql` |
 | MySQL | `crates/inillucent-remote/tests/live_mysql.rs` | the `mysql` client |
-| SQLite | `inillucent-compat::migrate_realistic` | the pinned `sqlite3` program |
+| SQLite | `inillucent-compat::e2e::migrate_realistic` | the pinned `sqlite3` program |
 
 ## The PostgreSQL and MySQL clients are part of inillucent
 

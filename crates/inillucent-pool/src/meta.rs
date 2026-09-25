@@ -45,7 +45,7 @@ pub const FORMAT_VERSION: u32 = 2;
 ///
 /// Every published release before task-2074 wrote format 1, and
 /// `tests/interop/` holds a file from each of them that
-/// `crates/inillucent-compat/tests/release_format.rs` reads with this build.
+/// `crates/inillucent-compat/tests/e2e/release_format.rs` reads with this build.
 pub const OLDEST_FORMAT_VERSION: u32 = 1;
 
 /// Reports whether this build reads a file of this format version.

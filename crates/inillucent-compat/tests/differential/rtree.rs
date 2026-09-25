@@ -14,7 +14,7 @@
 //! is what it should say. So there is no "the pinned shell reads what this
 //! engine wrote" left to assert, in either direction; a fixture built through
 //! SQLite still reaches this engine, but only through `Database::import`,
-//! which `crates/inillucent-compat/tests/migrate_sqlite.rs` already covers.
+//! which `crates/inillucent-compat/tests/differential/migrate_sqlite.rs` already covers.
 //! `a_split_tree_answers_every_query` still proves the tree structure itself,
 //! entirely against this engine.
 

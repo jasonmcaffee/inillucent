@@ -1,6 +1,6 @@
 # Differential cases, category `compound`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 cmp-001	SELECT 1 UNION SELECT 1 UNION SELECT 2
 cmp-002	SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2
 cmp-003	SELECT 1 AS a UNION SELECT 1.0

@@ -742,7 +742,7 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
 /// Compiles a call to one of the date and time built-ins.
 ///
 /// Its own function for the reason `general_arith` below is: `compile` has a
-/// recorded length in `crates/inillucent-compat/tests/policy.rs`, and an arm
+/// recorded length in `crates/inillucent-compat/tests/tooling/policy.rs`, and an arm
 /// that is three fields wide is one of the cheapest to lift out of it.
 ///
 /// @param func - which function
@@ -765,7 +765,7 @@ fn time_call(
 /// Compiles an arithmetic, bitwise or concatenation operator.
 ///
 /// Its own function only because `compile` has a recorded length in
-/// `crates/inillucent-compat/tests/policy.rs` and this arm is the one that
+/// `crates/inillucent-compat/tests/tooling/policy.rs` and this arm is the one that
 /// grew a field (task-1980). What the field is for is in
 /// `crate::scalar::GeneralArith`.
 ///
@@ -792,7 +792,7 @@ fn general_arith(
 /// Compiles `IN` over a value list.
 ///
 /// Its own function for the reason `general_arith` above is: `compile` has a
-/// recorded length in `crates/inillucent-compat/tests/policy.rs`, and
+/// recorded length in `crates/inillucent-compat/tests/tooling/policy.rs`, and
 /// task-2088 gave the `BETWEEN` arm a collation and an affinity per bound.
 /// This arm is the one whose call fits on one line, so lifting it takes more
 /// lines out of `compile` than lifting `BETWEEN` would.

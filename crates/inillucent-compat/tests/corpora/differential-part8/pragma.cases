@@ -1,6 +1,6 @@
 # Differential cases, category `pragma`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 prg-001	PRAGMA user_version=7; PRAGMA user_version
 prg-002	CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT NOT NULL DEFAULT 'x'); SELECT cid,name,type,"notnull",dflt_value,pk FROM pragma_table_info('t')
 prg-003	CREATE TABLE t(a,b); CREATE UNIQUE INDEX i ON t(a); SELECT name,"unique",origin,partial FROM pragma_index_list('t')

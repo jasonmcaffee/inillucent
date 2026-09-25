@@ -187,7 +187,7 @@ the same command table as the command line. `--readonly` refuses every statement
 
 ## The API
 
-These are the driver's classes and functions. `cargo test -p inillucent-compat --test documentation`
+These are the driver's classes and functions. `cargo test -p inillucent-compat --test tooling documentation::`
 reads this table and fails if a name in the first column is not declared in the driver source.
 
 | what | one line |

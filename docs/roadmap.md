@@ -127,7 +127,7 @@ lines needed, and 2 lines are left:
 | `crates/inillucent-cli/src/import.rs` | 1 |
 
 `no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at` in
-`crates/inillucent-compat/tests/policy.rs` records the count for each file. The test fails if a
+`crates/inillucent-compat/tests/tooling/policy.rs` records the count for each file. The test fails if a
 count goes up.
 
 **Why a user wants it.** When every program uses the driver, a fix in the driver reaches every

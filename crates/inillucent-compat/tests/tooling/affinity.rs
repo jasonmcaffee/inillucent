@@ -39,16 +39,25 @@ fn a_child_waits_for_its_input_to_close() {
     }
 }
 
+/// Returns the full libtest name of the waiting child's test.
+///
+/// libtest names a test by its module path without the crate, so in the
+/// `tooling` binary this is `affinity::a_child_waits_for_its_input_to_close`.
+/// Read from `module_path!` rather than written out, so it is right in any
+/// binary this file is compiled into, including one where it is the root.
+fn child_test_name() -> String {
+    match module_path!().split_once("::") {
+        Some((_, inside)) => format!("{inside}::a_child_waits_for_its_input_to_close"),
+        None => "a_child_waits_for_its_input_to_close".to_string(),
+    }
+}
+
 /// Returns a command that starts this test binary as a waiting child.
 fn waiting_child() -> Command {
     let program = std::env::current_exe().expect("the test binary has a path");
     let mut command = Command::new(program);
     command
-        .args([
-            "a_child_waits_for_its_input_to_close",
-            "--exact",
-            "--test-threads=1",
-        ])
+        .args([child_test_name().as_str(), "--exact", "--test-threads=1"])
         .env(CHILD, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

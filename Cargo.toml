@@ -58,6 +58,20 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Debug and test builds keep file and line numbers and drop everything else.
+#
+# Measured on the 24 thread development box with rustc 1.95: a cold
+# `cargo test --workspace --no-run` took 115 s with the default debuginfo, 68 s
+# with `line-tables-only` and 56 s with `debug = false`. `false` was rejected
+# because a panic in a crash suite with no line number is a panic somebody has
+# to reproduce before they can read it. What goes is variable inspection under
+# a debugger, which nobody uses on this suite. On MSVC the debuginfo lives in
+# the PDB files beside the executables, so the saving is link time and the size
+# of those files. `profile.test` inherits this. The release profile above is
+# not affected.
+[profile.dev]
+debug = "line-tables-only"
+
 # The one lint this workspace turns off, and why.
 #
 # **`doc_lazy_continuation` fires on the house prose style.** This repository's

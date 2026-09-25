@@ -25,10 +25,10 @@ The campaigns are ordinary test targets in `inillucent-compat`, in the `durabili
 ```sh
 target/debug/inillucent-testrun --tier durability     # every campaign, through the parallel runner
 
-cargo test -p inillucent-compat --test durability     # the rollback journal campaigns and recovery-crash.txt
-cargo test -p inillucent-compat --test wal_crash      # the write ahead log campaigns
-cargo test -p inillucent-compat --test faults         # allocation.txt
-cargo test -p inillucent-compat --test crash_reports  # checks every report against its floor
+cargo test -p inillucent-compat --test durability durability::     # the rollback journal campaigns and recovery-crash.txt
+cargo test -p inillucent-compat --test durability wal_crash::      # the write ahead log campaigns
+cargo test -p inillucent-compat --test durability faults::         # allocation.txt
+cargo test -p inillucent-compat --test tooling crash_reports::  # checks every report against its floor
 ```
 
 ## The reports
@@ -72,7 +72,7 @@ correct result at every cut point.
 
 ### Write ahead log
 
-Written by `crates/inillucent-compat/tests/wal_crash.rs`. Each row gives the cut point, the database
+Written by `crates/inillucent-compat/tests/durability/wal_crash.rs`. Each row gives the cut point, the database
 recovery produced (`old` or `new`), and whether the transaction reported a commit (`committed`). The
 first line counts the cuts, how many ended `old`, how many ended `new`, and how many ended damaged
 and detected.
@@ -96,7 +96,7 @@ and detected.
 ## A report that shrinks is a failure
 
 A campaign that reports fewer cut points than before has stopped testing something.
-`crates/inillucent-compat/tests/crash_reports.rs` holds a floor for each report except
+`crates/inillucent-compat/tests/tooling/crash_reports.rs` holds a floor for each report except
 `allocation.txt`, and fails when a report falls below its floor. The floor lives in the test source
 because a campaign rewrites its own report file. Raising a floor is a deliberate edit.
 

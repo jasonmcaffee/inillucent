@@ -9,7 +9,7 @@
 //! describing a tree that is no longer the one on the disk.
 //!
 //! Split out of `lib.rs` in task-1980, which added the first of the two. The
-//! module ceiling in `crates/inillucent-compat/tests/policy.rs` is what asked
+//! module ceiling in `crates/inillucent-compat/tests/tooling/policy.rs` is what asked
 //! for the split rather than for a larger number, and the two functions belong
 //! together: they answer the same question from opposite ends, one rebuilding
 //! every handle from the catalog and one re-pointing the handles that are

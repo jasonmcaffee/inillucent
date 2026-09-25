@@ -1,6 +1,6 @@
 # Differential cases, category `upsert`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 ups-001	CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT); INSERT INTO t VALUES(1,10,'a'),(2,20,'b'); INSERT INTO t VALUES(1,99,'z') ON CONFLICT(id) DO UPDATE SET v=excluded.v; SELECT * FROM t ORDER BY id
 ups-002	CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT); INSERT INTO t VALUES(1,10,'a'),(2,20,'b'); INSERT INTO t VALUES(1,99,'z') ON CONFLICT(id) DO NOTHING; SELECT * FROM t ORDER BY id
 ups-003	CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT); INSERT INTO t VALUES(1,10,'a'),(2,20,'b'); INSERT INTO t VALUES(1,99,'z') ON CONFLICT DO UPDATE SET v=v+excluded.v; SELECT * FROM t ORDER BY id

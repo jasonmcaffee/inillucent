@@ -386,7 +386,7 @@ impl crate::ImportedDatabase {
             // three passing cases: SQLite's own `changes()` reports 1 for a
             // *recognised* command (`'pgsz'`, `'rebuild'`,
             // `'integrity-check'`) and only 0 for one SQLite itself refuses -
-            // `crates\inillucent-compat\tests\fts5.rs`'s
+            // `crates\inillucent-compat\tests\differential\fts5.rs`'s
             // `an_unknown_command_is_refused`. Both engines answer `ok:
             // false` there, so the count is right and the count is what has
             // to answer 0: this loop errors out through the `?` below before

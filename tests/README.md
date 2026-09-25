@@ -16,12 +16,12 @@ A fixture lives here so that no single crate owns it.
 
 | File | What it is | What reads or writes it |
 |---|---|---|
-| `selection.toml` | the map from a changed path to the test targets that path can break. Every test target needs a row | read by `inillucent-testrun --changed`. `crates/inillucent-compat/tests/selection.rs` fails on a target with no row |
+| `selection.toml` | the map from a changed path to the test targets that path can break. Every test target needs a row | read by `inillucent-testrun --changed`. `crates/inillucent-compat/tests/tooling/selection.rs` fails on a target with no row |
 | `timings.toml` | how long each test target took under the parallel runner, in milliseconds | written by `inillucent-testrun --record`. The runner starts the longest targets first and uses these times for its time limit |
 | `performance-history.tsv` | what each benchmark workload cost, beside the pinned SQLite 3.53.4 | appended by `inillucent-perfhistory`, one row per workload per run |
 | `nightly-history.tsv` | which long suite passed, and when | appended by `pwsh tools/run-nightly.ps1`, one row per target per run |
 | `fuzz-history.tsv` | each fuzz run and its outcome | appended by `pwsh tools/run-fuzz.ps1`. See [`fuzz/README.md`](../fuzz/README.md) |
-| `escapes.toml` | every defect that reached a user, and the test that now catches it | read by `crates/inillucent-compat/tests/escapes.rs` |
+| `escapes.toml` | every defect that reached a user, and the test that now catches it | read by `crates/inillucent-compat/tests/tooling/escapes.rs` |
 
 ## The folders
 

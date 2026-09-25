@@ -1682,7 +1682,7 @@
       "lacks": [
         "session"
       ],
-      "why": "the npm package wraps the command line: every call is a process, so a transaction, a savepoint or a temporary table cannot outlive one step. Rows do outlive it - they are in the file - so only the five cases that hold one of those are skipped. Held-transaction and two-connection behaviour is graded by crates/inillucent-compat/tests/process_concurrency.rs and busy_timeout.rs, over real processes, which is stronger than a runner could be."
+      "why": "the npm package wraps the command line: every call is a process, so a transaction, a savepoint or a temporary table cannot outlive one step. Rows do outlive it - they are in the file - so only the five cases that hold one of those are skipped. Held-transaction and two-connection behaviour is graded by crates/inillucent-compat/tests/durability/process_concurrency.rs and busy_timeout.rs, over real processes, which is stronger than a runner could be."
     },
     "go": {
       "lacks": [

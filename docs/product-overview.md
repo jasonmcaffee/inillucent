@@ -46,7 +46,7 @@ inillucent has no server, no port and no connection string. An install gives you
 Several processes can use one `.rdb` file at the same time. They lock the file with the same
 SHARED, RESERVED, PENDING and EXCLUSIVE locks SQLite uses, under `PRAGMA locking_mode = normal`,
 which is the default. A commit made by one process is visible to the next statement in another
-process. `crates/inillucent-compat/tests/process_concurrency.rs` runs two writer processes against
+process. `crates/inillucent-compat/tests/durability/process_concurrency.rs` runs two writer processes against
 one file and checks that the rows in the file match the commits the engine acknowledged.
 
 ## Who it is for

@@ -1,7 +1,7 @@
 # The documents the writing rules apply to, relative to the repository root.
 #
 # A directory means every `.md` under it. `tools/doc-style/check.mjs` and
-# `crates/inillucent-compat/tests/documentation.rs` both read this file.
+# `crates/inillucent-compat/tests/tooling/documentation.rs` both read this file.
 #
 # Left out on purpose: `CHANGELOG.md`, the design documents under `tasks/` and `tests/*-tdd.md`, and
 # the reports under `compat/`. The changelog and the design documents record what was written at the

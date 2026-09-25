@@ -1,6 +1,6 @@
 # Differential cases, category `affinity`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 aff-001	SELECT '10' < 9, '10' < '9', 10 < '9', '10' = 10, typeof('10'+0)
 aff-002	CREATE TABLE t(a INTEGER); INSERT INTO t VALUES('10'),('9'); SELECT a, typeof(a) FROM t ORDER BY a
 aff-003	CREATE TABLE t(a TEXT); INSERT INTO t VALUES(10),(9); SELECT a, typeof(a) FROM t ORDER BY a

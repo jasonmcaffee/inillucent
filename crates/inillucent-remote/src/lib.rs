@@ -60,7 +60,7 @@
 // implementation written here, which would be a far larger security surface
 // than the plaintext migration this replaces. Every `unsafe` block in those two
 // files carries its own SAFETY note, which
-// `crates/inillucent-compat/tests/policy.rs` checks.
+// `crates/inillucent-compat/tests/tooling/policy.rs` checks.
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(clippy::indexing_slicing)]

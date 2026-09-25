@@ -1,6 +1,6 @@
 # Differential cases, category `null`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 null-001	SELECT NULL = NULL, NULL <> NULL, NULL IS NULL, NULL IS NOT NULL
 null-002	SELECT 1 = NULL, 1 < NULL, 1 > NULL, NULL + 1, NULL || 'a'
 null-003	SELECT NULL AND 0, NULL AND 1, NULL OR 0, NULL OR 1, NOT NULL

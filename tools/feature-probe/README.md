@@ -10,7 +10,7 @@ runs.
 
 The probe compares errors too. Many differences are a refusal where SQLite answers, or an error
 message that names something else. A probe that compared only rows would miss those.
-`crates/inillucent-compat/tests/semantics.rs` makes the same comparison inside the test suite. The
+`crates/inillucent-compat/tests/differential/semantics.rs` makes the same comparison inside the test suite. The
 feature probe covers more ground, and a difference it finds should become a case in `semantics.rs`.
 
 ## Running it

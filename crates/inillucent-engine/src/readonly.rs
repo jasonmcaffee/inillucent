@@ -98,7 +98,7 @@ pub const CONNECTION_PRAGMAS: &[&str] = &[
 /// (`incremental_vacuum`, `journal_mode`, `optimize`, `wal_checkpoint`).
 ///
 /// It is stated rather than derived so that a pragma added to the register and
-/// to neither list fails `crates/inillucent-compat/tests/readonly_pragmas.rs`
+/// to neither list fails `crates/inillucent-compat/tests/engine/readonly_pragmas.rs`
 /// instead of quietly defaulting to whichever answer the code happens to give.
 pub const FILE_PRAGMAS: &[&str] = &[
     "application_id",

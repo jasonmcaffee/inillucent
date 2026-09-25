@@ -606,3 +606,48 @@ Functional tests, each asserting a value:
 - LTO settings: https://doc.rust-lang.org/cargo/reference/profiles.html
 - how other projects split PR checks from scheduled runs: https://github.com/rust-lang/rust-analyzer/blob/master/.github/workflows/ci.yaml, https://github.com/tokio-rs/tokio/blob/master/.github/workflows/loom.yml, https://github.com/MaterializeInc/materialize/blob/main/ci/README.md, https://github.com/rust-lang/rustc-dev-guide/blob/main/src/tests/perf.md
 - the full research notes with every claim's source: `_agent_output/task-2114-build-times/research.md`
+
+## 12. What was built, and where it departs from the design
+
+Implemented in task-2125, which took both follow up tickets (task-2118 and task-2119) as one piece of
+work. Each point below says what differs from sections 5 and 8, and why.
+
+- **Cadence (C1)** is as designed. `selection::select_at` applies it and `selection::select` is the
+  closure alone. A change that selects everything (a path no rule covers) still leaves out the nightly
+  tier and keeps every merge row. The durability `covers` lists now name the engine's storage stack
+  (`inillucent-engine`, `-txn`, `-wal`, `-pool`, `-tree`, `-sim`, plus `-vfs`, `-exec`, `-catalog` or
+  `-storage` where the suite drives them). No durability row names `inillucent-sql`.
+- **The artifact list (C2)** is `testplan::render_artifacts` and `parse_artifacts`. A row gained
+  `builds = [...]`: the executables a suite starts itself. `gates_fail_closed` names the smoke target
+  and the two live database suites, so the outer run builds them even when it did not select them;
+  without it the narrowed build would leave the nested runs nothing to run. The nested cases point
+  `CARGO` at the runner itself, which refuses any cargo command line, so every run proves no cargo
+  was started.
+- **The narrowed build (C3)** was checked on cargo 1.95 first: a `--test` name present in only one
+  named package is accepted, and `--lib` on a package with no library is ignored. The programs build
+  runs when a selected row is in `inillucent-compat` (`testplan::PROGRAM_PACKAGES`) or requires
+  `shell`. `requires = ["shell"]` alone was not enough: 22 compat suites start a program and declare
+  no such row. A contract test fails when a test file outside those packages uses `cliproc`.
+- **Declared absences (C8)** excuse a missing prerequisite only when the row's `requires` names it
+  too, so a declared word that happens to appear in some other suite's skip sentence excuses nothing.
+  The runner also gained `--summary <file>`, the JSON the nightly reads.
+- **One binary per tier (C5)** puts each tier's root in `tests/<tier>/main.rs`, not `tests/<tier>.rs`.
+  A crate root resolves `mod x;` beside itself, so `tests/<tier>.rs` would look for
+  `tests/x.rs`; cargo already treats `tests/<name>/main.rs` as a test target called `<name>`. The
+  move was checked by listing every suite's test names before and after: 149 suites, 1,189 tests,
+  identical. One test re-executes its own binary by test name (`affinity`) and now builds the name
+  from `module_path!`. Two tooling suites read test files by path (`escapes`, `scenarios`) and now
+  look one directory down. References to the moved files in the rest of the repository were
+  rewritten, except in `tasks/`, `CHANGELOG.md` history, a fixture whose bytes are part of what a
+  test checks, and `inillucent-bench/src/runs.rs`, whose digest the retrieval baseline guard holds.
+- **The nightly (C6)** is `packaging/nightly.ps1`, with `nightly-evidence.ps1` holding the functions
+  it and `ship.ps1` share. The older scheduled task `inillucent nightly tier`
+  (`tools/run-nightly.ps1`, 03:00) ran the same tier; `register-nightly.ps1` removes it, and the new
+  nightly appends to the same `tests/nightly-history.tsv`. The rolling pre release is tagged at the
+  public mirror's own default branch, because the private commit it was built from is not on the
+  mirror; its notes name the commit.
+- **The release (C7)** builds the five targets at once into `<target>/release-all/<triple>`, and
+  `release-macos.ps1` gained `-BuiltRoot` to read the Apple builds from there. `-Serial` keeps the old
+  order, and `-BuildOnly` stops after compiling, for measuring.
+- **The machine (C10)** is `packaging/setup-machine.ps1` with a switch per setting. Nothing is set
+  without its switch, because each one changes every Rust build on the machine.

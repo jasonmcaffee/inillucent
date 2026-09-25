@@ -8,7 +8,7 @@
 //! all of them once and `InsertPlan::build_row` only ever reads the result.
 //!
 //! Split out of `dml.rs` to keep that module under the size this workspace
-//! holds its largest files to (`crates/inillucent-compat/tests/policy.rs`,
+//! holds its largest files to (`crates/inillucent-compat/tests/tooling/policy.rs`,
 //! `no_module_grows_past_the_size_it_is_recorded_at`) - this is one idea, *what
 //! an insert's own row looks like before any row exists to write*, and it is
 //! named from exactly three places: [`crate::dml::insert_at`] and

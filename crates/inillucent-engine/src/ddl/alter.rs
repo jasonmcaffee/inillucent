@@ -171,7 +171,7 @@ impl crate::ImportedDatabase {
     /// Removes a table, its indexes, its triggers and every tree they held.
     ///
     /// Its own function because `drop_object` has a recorded length in
-    /// `crates/inillucent-compat/tests/policy.rs`, and the three kinds it
+    /// `crates/inillucent-compat/tests/tooling/policy.rs`, and the three kinds it
     /// handles have nothing in common but the name they were given.
     ///
     /// @param name - the table's name as written

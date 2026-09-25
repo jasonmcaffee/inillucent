@@ -622,7 +622,7 @@ times anything.**
 | a machine with one class of core, or macOS | not pinned. macOS has no call for it |
 | `## configuration` block (`inillucent-fullgate`, `inillucent-writegate`, `inillucent-searchgate`), `## cores` block (the other programs) | prints the class and the mask, for example `performance - 8 of 24 logical processors, mask 0xC03C03` |
 | `cores` column of `tests/performance-history.tsv` | records the same |
-| a child such as `sqlite-bench` | inherits the mask. The launcher reads the child's mask back and refuses to time it when the mask differs. `crates/inillucent-compat/tests/affinity.rs` fails if a child can run on other processors |
+| a child such as `sqlite-bench` | inherits the mask. The launcher reads the child's mask back and refuses to time it when the mask differs. `crates/inillucent-compat/tests/tooling/affinity.rs` fails if a child can run on other processors |
 
 Pinning makes `correlated.exists` slower, as [the workloads that are
 slower](#the-workloads-that-are-slower) shows.

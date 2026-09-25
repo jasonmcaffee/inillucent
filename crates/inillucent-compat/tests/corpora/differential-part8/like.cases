@@ -1,6 +1,6 @@
 # Differential cases, category `like`, from task-1979's review of commit 3073058.
 # One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
-# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+# Read by `crates/inillucent-compat/tests/differential/differential_part8.rs`; nothing else parses this.
 like-001	SELECT 'abc' LIKE 'a_c', 'abc' LIKE 'a__c', 'a%c' LIKE 'a\\%c' ESCAPE '\\', 'abc' LIKE 'a\\%c' ESCAPE '\\'
 like-002	SELECT 'a_c' LIKE 'a\\_c' ESCAPE '\\', 'abc' LIKE 'a\\_c' ESCAPE '\\', 'a\\c' LIKE 'a\\\\c' ESCAPE '\\'
 like-003	SELECT 'É' LIKE 'é', 'I' LIKE 'i', '中' LIKE '中'

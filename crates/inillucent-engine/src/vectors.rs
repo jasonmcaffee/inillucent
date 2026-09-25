@@ -682,7 +682,7 @@ fn declared_metric(connected: &vtab::Connected) -> inillucent_sql::catalog_view:
                 // with nothing to show it happened. `configuration` now sets
                 // `IndexConfig::metric` from the table's own declaration
                 // (`core_metric` in `merge.rs`), `VectorSet::push` reads it to
-                // decide whether to normalize, and `crates/inillucent-compat/tests/vector_metric.rs`
+                // decide whether to normalize, and `crates/inillucent-compat/tests/engine/vector_metric.rs`
                 // is the test that has to fail if the two ever disagree again.
                 Ok(inillucent_search::options::Metric::L2) => IndexMetric::L2,
                 // Unreachable in practice - a value the store itself would have

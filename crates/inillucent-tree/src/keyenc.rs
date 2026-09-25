@@ -8,7 +8,7 @@
 //! Extracted whole from `paged.rs` in task-1932, nothing changed in the move.
 //! It is one question - how a key becomes bytes - rather than a slice taken to
 //! make a number fit, and `paged.rs` is one of the modules
-//! `crates/inillucent-compat/tests/policy.rs` holds a line ceiling over.
+//! `crates/inillucent-compat/tests/tooling/policy.rs` holds a line ceiling over.
 
 use inillucent_value::collation::Collation;
 

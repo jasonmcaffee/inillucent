@@ -264,7 +264,7 @@ fn where_recovery_starts(
 /// can already replay without the catalog. The catalog is read again after
 /// it; if it is still unreadable, the file is refused the way it always
 /// was, unchanged - a corruption no record in the log describes is not
-/// this pass's to fix, and `crates/inillucent-compat/tests/corruption.rs`
+/// this pass's to fix, and `crates/inillucent-compat/tests/durability/corruption.rs`
 /// is what proves that stays true. Reached only on the error path, so an
 /// ordinary open pays nothing extra: one read, one pass, exactly as before.
 ///

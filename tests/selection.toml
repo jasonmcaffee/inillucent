@@ -29,44 +29,66 @@
 # those suites reports success when its prerequisite is absent - correct for a
 # fresh clone, and a trap for anybody reading the green as evidence - so the
 # runner counts them, names them, and fails under `--strict`.
+#
+# ## When a tier runs
+#
+# Every `[[tier]]` has a `cadence`: `change`, `merge` or `nightly`.
+# `inillucent-testrun --changed` selects a `change` tier row by the closure, a
+# `merge` tier row only when a package that actually changed is in its `covers`
+# (or its own crate or file changed), and a `nightly` tier row never. A run
+# with no `--changed` and no `--tier` runs `change` and `merge`. CI runs
+# `--cadence merge`, and the nightly runs `--cadence nightly`, which is every
+# tier. So a `merge` row's `covers` has to name the crates the suite actually
+# exercises, not only the top of its stack: a change below the top reaches it
+# in CI and in the nightly, and reaches it in a change run only through a
+# seed its `covers` names.
 
 
 [[tier]]
 name = "smoke"
 purpose = "the ten-second answer: a real file opened, written, reopened, read"
+cadence = "change"
 
 [[tier]]
 name = "unit"
 purpose = "every crate's own #[cfg(test)] modules"
+cadence = "change"
 
 [[tier]]
 name = "engine"
 purpose = "SQL and storage behaviour over real database files"
+cadence = "change"
 
 [[tier]]
 name = "differential"
 purpose = "graded against the pinned SQLite 3.53.4"
+cadence = "change"
 
 [[tier]]
 name = "durability"
 purpose = "crashes, injected faults, corruption and concurrency"
+cadence = "merge"
 
 [[tier]]
 name = "e2e"
 purpose = "the public surfaces an application binds to, end to end"
+cadence = "change"
 
 [[tier]]
 name = "perf"
 purpose = "the cost guards, so a regression fails a test rather than a benchmark"
+cadence = "merge"
 exclusive = true
 
 [[tier]]
 name = "retrieval"
 purpose = "the embedding and retrieval engine, and its graded harness"
+cadence = "change"
 
 [[tier]]
 name = "tooling"
 purpose = "the checks that keep the repository's own rules true"
+cadence = "change"
 
 # The long forms, run on a schedule rather than on a change (task-2036). Every
 # target here has a short form in another tier that runs on every change: the
@@ -78,6 +100,7 @@ purpose = "the checks that keep the repository's own rules true"
 [[tier]]
 name = "nightly"
 purpose = "the long forms: a full day's workload, every released format, both directions"
+cadence = "nightly"
 
 # ---------------------------------------------------------------------------
 # What a change outside every crate selects.
@@ -419,7 +442,8 @@ tier = "unit"
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "analyze_reopen"
+name = "engine"
+module = "analyze_reopen"
 tier = "engine"
 covers = ["inillucent-engine"]
 # The case that needs a log nothing has folded into the file gets one by running
@@ -431,35 +455,40 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "analyze_same_session"
+name = "engine"
+module = "analyze_same_session"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-catalog", "inillucent-sql"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "autoindex_reopen"
+name = "engine"
+module = "autoindex_reopen"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "conformance"
+name = "engine"
+module = "conformance"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "dml"
+name = "engine"
+module = "dml"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "functions"
+name = "engine"
+module = "functions"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext"]
 
@@ -472,7 +501,8 @@ covers = ["inillucent-engine", "inillucent-ext"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "schema_function_policy"
+name = "engine"
+module = "schema_function_policy"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext"]
 
@@ -484,7 +514,8 @@ covers = ["inillucent-engine", "inillucent-ext"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "embed_direct_only"
+name = "engine"
+module = "embed_direct_only"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext", "inillucent-search"]
 features = ["inillucent-engine/embed"]
@@ -499,14 +530,16 @@ requires = ["embed"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "reentrant_connection"
+name = "engine"
+module = "reentrant_connection"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "hostile"
+name = "engine"
+module = "hostile"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext"]
 # The depth and value-bound cases drive the built binaries, because what they
@@ -517,14 +550,16 @@ covers = ["inillucent-engine", "inillucent-ext"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "levers"
+name = "engine"
+module = "levers"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "multi_database_commit"
+name = "engine"
+module = "multi_database_commit"
 tier = "engine"
 covers = ["inillucent-engine"]
 # The transaction that must stay undecided is written by `inillucent-shell` in a
@@ -533,14 +568,16 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "multi_database_names"
+name = "engine"
+module = "multi_database_names"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "multi_database_participants"
+name = "engine"
+module = "multi_database_participants"
 tier = "engine"
 covers = ["inillucent-engine"]
 
@@ -552,7 +589,8 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "module_stages"
+name = "engine"
+module = "module_stages"
 tier = "engine"
 covers = ["inillucent-engine"]
 
@@ -563,56 +601,64 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "put_stages"
+name = "engine"
+module = "put_stages"
 tier = "engine"
 covers = ["inillucent-tree"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "page_sizes"
+name = "engine"
+module = "page_sizes"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_connect"
+name = "engine"
+module = "new_engine_connect"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_create"
+name = "engine"
+module = "new_engine_create"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_extent_packing"
+name = "engine"
+module = "new_engine_extent_packing"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-pool"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_explain"
+name = "engine"
+module = "new_engine_explain"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_page_ownership"
+name = "engine"
+module = "new_engine_page_ownership"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_log_lead"
+name = "engine"
+module = "new_engine_log_lead"
 # It reads `_agent_output/fixtures/medium.db`, which `tools/build-gate-fixtures.sh`
 # builds and no clone carries.
 requires = ["fixtures"]
@@ -622,21 +668,24 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_log_retire"
+name = "engine"
+module = "new_engine_log_retire"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_rollback"
+name = "engine"
+module = "new_engine_rollback"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_search"
+name = "engine"
+module = "new_engine_search"
 # It opens a tracked fixture under `compat/fixtures/`, so this is declared for
 # a checkout missing one rather than for a fresh clone.
 requires = ["tracked-fixtures"]
@@ -646,35 +695,40 @@ covers = ["inillucent-engine", "inillucent-search"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_slt"
+name = "engine"
+module = "new_engine_slt"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_statement"
+name = "engine"
+module = "new_engine_statement"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_subquery"
+name = "engine"
+module = "new_engine_subquery"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_surface"
+name = "engine"
+module = "new_engine_surface"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_tree_identity"
+name = "engine"
+module = "new_engine_tree_identity"
 # The same tracked fixture corpus under `compat/fixtures/`.
 requires = ["tracked-fixtures"]
 tier = "engine"
@@ -683,35 +737,40 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_vtab_stream"
+name = "engine"
+module = "new_engine_vtab_stream"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "plan_cache"
+name = "engine"
+module = "plan_cache"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "compiled_chain_reuse"
+name = "engine"
+module = "compiled_chain_reuse"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-exec"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "reindex_without_rowid"
+name = "engine"
+module = "reindex_without_rowid"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "limited_writes"
+name = "engine"
+module = "limited_writes"
 tier = "engine"
 # The binder carries ORDER BY onto the query that finds a write's rows, and the
 # engine and the trigger runner each build that query, so all three are here.
@@ -720,77 +779,88 @@ covers = ["inillucent-engine", "inillucent-exec", "inillucent-sql"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "subquery_values"
+name = "engine"
+module = "subquery_values"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-exec"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "search"
+name = "engine"
+module = "search"
 tier = "engine"
 covers = ["inillucent-search", "inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "segmented_generations"
+name = "engine"
+module = "segmented_generations"
 tier = "engine"
 covers = ["inillucent-search", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "segment_merge_bound"
+name = "engine"
+module = "segment_merge_bound"
 tier = "engine"
 covers = ["inillucent-search", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "segment_delta_chain"
+name = "engine"
+module = "segment_delta_chain"
 tier = "engine"
 covers = ["inillucent-search", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "sql"
+name = "engine"
+module = "sql"
 tier = "engine"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "storage"
+name = "engine"
+module = "storage"
 tier = "engine"
 covers = ["inillucent-storage"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "vector"
+name = "engine"
+module = "vector"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-search"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "vector_metric"
+name = "engine"
+module = "vector_metric"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-search"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "vtab_lifecycle"
+name = "engine"
+module = "vtab_lifecycle"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "vtab"
+name = "engine"
+module = "vtab"
 tier = "engine"
 # Its `json_each` and `json_tree` cases are compared against the pinned
 # SQLite through `differential::compare_queries`, which returns zero and
@@ -801,7 +871,8 @@ covers = ["inillucent-engine", "inillucent-ext"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "wal"
+name = "engine"
+module = "wal"
 tier = "engine"
 covers = ["inillucent-engine"]
 
@@ -944,7 +1015,8 @@ tier = "engine"
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "torn_page_with_image"
+name = "engine"
+module = "torn_page_with_image"
 tier = "engine"
 
 [[target]]
@@ -964,7 +1036,8 @@ tier = "engine"
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "advanced_sql"
+name = "differential"
+module = "advanced_sql"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -972,7 +1045,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "attach"
+name = "differential"
+module = "attach"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -980,7 +1054,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "catalog"
+name = "differential"
+module = "catalog"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -988,7 +1063,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "cli"
+name = "differential"
+module = "cli"
 tier = "differential"
 covers = ["inillucent-cli"]
 requires = ["shell"]
@@ -997,6 +1073,7 @@ requires = ["shell"]
 package = "inillucent-compat"
 kind = "test"
 name = "differential"
+module = "differential"
 tier = "differential"
 covers = ["inillucent-storage"]
 requires = ["oracle"]
@@ -1004,7 +1081,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "dml_differential"
+name = "differential"
+module = "dml_differential"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1012,7 +1090,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "dml_subqueries"
+name = "differential"
+module = "dml_subqueries"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1020,7 +1099,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "foreign_keys"
+name = "differential"
+module = "foreign_keys"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1028,7 +1108,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "fts5"
+name = "differential"
+module = "fts5"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1036,7 +1117,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "fts5_parity"
+name = "differential"
+module = "fts5_parity"
 tier = "differential"
 covers = ["inillucent-ext"]
 requires = ["oracle"]
@@ -1044,7 +1126,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "fts5_legacy_layout"
+name = "engine"
+module = "fts5_legacy_layout"
 tier = "engine"
 covers = ["inillucent-ext"]
 
@@ -1057,7 +1140,8 @@ covers = ["inillucent-ext"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "format_refusal"
+name = "engine"
+module = "format_refusal"
 tier = "engine"
 covers = ["inillucent-ext", "inillucent-search", "inillucent-cli"]
 # One of the eleven cases spawns `inillucent query` and reads its exit code,
@@ -1067,7 +1151,8 @@ covers = ["inillucent-ext", "inillucent-search", "inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "json"
+name = "differential"
+module = "json"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1075,7 +1160,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "lifecycle"
+name = "differential"
+module = "lifecycle"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1088,7 +1174,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "migrate_realistic"
+name = "e2e"
+module = "migrate_realistic"
 tier = "e2e"
 covers = ["inillucent-migrate"]
 requires = ["oracle", "tracked-fixtures"]
@@ -1103,7 +1190,8 @@ requires = ["oracle", "tracked-fixtures"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "release_format"
+name = "e2e"
+module = "release_format"
 tier = "e2e"
 covers = ["inillucent-engine"]
 # task-2074: the case that writes into every release's file and crashes kills a
@@ -1118,7 +1206,8 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "release_format_history"
+name = "nightly"
+module = "release_format_history"
 tier = "nightly"
 covers = ["inillucent-engine"]
 requires = ["previous-release", "tracked-fixtures"]
@@ -1126,7 +1215,8 @@ requires = ["previous-release", "tracked-fixtures"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "migrate_sqlite"
+name = "differential"
+module = "migrate_sqlite"
 tier = "differential"
 covers = ["inillucent-migrate"]
 requires = ["shell"]
@@ -1134,7 +1224,8 @@ requires = ["shell"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_ddl"
+name = "differential"
+module = "new_engine_ddl"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1142,7 +1233,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_differential"
+name = "differential"
+module = "new_engine_differential"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1150,7 +1242,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_extents"
+name = "differential"
+module = "new_engine_extents"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1158,7 +1251,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_pragma"
+name = "differential"
+module = "new_engine_pragma"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1166,7 +1260,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_vtab"
+name = "differential"
+module = "new_engine_vtab"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1174,7 +1269,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_writes"
+name = "differential"
+module = "new_engine_writes"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1182,7 +1278,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "oracle"
+name = "differential"
+module = "oracle"
 tier = "differential"
 covers = ["inillucent-storage"]
 requires = ["oracle"]
@@ -1190,7 +1287,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "ordering"
+name = "differential"
+module = "ordering"
 tier = "differential"
 covers = ["inillucent-engine", "inillucent-exec"]
 requires = ["oracle"]
@@ -1198,7 +1296,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "planner"
+name = "differential"
+module = "planner"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1207,7 +1306,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "trigger_depth"
+name = "differential"
+module = "trigger_depth"
 tier = "differential"
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec"]
 requires = ["oracle"]
@@ -1215,7 +1315,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "pragma"
+name = "differential"
+module = "pragma"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1223,7 +1324,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "registers"
+name = "differential"
+module = "registers"
 tier = "differential"
 covers = ["inillucent-search", "inillucent-engine"]
 requires = ["oracle"]
@@ -1231,7 +1333,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "result_names_and_codes"
+name = "differential"
+module = "result_names_and_codes"
 tier = "differential"
 covers = ["inillucent-engine", "inillucent-sql"]
 requires = ["oracle"]
@@ -1239,7 +1342,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "rtree"
+name = "differential"
+module = "rtree"
 tier = "differential"
 covers = ["inillucent-engine", "inillucent-ext"]
 requires = ["shell"]
@@ -1247,7 +1351,8 @@ requires = ["shell"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "schema_forms"
+name = "differential"
+module = "schema_forms"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1255,7 +1360,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "semantics"
+name = "differential"
+module = "semantics"
 tier = "differential"
 covers = ["inillucent-cli"]
 requires = ["shell"]
@@ -1263,14 +1369,16 @@ requires = ["shell"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "services"
+name = "differential"
+module = "services"
 tier = "differential"
 covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "syntax"
+name = "differential"
+module = "syntax"
 tier = "differential"
 covers = ["inillucent-sql"]
 requires = ["oracle"]
@@ -1278,7 +1386,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "temp_objects"
+name = "differential"
+module = "temp_objects"
 tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
@@ -1288,122 +1397,138 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "btree_model"
+name = "durability"
+module = "btree_model"
 tier = "durability"
 # `every_retained_sequence_still_passes` replays `compat/corpus/btree/`, which
 # is tracked - so this is declared for the case where somebody has moved it
 # rather than for a fresh clone.
 requires = ["btree-corpus"]
-covers = ["inillucent-storage"]
-
-[[target]]
-package = "inillucent-compat"
-kind = "test"
-name = "concurrency"
-tier = "durability"
-covers = ["inillucent-engine"]
-
-[[target]]
-package = "inillucent-compat"
-kind = "test"
-name = "corruption"
-tier = "durability"
-covers = ["inillucent-storage"]
+covers = ["inillucent-storage", "inillucent-vfs"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
 name = "durability"
+module = "concurrency"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-sim"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "fault_sweep"
+name = "durability"
+module = "corruption"
 tier = "durability"
-covers = ["inillucent-storage"]
+covers = ["inillucent-storage", "inillucent-vfs"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "faults"
+name = "durability"
+module = "durability"
 tier = "durability"
-covers = ["inillucent-engine"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim", "inillucent-exec", "inillucent-vfs"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "fault_shapes"
+name = "durability"
+module = "fault_sweep"
+tier = "durability"
+covers = ["inillucent-storage", "inillucent-transaction", "inillucent-sim", "inillucent-vfs"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "durability"
+module = "faults"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "durability"
+module = "fault_shapes"
 tier = "durability"
 # The two faults that are not a power loss: a misdirected write and a sync that
 # lies (task-2066 section 4.4.8). It drives `inillucent-sim` and the new engine
 # and needs nothing off disk, so it has no `requires` row.
-covers = ["inillucent-engine", "inillucent-sim"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim", "inillucent-exec", "inillucent-vfs"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "multi_database_crash"
+name = "durability"
+module = "multi_database_crash"
 tier = "durability"
-covers = ["inillucent-engine"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim", "inillucent-vfs"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "phase2_campaigns"
+name = "durability"
+module = "phase2_campaigns"
 tier = "durability"
-covers = ["inillucent-engine"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim", "inillucent-exec", "inillucent-catalog"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_recovery_shapes"
+name = "durability"
+module = "new_engine_recovery_shapes"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-txn"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "new_engine_free_map_recovery"
+name = "durability"
+module = "new_engine_free_map_recovery"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-txn", "inillucent-pool"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "free_map_checkpoint_crash"
+name = "durability"
+module = "free_map_checkpoint_crash"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-txn", "inillucent-pool"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim", "inillucent-vfs"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "overflow_crash"
+name = "durability"
+module = "overflow_crash"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-tree", "inillucent-txn", "inillucent-pool"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "reindex_crash"
+name = "durability"
+module = "reindex_crash"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-tree", "inillucent-txn"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 # A statement never moves the connection onto a different file system.
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "vacuum_on_vfs"
+name = "engine"
+module = "vacuum_on_vfs"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-vfs"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "vacuum_crash"
+name = "durability"
+module = "vacuum_crash"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-tree", "inillucent-pool"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 # **In the engine tier although its name says differential**, because it
 # compares this engine with itself: a predicate's three partitions against the
@@ -1422,7 +1547,8 @@ covers = ["inillucent-engine", "inillucent-tree", "inillucent-pool"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "pqs_differential"
+name = "engine"
+module = "pqs_differential"
 tier = "engine"
 covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
 
@@ -1436,58 +1562,66 @@ covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "story_large_table_nightly"
+name = "nightly"
+module = "story_large_table_nightly"
 tier = "nightly"
 covers = ["inillucent-pool", "inillucent-tree", "inillucent-exec", "inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "delete_order"
+name = "engine"
+module = "delete_order"
 tier = "engine"
 covers = ["inillucent-pool", "inillucent-tree", "inillucent-exec", "inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "tlp_differential"
+name = "engine"
+module = "tlp_differential"
 tier = "engine"
 covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "prepared_schema"
+name = "engine"
+module = "prepared_schema"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-exec", "inillucent-sql"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "search_recall"
+name = "engine"
+module = "search_recall"
 tier = "engine"
 covers = ["inillucent-search", "inillucent-core", "inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "search_crash"
+name = "durability"
+module = "search_crash"
 tier = "durability"
-covers = ["inillucent-search", "inillucent-engine"]
+covers = ["inillucent-search", "inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "storage_failure"
+name = "durability"
+module = "storage_failure"
 tier = "durability"
-covers = ["inillucent-storage"]
+covers = ["inillucent-storage", "inillucent-sim", "inillucent-vfs"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "wal_crash"
+name = "durability"
+module = "wal_crash"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-wal"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 # What a statement costs and what a fold costs, counted at the file system rather
 # than at a counter in the engine (task-2000, design 1). It is `durability`
@@ -1497,9 +1631,10 @@ covers = ["inillucent-engine", "inillucent-wal"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "fold_protocol"
+name = "durability"
+module = "fold_protocol"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-pool", "inillucent-wal"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 # Power loss at every cut point of a `CREATE INDEX` (task-2000, design 2). The
 # bulk build stopped logging a whole page image per page it builds, and what
@@ -1510,9 +1645,10 @@ covers = ["inillucent-engine", "inillucent-pool", "inillucent-wal"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "bulk_build_crash"
+name = "durability"
+module = "bulk_build_crash"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-tree", "inillucent-pool"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-tree", "inillucent-sim"]
 
 # The ordering `journal.rs` states as its whole invariant: a page's old image is
 # on disk and synced before its new image is written.
@@ -1528,30 +1664,35 @@ package = "inillucent-pool"
 kind = "test"
 name = "fault_campaign"
 tier = "durability"
+covers = ["inillucent-pool", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-sim"
 kind = "test"
 name = "simulator"
 tier = "durability"
+covers = ["inillucent-sim"]
 
 [[target]]
 package = "inillucent-txn"
 kind = "test"
 name = "durability"
 tier = "durability"
+covers = ["inillucent-txn", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-txn"
 kind = "test"
 name = "transactions"
 tier = "durability"
+covers = ["inillucent-txn", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-wal"
 kind = "test"
 name = "log"
 tier = "durability"
+covers = ["inillucent-wal", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-wal"
@@ -1561,13 +1702,14 @@ tier = "durability"
 # The log graded against an independent model, the way `btree_model` grades the
 # tree (task-2066 section 4.4.10). It runs on a memory file system and needs
 # nothing off disk, so it has no `requires` row.
-covers = ["inillucent-wal"]
+covers = ["inillucent-wal", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-wal"
 kind = "test"
 name = "recovery"
 tier = "durability"
+covers = ["inillucent-wal", "inillucent-sim"]
 
 # --- e2e: the public surfaces an application binds to, end to end
 
@@ -1691,7 +1833,8 @@ tier = "e2e"
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "cli_commands"
+name = "e2e"
+module = "cli_commands"
 tier = "e2e"
 covers = ["inillucent-cli"]
 # One subprocess test per command line verb, against the built binary, each
@@ -1710,7 +1853,8 @@ requires = ["shell"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "mcp_replay"
+name = "e2e"
+module = "mcp_replay"
 tier = "e2e"
 covers = ["inillucent-cli"]
 
@@ -1720,14 +1864,16 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "mcp_session"
+name = "e2e"
+module = "mcp_session"
 tier = "e2e"
 covers = ["inillucent-cli"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "mcp_wire"
+name = "e2e"
+module = "mcp_wire"
 tier = "e2e"
 covers = ["inillucent-cli"]
 # One `initialize` handshake over real pipes and one `tools/call` of each of
@@ -1737,7 +1883,8 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "dot_commands"
+name = "e2e"
+module = "dot_commands"
 tier = "e2e"
 covers = ["inillucent-cli"]
 # Every dot command `dot.rs` dispatches, driven through the built shell.
@@ -1747,9 +1894,10 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "process_crash"
+name = "durability"
+module = "process_crash"
 tier = "durability"
-covers = ["inillucent-engine"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-vfs"]
 # The one durability shape nothing exercised: the operating system ends a real
 # writer process and the file is reopened from the parent. Every other campaign
 # cuts at a fault the simulated file system injects.
@@ -1760,14 +1908,16 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "story_nikaya_crash"
+name = "durability"
+module = "story_nikaya_crash"
 tier = "durability"
-covers = ["inillucent-cli"]
+covers = ["inillucent-cli", "inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "differential_part8"
+name = "differential"
+module = "differential_part8"
 tier = "differential"
 covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
 # The 644 statements task-1979 asked both engines, run from the tree with an
@@ -1778,7 +1928,8 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "readonly_pragmas"
+name = "engine"
+module = "readonly_pragmas"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-sql"]
 # The two lists a read only connection decides a pragma by have to cover the
@@ -1791,9 +1942,10 @@ covers = ["inillucent-engine", "inillucent-sql"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "process_readers"
+name = "durability"
+module = "process_readers"
 tier = "durability"
-covers = ["inillucent-cli"]
+covers = ["inillucent-cli", "inillucent-engine", "inillucent-wal", "inillucent-pool", "inillucent-vfs"]
 
 # A kill campaign across forty seeded cut points, at two page sizes (task-2036).
 # `process_crash` beside it kills at twenty evenly spaced points at one page
@@ -1802,9 +1954,10 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "process_campaign"
+name = "durability"
+module = "process_campaign"
 tier = "durability"
-covers = ["inillucent-cli"]
+covers = ["inillucent-cli", "inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-vfs"]
 
 # `PRAGMA busy_timeout`'s waiting half, across two real processes (task-2036).
 # The in-process version was deleted when the connection stopped being `Send`
@@ -1813,16 +1966,18 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "busy_timeout"
+name = "durability"
+module = "busy_timeout"
 tier = "durability"
-covers = ["inillucent-cli"]
+covers = ["inillucent-cli", "inillucent-engine", "inillucent-pool", "inillucent-vfs"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "process_concurrency"
+name = "durability"
+module = "process_concurrency"
 tier = "durability"
-covers = ["inillucent-engine", "inillucent-pool", "inillucent-wal"]
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-wal", "inillucent-pool", "inillucent-vfs"]
 # Two real writer processes on one file, which no suite in the tree ran: rows
 # present must equal commits acknowledged, under both locking modes, through
 # ATTACH, and with a read only process reading a file a writer holds
@@ -1853,7 +2008,8 @@ requires = ["python"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "rag_verify"
+name = "retrieval"
+module = "rag_verify"
 tier = "retrieval"
 covers = ["inillucent-search"]
 # `examples/rag-agent/scripts/verify.sh` and `verify-indexed.sh`. Both are named
@@ -1952,7 +2108,7 @@ package = "inillucent-model"
 kind = "test"
 name = "redo_bytes"
 tier = "durability"
-covers = ["inillucent-tree", "inillucent-txn", "inillucent-pool"]
+covers = ["inillucent-tree", "inillucent-txn", "inillucent-pool", "inillucent-wal"]
 
 [[target]]
 package = "inillucent-search"
@@ -1992,7 +2148,8 @@ covers = ["inillucent-alloc"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "crash_reports"
+name = "tooling"
+module = "crash_reports"
 tier = "tooling"
 # It reads `tests/crash/` off disk and needs nothing built, so it has no
 # `requires` row: on any machine, in any checkout, it either finds the schedules
@@ -2002,16 +2159,18 @@ covers = ["inillucent-compat"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "gates_fail_closed"
+name = "tooling"
+module = "gates_fail_closed"
 tier = "tooling"
-# Three of its cases start a real `inillucent-testrun`, which asks cargo what it
-# built, and cargo answers by building. Windows will not replace an image that
-# is running, so a sibling target executing a workspace binary at that moment
-# made the nested run fail to start - and those three then announced a skip, so
-# every strict run in a worktree named three skips a person could not clear
-# (task-2066 §4.4.16). Running this one target after the rest costs about the
-# length of this file and removes the race rather than tolerating it.
-alone = true
+# Three of its cases start a real `inillucent-testrun`. That nested runner used
+# to ask cargo what it built, and cargo answers by building, so it built a
+# whole second workspace in a directory of its own and this target ran alone,
+# last, for 36 minutes of a 37 minute run. The nested runner now reads the
+# artifact list the outer runner wrote and starts no cargo (`--artifacts`), so
+# nothing here can relink an executable a sibling is running and the target
+# runs beside the others. `builds` names the executables those nested runs
+# start, so the outer run builds them whether or not it selected them.
+builds = ["inillucent::smoke", "inillucent-remote::live_postgres", "inillucent-remote::live_mysql"]
 # Seven of its cases skip when the fixture, the pinned benchmark driver or the
 # runner is absent, and the row said nothing, so `--strict` dropped the target
 # before it looked at it. The file written so a gate cannot pass having
@@ -2027,14 +2186,16 @@ requires = ["fixtures", "sqlite-bench", "testrun"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "affinity"
+name = "tooling"
+module = "affinity"
 tier = "tooling"
 covers = ["inillucent-compat"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "command_parity"
+name = "tooling"
+module = "command_parity"
 tier = "tooling"
 covers = ["inillucent-cli"]
 
@@ -2046,7 +2207,8 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "cli_import"
+name = "tooling"
+module = "cli_import"
 tier = "tooling"
 covers = ["inillucent-cli"]
 
@@ -2060,7 +2222,8 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "cli_batch"
+name = "e2e"
+module = "cli_batch"
 tier = "e2e"
 # It pipes statements into the built command line.
 covers = ["inillucent-cli"]
@@ -2073,7 +2236,8 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "cli_arguments"
+name = "e2e"
+module = "cli_arguments"
 tier = "e2e"
 # Every case runs the built command line; the file builds it and skips when
 # the build did not produce it.
@@ -2096,7 +2260,8 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "setup_embeddings"
+name = "e2e"
+module = "setup_embeddings"
 tier = "e2e"
 # It runs `inillucent setup-embeddings` as a child process.
 covers = ["inillucent-cli"]
@@ -2107,14 +2272,16 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "budget"
+name = "engine"
+module = "budget"
 tier = "engine"
 covers = ["inillucent-exec", "inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "mcp_cancel"
+name = "e2e"
+module = "mcp_cancel"
 tier = "e2e"
 # It starts the MCP server as a child process and cancels a request in flight.
 covers = ["inillucent-cli"]
@@ -2122,7 +2289,8 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "budgets"
+name = "e2e"
+module = "budgets"
 tier = "e2e"
 # It starts the command line and the MCP server as child processes and skips
 # when either did not build.
@@ -2131,7 +2299,8 @@ covers = ["inillucent-cli"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "confinement"
+name = "e2e"
+module = "confinement"
 tier = "e2e"
 # It drives the built command line and the MCP server under `--root`. The
 # cases that prove a link cannot escape the root need the platform to make a
@@ -2145,14 +2314,16 @@ requires = ["directory-link"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "documentation"
+name = "tooling"
+module = "documentation"
 tier = "tooling"
 covers = ["inillucent-compat"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "harness"
+name = "tooling"
+module = "harness"
 tier = "tooling"
 # Two cases skip: one wants a captured performance baseline, the other the
 # downloaded reference.
@@ -2162,7 +2333,8 @@ covers = ["inillucent-compat"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "policy"
+name = "tooling"
+module = "policy"
 tier = "tooling"
 covers = ["inillucent-compat"]
 
@@ -2177,7 +2349,8 @@ covers = ["inillucent-compat"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "numeric_text"
+name = "differential"
+module = "numeric_text"
 tier = "differential"
 covers = ["inillucent-scalar", "inillucent-value", "inillucent-cli"]
 requires = ["shell"]
@@ -2191,14 +2364,16 @@ requires = ["shell"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "coverage_floor"
+name = "tooling"
+module = "coverage_floor"
 tier = "tooling"
 covers = ["inillucent-compat"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "workload_freshness"
+name = "tooling"
+module = "workload_freshness"
 tier = "tooling"
 covers = ["inillucent-compat"]
 requires = ["nikaya", "python"]
@@ -2211,7 +2386,8 @@ requires = ["nikaya", "python"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "bindings"
+name = "tooling"
+module = "bindings"
 tier = "tooling"
 covers = ["inillucent-compat"]
 # It runs the npm, Go and PHP conformance runners itself now, rather than
@@ -2235,7 +2411,8 @@ alone = true
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "escapes"
+name = "tooling"
+module = "escapes"
 tier = "tooling"
 covers = ["inillucent-compat"]
 
@@ -2248,13 +2425,15 @@ covers = ["inillucent-compat"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "scenarios"
+name = "tooling"
+module = "scenarios"
 tier = "tooling"
 covers = ["inillucent-compat"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "selection"
+name = "tooling"
+module = "selection"
 tier = "tooling"
 covers = ["inillucent-compat"]
