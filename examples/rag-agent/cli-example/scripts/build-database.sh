@@ -10,8 +10,8 @@
 #
 #   INILLUCENT=/path/to/inillucent scripts/build-database.sh
 #
-# The binary has to carry the `embed` feature. Released binaries do from 0.1.2;
-# to build one:
+# The binary has to be 1.0.30 or later and carry the `embed` feature. Released
+# binaries carry it; to build one:
 #
 #   cargo build --release -p inillucent-cli --features inillucent-cli/embed
 set -euo pipefail
@@ -43,8 +43,7 @@ fi
 echo "== chunking the corpus"
 "$python_bin" scripts/chunk-corpus.py \
   --corpus ../corpus/greek-philosophy.jsonl \
-  --out build/chunks.csv \
-  --fts-out build/chunks-fts.csv
+  --out build/chunks.csv
 
 rm -f greek-philosophy.rdb greek-philosophy.rdb-wal.0000000001
 rm -f chunks.rdb chunks.rdb-wal.0000000001
@@ -75,19 +74,16 @@ CREATE TABLE passage (
 CREATE VIRTUAL TABLE passage_fts USING fts5(id, title, body);
 "
 
-# Three things decide whether this statement works at all.
-#
-# It is INSERT ... SELECT and not INSERT ... VALUES. A registered function in a
-# VALUES row, an UPDATE ... SET or a RETURNING clause is refused with the
-# `unsupported` status and exit code 3: the write path builds its row space from
-# a layout rather than from a catalog, so there is no function body to look up.
-# The SELECT form goes through the read path, where there is one.
+# Two things decide whether this statement works well.
 #
 # It carries the `search_document: ` prefix. embed(TEXT) embeds the text it is
 # given and adds nothing of its own. nomic-embed-text-v1.5 is trained with
 # `search_document: ` on stored text and `search_query: ` on questions, and a
 # corpus embedded without the prefix does not fail - it answers slightly worse,
 # for ever. Every query in this example uses the other prefix.
+#
+# It has no DETACH. `batch` runs its statements in one transaction, and a
+# database cannot be detached inside one. The attachment ends with the process.
 #
 # It runs with the model resident. Opening a session on the weights costs 650 to
 # 800 ms and an embedding through an open one costs 12 to 36 ms, and this is one
@@ -98,7 +94,6 @@ ATTACH 'chunks.rdb' AS staging;
 INSERT INTO passage (id, title, url, body, v)
 SELECT CAST(id AS INTEGER), title, url, body, embed('search_document: ' || body)
 FROM staging.chunk;
-DETACH DATABASE staging;
 "
 
 echo "== indexing"
@@ -114,12 +109,12 @@ echo "== indexing"
 # `docs/vector-search.md` says to build the index when the search is slow rather
 # than before it is.
 
-# The full-text table is loaded from a file rather than copied across from
-# `passage`, because `INSERT INTO <virtual table> ... SELECT` is refused with the
-# `unsupported` status and exit code 3. `--skip 1` drops the header row: the
-# table already exists, so `import` inserts every row it reads instead of taking
-# the first one as column names.
-"$cli" --db greek-philosophy.rdb import build/chunks-fts.csv --table passage_fts --skip 1
+# The full-text table is filled from `passage` in one statement. inillucent
+# 1.0.29 refused an `INSERT ... SELECT` into a virtual table, and this script
+# loaded the same rows from a second CSV file then. 1.0.30 runs it.
+"$cli" --db greek-philosophy.rdb exec "
+INSERT INTO passage_fts (id, title, body) SELECT id, title, body FROM passage
+"
 
 # Folds the log back into the file, so what is committed is one self-contained
 # database rather than a file plus a log segment nobody would think to commit.

@@ -21,7 +21,6 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::QUERY_PREFIX;
 use crate::store::Store;
 
 /// The constant in reciprocal rank fusion, `1 / (60 + rank)`.
@@ -139,8 +138,6 @@ pub struct SearchResult {
     /// The keyword expression sent to the index, when the mode used one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keywords: Option<String>,
-    /// Milliseconds spent embedding the question.
-    pub embed_ms: f64,
     /// Milliseconds for the whole search.
     pub elapsed_ms: f64,
     /// The chunks, best first.
@@ -161,26 +158,25 @@ pub fn search(store: &Store, request: &SearchRequest) -> Result<SearchResult, St
     }
     let started = Instant::now();
     let keywords = keyword_expression(query);
-    let needs_vector = request.mode != Mode::Keyword;
-    let vector = if needs_vector { Some(store.embed(&format!("{QUERY_PREFIX}{query}"))?) } else { None };
-    let embed_ms = milliseconds(started);
+    // Every mode but `keyword` compares the question's meaning. The question
+    // is passed as text and embedded by `embed(TEXT)` inside each statement.
+    let question = if request.mode == Mode::Keyword { None } else { Some(query) };
     let title = request.title.as_deref();
     let k = request.k;
     let mut hits = match request.mode {
-        Mode::Vector => vector_hits(store, vector.as_deref().unwrap_or_default(), k, title)?,
+        Mode::Vector => vector_hits(store, query, k, title)?,
         Mode::Keyword => match &keywords {
             Some(expression) => table_hits(store, Some(expression), None, k, title)?,
             None => Vec::new(),
         },
-        Mode::Hybrid => table_hits(store, keywords.as_deref(), vector.as_deref(), k, title)?,
-        Mode::Rrf => rrf_hits(store, keywords.as_deref(), vector.as_deref().unwrap_or_default(), k, title)?,
+        Mode::Hybrid => table_hits(store, keywords.as_deref(), question, k, title)?,
+        Mode::Rrf => rrf_hits(store, keywords.as_deref(), query, k, title)?,
     };
-    fill_chunks(store, &mut hits, vector.as_deref())?;
+    fill_chunks(store, &mut hits, question)?;
     Ok(SearchResult {
         query: query.to_string(),
         mode: request.mode,
         keywords: if request.mode == Mode::Vector { None } else { keywords },
-        embed_ms,
         elapsed_ms: milliseconds(started),
         hits,
     })
@@ -239,12 +235,12 @@ pub fn reciprocal_rank_fusion(lists: &[Vec<i64>], constant: f64) -> Vec<(i64, f6
 /// Searches the plain vector column.
 ///
 /// @param store - the database
-/// @param vector - the question's vector
+/// @param question - the question, embedded by the statement
 /// @param k - how many chunks
 /// @param title - an optional document title
-fn vector_hits(store: &Store, vector: &[u8], k: usize, title: Option<&str>) -> Result<Vec<Hit>, String> {
+fn vector_hits(store: &Store, question: &str, k: usize, title: Option<&str>) -> Result<Vec<Hit>, String> {
     Ok(store
-        .vector_hits(vector, k, title)?
+        .vector_hits(question, k, title)?
         .into_iter()
         .map(|(chunk_id, distance)| Hit { chunk_id, distance: Some(round(distance)), ..Hit::default() })
         .collect())
@@ -254,12 +250,12 @@ fn vector_hits(store: &Store, vector: &[u8], k: usize, title: Option<&str>) -> R
 ///
 /// @param store - the database
 /// @param keywords - the FTS5 expression, if any
-/// @param vector - the question's vector, if any
+/// @param question - the question to embed, if the mode compares meaning
 /// @param k - how many chunks
 /// @param title - an optional document title
-fn table_hits(store: &Store, keywords: Option<&str>, vector: Option<&[u8]>, k: usize, title: Option<&str>) -> Result<Vec<Hit>, String> {
+fn table_hits(store: &Store, keywords: Option<&str>, question: Option<&str>, k: usize, title: Option<&str>) -> Result<Vec<Hit>, String> {
     Ok(store
-        .search_table_hits(keywords, vector, k, title)?
+        .search_table_hits(keywords, question, k, title)?
         .into_iter()
         .map(|hit| Hit {
             chunk_id: hit.chunk_id,
@@ -275,12 +271,13 @@ fn table_hits(store: &Store, keywords: Option<&str>, vector: Option<&[u8]>, k: u
 ///
 /// @param store - the database
 /// @param keywords - the FTS5 expression, if the question has any words left
-/// @param vector - the question's vector
+/// @param question - the question, embedded by the vector statement
 /// @param k - how many chunks to return
 /// @param title - an optional document title
-fn rrf_hits(store: &Store, keywords: Option<&str>, vector: &[u8], k: usize, title: Option<&str>) -> Result<Vec<Hit>, String> {
+fn rrf_hits(store: &Store, keywords: Option<&str>, question: &str, k: usize, title: Option<&str>) -> Result<Vec<Hit>, String> {
     let depth = k * RRF_DEPTH;
-    let by_vector: Vec<i64> = store.vector_hits(vector, depth, title)?.into_iter().map(|(id, _)| id).collect();
+    let vector_list = store.vector_hits(question, depth, title)?;
+    let by_vector: Vec<i64> = vector_list.iter().map(|(id, _)| *id).collect();
     let by_keyword: Vec<i64> = match keywords {
         Some(expression) => store.search_table_hits(Some(expression), None, depth, title)?.into_iter().map(|h| h.chunk_id).collect(),
         None => Vec::new(),
@@ -293,6 +290,9 @@ fn rrf_hits(store: &Store, keywords: Option<&str>, vector: &[u8], k: usize, titl
             rrf_score: Some((score * 1_000_000.0).round() / 1_000_000.0),
             vector_rank: ranks[0],
             keyword_rank: ranks[1],
+            // The vector statement already measured this chunk's distance, so
+            // the fill does not have to embed the question a second time.
+            distance: vector_list.iter().find(|(id, _)| *id == chunk_id).map(|(_, distance)| round(*distance)),
             ..Hit::default()
         })
         .collect())
@@ -302,17 +302,20 @@ fn rrf_hits(store: &Store, keywords: Option<&str>, vector: &[u8], k: usize, titl
 ///
 /// @param store - the database
 /// @param hits - the hits, best first
-/// @param question - the question's vector, when the mode embedded it
-fn fill_chunks(store: &Store, hits: &mut [Hit], question: Option<&[u8]>) -> Result<(), String> {
+/// @param question - the question, when the mode compares meaning
+fn fill_chunks(store: &Store, hits: &mut [Hit], question: Option<&str>) -> Result<(), String> {
     let ids: Vec<i64> = hits.iter().map(|hit| hit.chunk_id).collect();
-    let rows = store.chunk_rows(&ids, question)?;
+    // Each statement that names `embed(...)` embeds the question again, about
+    // 10 ms. The distance is asked for only when a hit does not have one yet.
+    let missing = hits.iter().any(|hit| hit.distance.is_none());
+    let rows = store.chunk_rows(&ids, if missing { question } else { None })?;
     for (index, hit) in hits.iter_mut().enumerate() {
         hit.rank = index + 1;
         if let Some(row) = rows.get(&hit.chunk_id) {
             hit.title = row.title.clone();
             hit.url = row.url.clone();
             hit.text = row.text.clone();
-            hit.distance = row.distance.map(round);
+            hit.distance = hit.distance.or(row.distance.map(round));
         }
     }
     Ok(())

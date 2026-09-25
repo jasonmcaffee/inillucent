@@ -13,6 +13,11 @@
 //! the same number. An application would normally pick one of the two. This
 //! example keeps both so the README can compare them on the same data.
 //!
+//! A chunk's vector is written once, to `chunk.v`, and `chunk_search` is
+//! filled from `chunk` with `INSERT ... SELECT`. A search passes the question
+//! as text and embeds it inside the statement with `embed('search_query: ' ||
+//! ?1)`. Both need inillucent 1.0.30 or later.
+//!
 //! ## One statement at a time
 //!
 //! [`SharedDatabase`] opens the database on a thread of its own and runs one
@@ -27,7 +32,7 @@ use std::path::Path;
 use inillucent::{Rows, SharedDatabase, Value};
 use serde::Serialize;
 
-use crate::config::DIMENSIONS;
+use crate::config::{DIMENSIONS, QUERY_PREFIX};
 
 /// The schema. Run once, when the database has no `document` table.
 const SCHEMA: &str = "
@@ -50,7 +55,7 @@ CREATE TABLE chunk (
   v           VECTOR(768)
 );
 CREATE INDEX chunk_document ON chunk (document_id, ordinal);
-CREATE VIRTUAL TABLE chunk_search USING inillucent_search(title, text, document FACET, dims = 768);
+CREATE VIRTUAL TABLE chunk_search USING inillucent_search(title, text, document FACET, dims = 768, vector_weight = 0.5);
 CREATE TABLE sync_log (id INTEGER PRIMARY KEY, finished_at TEXT NOT NULL, report TEXT NOT NULL);
 ";
 
@@ -266,11 +271,15 @@ impl Store {
     /// inillucent_hnsw (v)` would make the same query walk a graph instead;
     /// the README says when that is worth it.
     ///
-    /// @param query - the question's vector
+    /// The question is embedded inside the statement. `embed(TEXT)` is
+    /// deterministic and its argument reads no column, so the engine embeds
+    /// it once for the statement, not once per row.
+    ///
+    /// @param question - the question, without its prefix
     /// @param k - how many chunks to return
     /// @param title - only chunks of the document with this title
-    pub fn vector_hits(&self, query: &[u8], k: usize, title: Option<&str>) -> Result<Vec<(i64, f64)>, String> {
-        let mut params = vec![Value::Blob(query.to_vec())];
+    pub fn vector_hits(&self, question: &str, k: usize, title: Option<&str>) -> Result<Vec<(i64, f64)>, String> {
+        let mut params = vec![Value::Text(question.to_string())];
         let filter = match title {
             Some(title) => {
                 params.push(Value::Text(title.to_string()));
@@ -278,7 +287,14 @@ impl Store {
             }
             None => "",
         };
-        let sql = format!("SELECT id, vector_distance_cos(v, ?1) AS distance FROM chunk {filter} ORDER BY distance LIMIT {k}");
+        // The distance is written once, inside a derived table. Written in the
+        // select list and again through `ORDER BY distance`, inillucent 1.0.30
+        // embeds the question once for each, and this query took 77 ms in
+        // place of 44.
+        let embedded = embed_question(1);
+        let sql = format!(
+            "SELECT id, distance FROM (SELECT id, vector_distance_cos(v, {embedded}) AS distance FROM chunk {filter}) ORDER BY distance LIMIT {k}"
+        );
         let rows = self.query(&sql, &params)?;
         Ok((0..rows.rows.len()).map(|row| (integer(&rows, row, 0), real(&rows, row, 1))).collect())
     }
@@ -290,12 +306,15 @@ impl Store {
     /// by BM25 with its proximity and phrase adjustments. Each hit comes back
     /// with `score`, `confidence` and `origin`.
     ///
+    /// The question is embedded inside the statement, as the table's `vector`
+    /// constraint.
+    ///
     /// @param keywords - an FTS5 expression, or nothing for a vector only search
-    /// @param vector - the question's vector, or nothing for a keyword only search
+    /// @param question - the question to embed, or nothing for a keyword only search
     /// @param k - how many hits the search collects
     /// @param title - only chunks of the document with this title, filtered inside the search
     pub fn search_table_hits(
-        &self, keywords: Option<&str>, vector: Option<&[u8]>, k: usize, title: Option<&str>,
+        &self, keywords: Option<&str>, question: Option<&str>, k: usize, title: Option<&str>,
     ) -> Result<Vec<SearchTableHit>, String> {
         let mut conditions = Vec::new();
         let mut params = Vec::new();
@@ -303,9 +322,9 @@ impl Store {
             params.push(Value::Text(keywords.to_string()));
             conditions.push(format!("chunk_search MATCH ?{}", params.len()));
         }
-        if let Some(vector) = vector {
-            params.push(Value::Blob(vector.to_vec()));
-            conditions.push(format!("vector = ?{}", params.len()));
+        if let Some(question) = question {
+            params.push(Value::Text(question.to_string()));
+            conditions.push(format!("vector = {}", embed_question(params.len())));
         }
         if let Some(title) = title {
             params.push(Value::Text(title.to_string()));
@@ -336,15 +355,15 @@ impl Store {
     /// subject apart.
     ///
     /// @param ids - the chunk ids; every one is an integer, so they are written into the SQL
-    /// @param question - the question's vector, or nothing to leave the distance out
-    pub fn chunk_rows(&self, ids: &[i64], question: Option<&[u8]>) -> Result<HashMap<i64, ChunkRow>, String> {
+    /// @param question - the question, without its prefix, or nothing to leave the distance out
+    pub fn chunk_rows(&self, ids: &[i64], question: Option<&str>) -> Result<HashMap<i64, ChunkRow>, String> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
         let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
         let (distance, params) = match question {
-            Some(vector) => ("vector_distance_cos(c.v, ?1)", vec![Value::Blob(vector.to_vec())]),
-            None => ("NULL", Vec::new()),
+            Some(question) => (format!("vector_distance_cos(c.v, {})", embed_question(1)), vec![Value::Text(question.to_string())]),
+            None => ("NULL".to_string(), Vec::new()),
         };
         let sql = format!(
             "SELECT c.id, d.title, d.url, c.text, {distance} FROM chunk c JOIN document d ON d.id = c.document_id WHERE c.id IN ({list})"
@@ -418,6 +437,18 @@ impl Store {
             .collect())
     }
 
+    /// Folds every row written since the last compaction into `chunk_search`'s index.
+    ///
+    /// The answers do not change. What changes is the first search in a new
+    /// process, which otherwise adds the uncompacted rows to the index before
+    /// it can answer.
+    pub fn compact_search(&self) -> Result<(), String> {
+        self.db
+            .execute("INSERT INTO chunk_search(chunk_search) VALUES('compact')", &[])
+            .map(|_| ())
+            .map_err(|error| format!("cannot compact chunk_search: {error}"))
+    }
+
     /// Writes a finished sync's report to `sync_log`.
     ///
     /// @param finished_at - when the sync finished
@@ -480,7 +511,12 @@ fn delete_chunks(tx: &inillucent::SharedTransaction, document: i64) -> Result<()
     Ok(())
 }
 
-/// Writes a document's chunks to `chunk` and to `chunk_search`, with the same ids.
+/// Writes a document's chunks to `chunk`, then copies them into `chunk_search`.
+///
+/// Each chunk's vector was embedded before the transaction opened, and is
+/// written once, to `chunk.v`. `chunk_search` is then filled from `chunk` with
+/// one `INSERT ... SELECT`, so the two tables hold the same ids, text and
+/// vectors without the vector being bound twice.
 ///
 /// @param tx - the open transaction
 /// @param document - the document's row id
@@ -502,19 +538,24 @@ fn insert_chunks(tx: &inillucent::SharedTransaction, document: i64, write: &Docu
             ],
         )
         .map_err(|error| format!("cannot write chunk {id}: {error}"))?;
-        tx.execute(
-            "INSERT INTO chunk_search (rowid, title, text, document, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
-            &[
-                Value::Integer(id),
-                Value::Text(write.title.to_string()),
-                Value::Text(chunk.text.clone()),
-                Value::Text(write.title.to_string()),
-                Value::Blob(vector.clone()),
-            ],
-        )
-        .map_err(|error| format!("cannot write chunk {id} to chunk_search: {error}"))?;
     }
+    tx.execute(
+        "INSERT INTO chunk_search (rowid, title, text, document, vector)
+         SELECT id, ?2, text, ?2, v FROM chunk WHERE document_id = ?1",
+        &[Value::Integer(document), Value::Text(write.title.to_string())],
+    )
+    .map_err(|error| format!("cannot copy `{}` into chunk_search: {error}", write.title))?;
     Ok(())
+}
+
+/// Returns the SQL that embeds the question bound at `?{parameter}`.
+///
+/// The prefix `nomic-embed-text-v1.5` expects on a question is written into
+/// the SQL, so the caller binds the question exactly as it was asked.
+///
+/// @param parameter - the number of the bound parameter holding the question
+fn embed_question(parameter: usize) -> String {
+    format!("embed('{QUERY_PREFIX}' || ?{parameter})")
 }
 
 /// Returns one more than the largest id in a table.

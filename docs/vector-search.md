@@ -555,7 +555,8 @@ in the top 5.
 
 A search of a plain `VECTOR(768)` column holding the same vectors found 18 of 20 with a mean
 reciprocal rank of 0.798. Measure a weight on your own questions before you set one. The option was
-added after release 1.0.29.
+added in release 1.0.30, and release 1.0.29 or earlier cannot open a database with a table that
+declares it.
 
 ### Confidence is a separate number from score
 

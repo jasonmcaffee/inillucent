@@ -133,6 +133,16 @@ pub fn run_sync(store: &Store, source: &Path, settings: &IndexSettings, progress
             Err(error) => report.errors.push(format!("{}: {error}", gone.title)),
         }
     }
+    // A search table keeps up to 1,024 written rows outside its index until it
+    // compacts, and the first search in every new process adds them back in.
+    // After a first sync that was 848 ms of the first search; after `compact`,
+    // 106 ms. Compacting 3,696 chunks takes about half a second.
+    let changed = !report.added.is_empty() || !report.updated.is_empty() || !report.removed.is_empty();
+    if changed {
+        if let Err(error) = store.compact_search() {
+            report.errors.push(error);
+        }
+    }
     report.chunks_after = store.counts()?.1;
     report.embed_seconds = round(embed_time);
     report.total_seconds = round(started.elapsed().as_secs_f64());

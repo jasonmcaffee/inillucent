@@ -199,7 +199,6 @@ answer, and `tools/list`, which returns the five tools with a JSON schema for ea
   "query": "what did Epictetus teach about the things we cannot control",
   "mode": "rrf",
   "keywords": "\"epictetus\" OR \"teach\" OR \"things\" OR \"cannot\" OR \"control\"",
-  "embed_ms": 13.5,
   "elapsed_ms": 35.1,
   "hits": [
     {
@@ -396,23 +395,47 @@ so they can be compared on the same data.
 -- A plain column, searched with ordinary SQL.
 CREATE TABLE chunk (id INTEGER PRIMARY KEY, document_id INTEGER, text TEXT, v VECTOR(768), ...);
 
-SELECT id, vector_distance_cos(v, ?1) AS distance FROM chunk ORDER BY distance LIMIT 5;
+SELECT id, distance
+FROM (SELECT id, vector_distance_cos(v, embed('search_query: ' || ?1)) AS distance FROM chunk)
+ORDER BY distance LIMIT 5;
 
 -- A search table that holds the text and the vector, and ranks by both.
-CREATE VIRTUAL TABLE chunk_search USING inillucent_search(title, text, document FACET, dims = 768);
+CREATE VIRTUAL TABLE chunk_search
+USING inillucent_search(title, text, document FACET, dims = 768, vector_weight = 0.5);
+
+-- Filled from the column, one document at a time.
+INSERT INTO chunk_search (rowid, title, text, document, vector)
+SELECT id, ?2, text, ?2, v FROM chunk WHERE document_id = ?1;
 
 SELECT rowid, score(chunk_search), confidence(chunk_search), origin(chunk_search)
 FROM chunk_search
-WHERE chunk_search MATCH ?1 AND vector = ?2 AND k = 5
+WHERE chunk_search MATCH ?1 AND vector = embed('search_query: ' || ?2) AND k = 5
 ORDER BY rank;
 ```
+
+The question goes into both searches as text, and `embed(TEXT)` turns it into a vector inside the
+statement. Its argument reads no column, so the engine embeds it once for the statement and not
+once per row. The distance is written once, inside a derived table: written in the select list and
+again through `ORDER BY distance`, inillucent 1.0.30 embeds the question once for each, and the
+query took 77 ms in place of 44.
+
+A chunk's vector is still computed before the write transaction opens, with `SELECT embed(?1)`, and
+bound to the `chunk` insert. That keeps the slow part out of the transaction, so a search can run
+between two documents of a sync. `chunk_search` then copies the vector from `chunk` with
+`INSERT ... SELECT` inside the transaction, so each chunk is embedded once.
+
+`vector_weight = 0.5` fixes how much the vector list counts when a query has both parts. Without
+it, the table chooses a weight for each query, and on this corpus that let chunks found by keywords
+alone rank first: `hybrid` found 19 of 20 with a mean reciprocal rank of 0.681, against 0.789 with
+the fixed weight. A database whose `chunk_search` declares `vector_weight` cannot be opened by
+inillucent 1.0.29 or earlier.
 
 | | `VECTOR(768)` column | `inillucent_search` table |
 |---|---|---|
 | what it is | an ordinary column in an ordinary table | a virtual table that keeps its own index of the text and the vectors |
 | keyword search | a second table, such as FTS5, and a fusion you write yourself | built in: the same query takes `MATCH` |
 | what a hit carries | the cosine distance | `score`, a `confidence` from 0 to 1, and `origin` |
-| saying "no answer" | the distance catches questions on other subjects | `confidence` is low for those, and also for an answerable question worded differently from the article |
+| saying "no answer" | the distance catches questions on other subjects | with `vector_weight = 0.5`, `confidence` catches them too |
 | filters | any `WHERE` clause or join | `FACET` columns, applied inside the search |
 | an index | none, which compares every row, or `CREATE INDEX ... USING inillucent_hnsw (v)` | exact by default, `mode = 'approximate'` for a graph |
 | moving to another database | the same query works on pgvector with its `<=>` operator | inillucent only |
@@ -420,8 +443,7 @@ ORDER BY rank;
 **Use the column** when you already have a table and want to add a search by meaning to it, when
 your filters are joins and ordinary `WHERE` clauses, or when the same SQL has to run on PostgreSQL
 with pgvector. **Use the `inillucent_search` table** when you want keyword and meaning search from
-one table and one query, with no fusion code of your own, and when your questions use the same
-words as your documents. An application would normally store its vectors once. This example stores
+one table and one query, with no fusion code of your own. An application would normally store its vectors once. This example stores
 them twice, which costs about 11 MB here, so the two can be compared. The default mode, `rrf`,
 reads its meaning list from the column and its keyword list from the search table.
 
@@ -433,30 +455,31 @@ about, over the full corpus:
 
 | question | the corpus answers it | best distance, `vector` | best confidence, `hybrid` |
 |---|---|---:|---:|
-| who was Seneca | yes | 0.201 | 0.863 |
-| the allegory of the cave | yes | 0.163 | 0.838 |
-| man is the measure of all things | yes | 0.214 | 0.728 |
-| what did the Stoics believe about death | yes | 0.250 | 0.261 |
-| the woman mathematician murdered in Alexandria | yes | 0.292 | 0.023 |
-| a former slave who taught that some things are within our control | yes | 0.278 | 0.007 |
-| asking questions to expose contradictions in a belief | yes | 0.216 | 0.009 |
-| **what did Kant think about the categories of understanding** | **only in passing** | **0.201** | **0.230** |
-| the best recipe for sourdough bread | no | 0.417 | 0.060 |
-| who won the 1994 World Cup | no | 0.485 | 0.009 |
-| how do I configure a Kubernetes ingress controller | no | 0.530 | 0.054 |
+| who was Seneca | yes | 0.201 | 0.828 |
+| the prisoners watching shadows on a cave wall | yes | 0.228 | 0.450 |
+| man is the measure of all things | yes | 0.214 | 0.751 |
+| what did the Stoics believe about death | yes | 0.250 | 0.440 |
+| the woman mathematician murdered in Alexandria | yes | 0.292 | 0.363 |
+| a former slave who taught that some things are within our control | yes | 0.278 | 0.362 |
+| asking questions to expose contradictions in a belief | yes | 0.216 | 0.394 |
+| **what did Kant think about the categories of understanding** | **only in passing** | **0.201** | **0.435** |
+| the best recipe for sourdough bread | no | 0.417 | 0.041 |
+| who won the 1994 World Cup | no | 0.485 | 0.006 |
+| how do I configure a Kubernetes ingress controller | no | 0.530 | 0.235 |
 
-**The distance is the better signal on this corpus.** All 20 answerable questions in the evaluation
-had a best distance of 0.341 or less, and the three questions on other subjects scored 0.417 to
-0.530. That is why every hit carries its `distance` in every mode but `keyword`, and why
+**Both numbers separate the questions on this corpus.** All 20 answerable questions in the
+evaluation had a best distance of 0.341 or less, and the three questions on other subjects scored
+0.417 to 0.530. In `hybrid` mode, all 20 had a best confidence of 0.332 or more, and the three on
+other subjects 0.006 to 0.235. Every hit carries its `distance` in every mode but `keyword`, and
 `AGENTS.md` tells the agent that a best distance above about 0.4 means the articles are about
-something else.
+something else, because the distance works in every mode.
 
-**`confidence` measures something else.** It is high when the question's words and its meaning both
-match a chunk. A question phrased in words the article does not use scores low even when the answer
-is there: for "a former slave who taught that some things are within our control", `hybrid` ranks
-Epictetus third, and its best hit has a confidence of 0.007. 9 of the 20 answerable questions scored at or below the Kant question's 0.230.
-On a corpus where questions use the documents' own words, such as code or product documentation,
-`confidence` separates better. [Vector search](../../../docs/vector-search.md#confidence-is-a-separate-number-from-score)
+**`confidence` depends on the vector weight.** It adds the cosine similarity and the keyword score,
+each times its weight. Before this table declared `vector_weight = 0.5`, the weight chosen for each
+query let a chunk found by keywords alone rank first, and such a chunk has no cosine similarity in
+the sum. For "a former slave who taught that some things are within our control", `hybrid` then
+ranked Epictetus third with a best confidence of 0.007, and 9 of the 20 answerable questions scored
+at or below the Kant question's 0.230. [Vector search](../../../docs/vector-search.md#confidence-is-a-separate-number-from-score)
 describes how it is computed.
 
 **Neither number can decide the Kant question, and neither should.** No article is about Kant, and
@@ -465,21 +488,6 @@ articles each have a passage on his categories, though, so the question scores l
 answers. Only reading the passages decides it. `AGENTS.md` tells the agent to read them, and in
 [the run above](#the-agent-at-work) the agent answered from those two passages and said that Kant is
 outside the corpus's subject.
-
-### Two statements to write another way on inillucent 1.0.29
-
-| Statement | Result on 1.0.29 | What this example does |
-|---|---|---|
-| `INSERT INTO chunk_search (...) SELECT ..., embed(...) FROM ...` | status `unsupported`: an `INSERT ... SELECT` into a virtual table | runs `SELECT embed(?1)` once, keeps the vector's bytes, and binds them to both inserts |
-| `... WHERE vector = embed('search_query: ' \|\| ?1)` on the search table | status `unsupported`: a registered function in that position | embeds the question with `SELECT embed(?1)` and binds the bytes |
-
-Embedding in a statement of its own also means each chunk is embedded once however many tables it
-goes into, and it keeps the slow part out of the write transaction.
-
-Both statements run on the engine after 1.0.29. The release after 1.0.29 also gives the
-`inillucent` crate an `embed` feature, so `Cargo.toml` can name `inillucent` alone with
-`features = ["embed"]` in place of the second `inillucent-engine` line. This example stays on
-1.0.29 until that release is published.
 
 ## Four search modes, measured
 
@@ -498,29 +506,31 @@ and `*` as operators, so "what is Plato's cave?" passed as it is would be a synt
 
 `rag-server evaluate` asks the 24 questions in [`questions.json`](questions.json) in every mode. 20
 of them name the article whose chunks must appear in the top five, and 4 are questions the corpus
-cannot answer. Measured on 25 September 2026, over the full corpus on the processor:
+cannot answer. Measured on 25 September 2026 with inillucent 1.0.30, over the full corpus on the
+processor:
 
 With the title in front of each chunk, which is the default:
 
 | mode | found in the top five | mean reciprocal rank | median time per search |
 |---|---:|---:|---:|
-| `rrf` | 19 of 20 | **0.821** | 49.0 ms |
-| `hybrid` | 19 of 20 | 0.681 | 22.0 ms |
-| `vector` | 18 of 20 | 0.798 | 42.0 ms |
-| `keyword` | 18 of 20 | 0.617 | 0.8 ms |
+| `rrf` | 19 of 20 | **0.821** | 65.1 ms |
+| `hybrid` | 19 of 20 | 0.789 | 71.0 ms |
+| `vector` | 18 of 20 | 0.798 | 47.9 ms |
+| `keyword` | 18 of 20 | 0.617 | 1.4 ms |
 
 With `--context lead`, which also puts the article's first sentence in front of each chunk:
 
 | mode | found in the top five | mean reciprocal rank | median time per search |
 |---|---:|---:|---:|
-| `rrf` | 19 of 20 | 0.696 | 49.8 ms |
-| `hybrid` | 18 of 20 | 0.620 | 26.0 ms |
-| `vector` | 15 of 20 | 0.643 | 50.2 ms |
+| `rrf` | 19 of 20 | 0.696 | 55.0 ms |
+| `hybrid` | 17 of 20 | 0.656 | 48.2 ms |
+| `vector` | 15 of 20 | 0.643 | 39.4 ms |
 | `keyword` | 18 of 20 | 0.617 | 1.1 ms |
 
 The mean reciprocal rank is 1 when the right article is always first and 0.5 when it is always
-second. The time includes embedding the question, about 11 ms, with the model already loaded. The
-title evaluation was run twice with the same results.
+second. The time includes embedding the question with the model already loaded. The title
+evaluation was run twice with the same rankings, and the times of the second run were within 9% of
+these.
 
 What the numbers say:
 
@@ -528,15 +538,17 @@ What the numbers say:
   `vector` alone missed "asking questions to expose contradictions in a belief" (Socratic method),
   which the keyword list found. `keyword` alone missed "a former slave who taught that some things
   are within our control" (Epictetus), which the vector list found. `rrf` found both.
-- **`hybrid` finds as many and ranks them lower.** The `inillucent_search` table weights the keyword
-  side by default, so a chunk that repeats the question's words outranks the article the question is
-  about. For "the school that met at the Lyceum", the Ancient Greek philosophy article comes first
-  and Aristotle third.
+- **`hybrid` finds as many and ranks them a little lower.** With `vector_weight = 0.5` it scores
+  0.789. For "the school that met at the Lyceum", a chunk of the Ancient Greek philosophy article
+  that repeats the question's words still comes first, and Aristotle second. Without the fixed
+  weight, the table's own weight for each query put Aristotle third and scored 0.681.
 - **Adding the first sentence to every chunk made the search by meaning worse**, 15 found against 18.
   Every chunk of an article then carries the same sentence, which pulls the chunks of one article
   toward each other and away from what each chunk is about. The title alone is the default.
-- **`keyword` is fast**, under a millisecond, because it embeds nothing. The other modes spend about
-  11 ms embedding the question and about 30 ms comparing it with 3,696 vectors and reading the hits.
+- **`keyword` is fast**, about a millisecond, because it embeds nothing. The other modes embed the
+  question and compare it with 3,696 vectors. `hybrid` is the slowest because it embeds the question
+  twice: once in the search, and again in the statement that reads each hit's distance from the
+  `chunk` table. `vector` and `rrf` take the distance from the vector search itself.
 - **One question fails in every mode.** "paradoxes of motion such as Achilles and the tortoise"
   returns the articles `Pre-Socratic philosophy` and `Eubulides`, which discuss the same paradoxes, and
   never the short Zeno of Elea article.
@@ -569,13 +581,17 @@ minutes 44 seconds with the model held.
 What the numbers say:
 
 - **Loading the model costs about 750 ms**, and `on-demand` pays it on every search. The embedding
-  itself takes about 11 ms.
+  itself took 15 to 30 ms in a separate measurement with inillucent 1.0.30.
 - **A loaded model costs about 1 GB of memory** in this process: 49 MB before, 1,123 MB after.
-- **The first search in a process pays a second cost of about 950 ms**, reading the stored vectors and
-  the keyword index from the file for the first time. Loading the model early saves only the first
-  cost. `--warm` runs one search in every mode at start and pays both before the agent asks
-  anything, so the first question takes about 30 ms. The server then answers `initialize` about two
-  seconds later than it would without `--warm`.
+- **The first search in a process used to pay a second cost of about 950 ms.** The search table
+  kept the rows written since its last compaction outside its index, and a new process added them
+  back in before its first answer. A sync that changes anything now ends with
+  `INSERT INTO chunk_search(chunk_search) VALUES('compact')`, which takes about half a second.
+  Measured with 1.0.30 after a full sync, the first `hybrid` search in a new process took 1,726 to
+  1,781 ms without the compaction and 836 to 891 ms with it, most of it loading the model. The
+  table above was measured before the compaction step. `--warm` runs one search in every mode at
+  start, so the first question takes about 30 ms, and the server then answers `initialize` later
+  than it would without `--warm`.
 - **A sync under `on-demand` loads the model for every chunk**, which is why the table below says
   never to combine them.
 

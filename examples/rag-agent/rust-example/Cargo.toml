@@ -14,17 +14,10 @@ license = "MIT"
 
 [dependencies]
 # The database, from crates.io, exactly as an application outside this
-# repository gets it.
-inillucent = "1.0.29"
-
-# `inillucent` 1.0.29 has no `embed` feature of its own. Releases after 1.0.29
-# do, and there `inillucent = { version = "...", features = ["embed"] }` is the
-# only line needed. On 1.0.29, `inillucent-engine` has the feature, and
-# Cargo turns a feature on for every user of a crate in the build, so naming the
-# engine here with `embed` compiles `embed(TEXT)` into the engine the
-# `inillucent` crate uses. The model itself is not in the build. It is loaded at
-# run time from the folder `inillucent setup-embeddings all` installs it in.
-inillucent-engine = { version = "1.0.29", features = ["embed"] }
+# repository gets it. The `embed` feature compiles `embed(TEXT)` into the
+# engine. The model itself is not in the build. It is loaded at run time from
+# the folder `inillucent setup-embeddings all` installs it in.
+inillucent = { version = "1.0.30", features = ["embed"] }
 
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

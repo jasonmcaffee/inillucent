@@ -223,6 +223,17 @@ inillucent computes the value once and uses it for every row. SQLite applies
 This matters for speed. Over the 2,661 passages in `examples/rag-agent/cli-example`, one search took 105.7
 seconds when the question was embedded once per row, and 1.50 seconds when it was embedded once.
 
+Once means once for each place the call is written. A query that writes the distance in the select
+list and orders by its alias, `SELECT id, vector_distance_cos(v, embed(?1)) AS d FROM chunk ORDER
+BY d`, embeds the question twice. Measured over the 3,696 chunks in `examples/rag-agent`, that took
+77 ms against 44 ms for the same query written with the distance once, inside a derived table:
+
+```sql
+SELECT id, d
+FROM (SELECT id, vector_distance_cos(v, embed('search_query: ' || ?1)) AS d FROM chunk)
+ORDER BY d LIMIT 5;
+```
+
 A function you register yourself is computed once only if you set `FunctionFlags::deterministic`.
 The default is `false`, because a function such as `random()` must run for every row.
 

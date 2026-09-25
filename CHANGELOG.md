@@ -10,6 +10,19 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**The Rust rag example uses what 1.0.30 added.** It depends on `inillucent` alone with
+`features = ["embed"]`, fills `chunk_search` from `chunk` with one `INSERT ... SELECT` per document,
+embeds each question inside the search SQL, declares `vector_weight = 0.5`, and compacts the search
+table after a sync that changed it. The command line example fills its FTS5 table with
+`INSERT ... SELECT` in place of a second CSV file.
+
+**`ship.ps1` prepares the release checkout the way the nightly prepares its own.** It copies the
+pinned SQLite build, the gate fixtures and `tests/prerequisites.local.toml` from the main checkout,
+and sets `INILLUCENT_NETWORK_TESTS`. Without them the 1.0.30 release was refused twice while every
+test passed.
+
+## 1.0.30 — 2026-09-25
+
 **`embed(TEXT)` works in an `inillucent_search` or FTS5 table's `VALUES` row, and as a search's
 query vector.** Release 1.0.29 refused `INSERT INTO chunk_search (..., vector) VALUES (...,
 embed('...'))` and `WHERE vector = embed('search_query: ' || ?1)` with the status `unsupported`,
