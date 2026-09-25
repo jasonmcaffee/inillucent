@@ -15,7 +15,10 @@ fails the build when any copy of it disagrees.
 `perf` target only when a crate that changed is in the target's `covers`, and never runs the
 `nightly` tier. CI runs every tier but `nightly` on each push, and a pull request runs what its
 change can break at that cadence. A new workflow, `nightly.yml`, runs every tier on Linux once a day.
-The runner builds only the packages and targets it selected, instead of the whole workspace.
+The runner builds only the packages and targets it selected, instead of the whole workspace. A
+change to the parser alone now gets a strict verdict in 159 seconds, 165 targets. A one line change
+to the command line program gets one in 116 seconds, and links 24 executables where the build step
+used to link 283.
 
 **`gates_fail_closed` no longer builds a second workspace.** Its nested runners read the executables
 the outer run located from an artifact list, `--artifacts`, and start no cargo. The target took 36
@@ -25,7 +28,10 @@ the other targets.
 **`inillucent-compat`'s 149 integration test files are seven binaries, one per tier.** Each file is a
 module, `tests/<tier>/<name>.rs`, and its target is `inillucent-compat::<tier>::<name>`. The runner
 still runs each suite in a process of its own. The test names in every suite were compared before and
-after the move: 149 suites and 1,189 tests, identical.
+after the move: 149 suites and 1,189 tests, identical. With debug and test builds keeping line tables
+only, a cold test build of the workspace takes 50 seconds instead of 102, an edit to
+`inillucent-base` rebuilds in 30 seconds instead of 78, and the target directory after a full test
+build is 10.2 GB instead of 41.1 GB.
 
 **A machine can declare the prerequisites it will never have.** The gitignored
 `tests/prerequisites.local.toml` lists them. A strict run reports the suites they excuse under their
@@ -35,8 +41,10 @@ own heading and does not fail for them.
 `packaging/register-nightly.ps1`, runs every tier, builds all five release targets in parallel, runs
 the gates and the scorecard on that build, replaces a rolling `nightly` pre release, commits the
 timings, and files a ticket when anything is red. `ship.ps1` reads its verdict for the commit being
-released instead of running a suite of its own, and says so in the release notes. Debug and test
-builds keep line tables only.
+released instead of running a suite of its own, and says so in the release notes. The five release
+builds now run at once: 257 seconds cold, against 646 seconds one after another. `--strict` passes
+on the development machine for the first time, with four suites reported as not evidenced there by
+declaration.
 
 **A new `CREATE INDEX ... USING inillucent_hnsw` index walks its HNSW graph.** An index used to be
 created in exact mode, which compares the query with every stored vector on every query. There was

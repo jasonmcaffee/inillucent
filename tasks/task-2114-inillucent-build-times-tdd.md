@@ -40,6 +40,30 @@ worktree leaves behind.
 | G7 | A worktree's target directory after a full test build | 44 GB (2.9 GiB of test executables and 2.6 GiB of PDB files among it) | under 15 GB |
 | G8 | The nightly runs unattended on this box, records timings, runs the gates and the scorecard on the release build, publishes a pre release, and files a ticket when red | no nightly exists | exists and has run green once |
 
+### Measured after implementation
+
+Taken on 2026-09-25 in one quiet window with no other agent running, on scratch worktrees of `main`
+at b42fb3b (before) and of this change (after), each with its own target directory. The commands and
+logs are in `_agent_output/task-2125/` (`measure.ps1`, `measurements.tsv`, one log per measurement).
+
+| # | measurement | before | after |
+|---|---|---|---|
+| G1 | a change to `inillucent-sql/src/directive.rs` alone, `--changed --strict`, build and run | 37 min recorded for the four file change | 159 s, 165 targets, no crash suite or nightly target |
+| G1 | the four file change in `inillucent-engine/src/ddl/` and `directive.rs`, selection only | 191 targets | 187 targets: the nightly tier drops out; every durability row covers `inillucent-engine`, so the crash suites still run, and `vacuum_crash` alone took 1,047 s in a loaded full run |
+| G2 | a one line change to `inillucent-cli/src/main.rs` | the build step alone 80.4 s, 283 executables | build and the whole verdict 116.2 s, 24 executables, 50 targets, 837 tests |
+| G3 | cold `cargo test --workspace --no-run` (M10) | 102.0 s | 50.1 s (104% faster); 46.3 s and 48.1 s on repeats |
+| G3 | an edit to `inillucent-base`, then the test build | 77.5 s | 30.3 s (156% faster), the same 28 crates |
+| G5 | `--strict` on the development machine | never passed | passes: 231 targets, 3,774 tests, four suites not evidenced by declaration |
+| G6 | the five target release build, cold, fat LTO | 645.9 s serial | 257.4 s parallel (151% faster) |
+| G7 | target directory after a full test build | 41.1 GB, 331 test executables, 28.2 GB of PDB files | 10.2 GB, 189 test executables, 4.5 GB of PDB files |
+| C2 | `gates_fail_closed` through the runner | 36 min, alone, last | about 30 s, beside the others |
+| C10 | rust-lld on the cold test compile | 50.1, 46.3, 48.1 s with link.exe | 44.9, 47.7, 48.6 s: within noise, so it is not set |
+| C10 | sccache, cold test compile | 46.3 to 50.1 s | 56.2 s filling the cache, 46.4 s warm: no gain, so it is not set |
+
+G1 for a change inside `inillucent-engine` is not met and is not meant to be by this design: the
+crash suites exist for exactly that change. G8 is recorded in the ticket once the first real night
+has run.
+
 ### Non goals
 
 - **The release profile does not change.** `lto = "fat"` and `codegen-units = 1` are the fairness
@@ -650,4 +674,7 @@ work. Each point below says what differs from sections 5 and 8, and why.
   `release-macos.ps1` gained `-BuiltRoot` to read the Apple builds from there. `-Serial` keeps the old
   order, and `-BuildOnly` stops after compiling, for measuring.
 - **The machine (C10)** is `packaging/setup-machine.ps1` with a switch per setting. Nothing is set
-  without its switch, because each one changes every Rust build on the machine.
+  without its switch, because each one changes every Rust build on the machine. Neither setting
+  reproduced a gain once the test binaries were grouped by tier (see the measured table above), so
+  neither is set on the development machine. `cargo install sccache` does not compile here, so the
+  switch downloads the official prebuilt binary.

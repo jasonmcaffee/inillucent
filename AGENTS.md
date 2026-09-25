@@ -224,10 +224,12 @@ that does not select `inillucent-bench` does not compile oniguruma and does not 
 scripts in `packaging/` still need `Import-MsvcEnvironment` from `packaging/stage-layout.ps1` loaded
 by hand.
 
-**Two optional machine settings.** `pwsh packaging/setup-machine.ps1 -Linker` sets
+**Two optional machine settings, both off here.** `pwsh packaging/setup-machine.ps1 -Linker` sets
 `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER` to the toolchain's `rust-lld.exe`, and `-Sccache`
-sets `RUSTC_WRAPPER=sccache` with its cache on D:. Both are user environment variables, because a
-committed `.cargo/config.toml` would be replaced in a ticket's worktree. `-Remove` takes them out.
+sets `RUSTC_WRAPPER` to sccache with its cache on D:. Both are user environment variables, because
+a committed `.cargo/config.toml` would be replaced in a ticket's worktree. Measured on this machine
+after the test binaries were grouped by tier, neither made a cold test compile faster, so neither is
+set. `-Remove` takes them out.
 
 ### What a git worktree does not have
 
