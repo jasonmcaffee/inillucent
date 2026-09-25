@@ -30,6 +30,17 @@ pub(super) fn push_into_derived_tables(select: &mut BoundSelect) {
     let Some(filter) = select.filter.as_ref() else {
         return;
     };
+    // Nothing is split or copied for a statement with no derived table, which
+    // is almost every statement: the compile of `SELECT id FROM t WHERE email
+    // = ?1` has an allocation budget, and splitting its `WHERE` here took three
+    // of them to find nothing to push.
+    if !select
+        .sources
+        .iter()
+        .any(|source| matches!(source.rows, SourceRows::Subquery(_)))
+    {
+        return;
+    }
     // A `RIGHT` or `FULL` join can null extend any term before it, so a
     // statement with one pushes nothing.
     if select
