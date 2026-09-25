@@ -25,7 +25,9 @@ inillucent --db app.rdb describe note
 ```
 
 `describe` returns the columns and their types, the primary key, every index, the row count and the
-`CREATE TABLE` statement in one call. Run `describe` before you write SQL against a table you did
+`CREATE TABLE` statement in one call. It lists every column, including generated ones, and its
+`kind` column says `generated stored`, `generated virtual`, or `hidden` for a hidden column of a
+virtual table. Run `describe` before you write SQL against a table you did
 not create. `describe` also shows whether the table is a keyword search or vector search table,
 which changes how you query it. The [`inillucent-search`](../inillucent-search/SKILL.md) skill covers
 those tables.

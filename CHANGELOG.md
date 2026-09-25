@@ -55,6 +55,11 @@ A name inside an expression, such as `quantity + 0`, still reads the table colum
 changed once per match, `changes()` counted every match, and `RETURNING` listed the row once per
 match. SQLite changes it once, with the values of one match.
 
+**`inillucent describe` lists generated columns.** It read `PRAGMA table_info`, which leaves them
+out as SQLite's does, so a table with 18 columns was described as having 16. It now lists every
+column, and a new `kind` column says `generated stored`, `generated virtual`, or `hidden` for a
+hidden column of a virtual table. The MCP tool `inillucent_describe` answers the same.
+
 **`inillucent-shell` no longer cuts a trigger at the `END` of a `CASE`.** A body written as
 `SELECT CASE WHEN NEW.n < 0 THEN RAISE(ABORT, 'negative') END; END;` was sent to the parser after
 the first `END;` and refused as incomplete. The shell now ends a trigger only at an `END` that

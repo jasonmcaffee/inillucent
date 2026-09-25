@@ -500,6 +500,58 @@ fn describe_returns_one_row_per_column() {
     );
 }
 
+/// `describe` lists a generated column and says it is one.
+///
+/// It read `PRAGMA table_info`, which leaves generated columns out as SQLite's
+/// does, so a table with two of them was described with two columns missing.
+#[test]
+fn describe_lists_generated_columns() {
+    let binary = program("inillucent");
+    let database = area("describe-generated").join("app.rdb");
+    let path = database.to_string_lossy().to_string();
+    for arguments in [
+        vec!["create", path.as_str()],
+        vec![
+            "--db",
+            path.as_str(),
+            "exec",
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, at TEXT,              business_day TEXT GENERATED ALWAYS AS (date(at)) STORED,              doubled INTEGER GENERATED ALWAYS AS (id * 2) VIRTUAL)",
+        ],
+    ] {
+        succeeded("setup", &run(&binary, &arguments));
+    }
+    let ran = run(
+        &binary,
+        &[
+            "--db", &path, "describe", "--table", "orders", "--output", "json",
+        ],
+    );
+    succeeded("describe", &ran);
+    let kind = column_names(&ran.stdout)
+        .iter()
+        .position(|name| name == "kind")
+        .expect("`describe` has a `kind` column");
+    let described: Vec<(String, String)> = rows(&ran.stdout)
+        .into_iter()
+        .map(|row| {
+            (
+                row.get(1).cloned().unwrap_or_default(),
+                row.get(kind).cloned().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        described,
+        vec![
+            ("id".to_string(), String::new()),
+            ("at".to_string(), String::new()),
+            ("business_day".to_string(), "generated stored".to_string()),
+            ("doubled".to_string(), "generated virtual".to_string()),
+        ],
+        "`describe` listed {described:?}"
+    );
+}
+
 /// `schema` returns the statement that would recreate the table.
 #[test]
 fn schema_returns_the_statement_that_recreates_the_table() {

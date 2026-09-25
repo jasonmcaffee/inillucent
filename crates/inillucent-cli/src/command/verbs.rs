@@ -783,9 +783,20 @@ pub fn schema(context: &mut Context, arguments: &Arguments) -> Result<Outcome, F
 /// answers from an incomplete picture. This is the single most useful tool on
 /// the list for an agent, and it is the one whose absence was most visible when
 /// the local model was first pointed at the server.
+///
+/// **Every column, including the generated ones.** It read `PRAGMA table_info`,
+/// which leaves out a generated column exactly as SQLite's does, so a table of
+/// 18 columns with two `GENERATED ALWAYS AS (...) STORED` among them was
+/// described as having 16, and a reader learned of the other two only from the
+/// DDL printed underneath. `table_xinfo` lists every column, and `kind` says
+/// which ones are generated and which are the hidden columns of a virtual
+/// table.
 pub fn describe(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let name = arguments.required_text("table")?.to_string();
-    let info = format!("PRAGMA table_info({})", quoted(&name));
+    let info = format!(
+        "SELECT cid, name, type, \"notnull\", dflt_value, pk,          CASE hidden WHEN 1 THEN 'hidden' WHEN 2 THEN 'generated virtual'          WHEN 3 THEN 'generated stored' ELSE '' END AS kind          FROM pragma_table_xinfo({})",
+        quoted_text(&name)
+    );
     let mut produced = produce(context, "describe", &info, &[], 0)?;
     if produced.rows.is_empty() {
         return Err(Failed::said(
