@@ -4505,7 +4505,8 @@ impl<'a> Binder<'a> {
             }
             let mut bound = Vec::with_capacity(list.len());
             for argument in &list {
-                bound.push(self.bind_expr(*argument)?);
+                let argument = self.bind_expr(*argument)?;
+                bound.push(self.marked_as_json(argument));
             }
             return Ok(BoundExpr::Json {
                 func,
@@ -4702,6 +4703,74 @@ fn no_such_window(name: &[u8], span: Span) -> ParseError {
 /// Returns an authorizer refusal.
 fn denied(what: &'static str, span: Span) -> ParseError {
     ParseError::new(ParseErrorKind::Unsupported(what), span)
+}
+
+impl Binder<'_> {
+    /// Returns a JSON function's argument with its JSON subtype made visible.
+    ///
+    /// **A subtype reaches the call above only through a nested JSON call.**
+    /// The executor carries the mark from one JSON call to the one that reads
+    /// it, and an argument of any other shape arrives as a plain value. Two
+    /// shapes carry the mark in SQLite and are not JSON calls here:
+    ///
+    /// - a `json_group_array` or `json_group_object` result. `json_object('items',
+    ///   json_group_array(item))` answered `{"items":"[\"Latte\"]"}`, the array
+    ///   quoted as a string, where SQLite answers `{"items":["Latte"]}`.
+    /// - a scalar subquery whose one column is either of those or a JSON call.
+    ///   SQLite keeps the subtype through a scalar subquery, and does not keep
+    ///   it through a derived table or a CTE, which this leaves alone.
+    ///
+    /// Each is wrapped in `json()`, or `jsonb()` for the binary aggregates,
+    /// which gives back the same document with the mark on it. Measured
+    /// against 3.53.4, including the cases where SQLite quotes the value.
+    ///
+    /// @param argument - the argument, bound
+    fn marked_as_json(&self, argument: BoundExpr) -> BoundExpr {
+        let wrapper = match &argument {
+            BoundExpr::Aggregate { slot, .. } => {
+                json_aggregate_wrapper(self.aggregates.get(*slot).map(|held| held.func))
+            }
+            BoundExpr::Subquery {
+                kind: SubqueryKind::Scalar,
+                block,
+                ..
+            } => match block.columns.as_slice() {
+                [only] => match &only.expr {
+                    BoundExpr::Aggregate { slot, .. } => {
+                        json_aggregate_wrapper(block.aggregates.get(*slot).map(|held| held.func))
+                    }
+                    other if json_subtype(other) == Subtyped::Always => {
+                        Some(function::JsonFunc::Json)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        };
+        match wrapper {
+            Some(func) => BoundExpr::Json {
+                func,
+                arguments: vec![argument],
+            },
+            None => argument,
+        }
+    }
+}
+
+/// Returns the JSON call that marks a JSON group aggregate's result, if it is one.
+///
+/// @param func - the aggregate, when the slot named one
+fn json_aggregate_wrapper(func: Option<function::AggregateFunc>) -> Option<function::JsonFunc> {
+    match func? {
+        function::AggregateFunc::JsonGroupArray | function::AggregateFunc::JsonGroupObject => {
+            Some(function::JsonFunc::Json)
+        }
+        function::AggregateFunc::JsonbGroupArray | function::AggregateFunc::JsonbGroupObject => {
+            Some(function::JsonFunc::Jsonb)
+        }
+        _ => None,
+    }
 }
 
 /// Whether a bound expression carries the JSON subtype.

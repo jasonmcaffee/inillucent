@@ -31,6 +31,12 @@ from SQLite, and what the example does in each case.
 does. Release 1.0.30 refused both `CREATE TRIGGER` statements with a syntax error at the `||`.
 NULL is an empty message and a number is its text.
 
+**A `json_group_array` or `json_group_object` result nests inside another JSON function.**
+`json_object('day', day, 'items', json_group_array(item))` answered
+`{"day":"2026-09-20","items":"[\"Latte\",\"Croissant\"]"}`, the array quoted as a string, where
+SQLite answers `{"day":"2026-09-20","items":["Latte","Croissant"]}`. The same holds for
+`json_array(...)` around one, and for a scalar subquery whose one column is a JSON value.
+
 **`inillucent-shell` no longer cuts a trigger at the `END` of a `CASE`.** A body written as
 `SELECT CASE WHEN NEW.n < 0 THEN RAISE(ABORT, 'negative') END; END;` was sent to the parser after
 the first `END;` and refused as incomplete. The shell now ends a trigger only at an `END` that
