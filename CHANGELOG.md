@@ -10,6 +10,8 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+## 1.0.29 — 2026-09-24
+
 **`DELETE` and `UPDATE` take `ORDER BY`, `LIMIT` and `OFFSET`.** They were refused with
 `near "LIMIT": syntax error`, in the words of the pinned SQLite build, which is compiled without
 `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`. Apple's SQLite and many application builds have the option, and
