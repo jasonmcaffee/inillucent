@@ -317,7 +317,13 @@ const CALLS: [(&str, &str, &str); 28] = [
     ("inillucent_capabilities", "{}", "ddl"),
     ("inillucent_functions", "{}", "substr"),
     ("inillucent_setup_embeddings", "{}", "nomic-embed-text-v1.5"),
-    ("inillucent_version", "{}", "0.1."),
+    // The workspace version this test was built at, which every crate shares.
+    // It was the literal "0.1.", and the 1.0.29 release made that answer red.
+    (
+        "inillucent_version",
+        "{}",
+        concat!("inillucent-cli ", env!("CARGO_PKG_VERSION")),
+    ),
     ("inillucent_help", "{}", "query"),
     // The three that move the session, and the one that refuses.
     ("inillucent_backup", r#"{"file":"{copy}"}"#, "wrote"),
