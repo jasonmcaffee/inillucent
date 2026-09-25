@@ -193,10 +193,11 @@ pub struct Row {
     /// the tree that does this, and it sits in `tooling` beside forty targets
     /// that have no reason to run one at a time.
     ///
-    /// No row sets it today. `gates_fail_closed` did until its nested runner
-    /// stopped starting cargo: it now reads the outer run's artifact list (see
+    /// `gates_fail_closed` used to set it, until its nested runner stopped
+    /// starting cargo: it now reads the outer run's artifact list (see
     /// `testplan`), so there is no relink to race and it runs beside the rest.
-    /// The field stays for the next target that genuinely has to run alone.
+    /// `bindings` sets it for a different reason: it grades records two other
+    /// targets write, so it has to run after them.
     pub alone: bool,
     /// Other targets, by label, whose executables this suite starts itself.
     ///

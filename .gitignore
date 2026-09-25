@@ -177,3 +177,9 @@ __pycache__/
 # run reports a suite excused by it under its own heading instead of failing.
 # It is true of one machine, so it is never committed, and CI has none.
 /tests/prerequisites.local.toml
+
+# The scorecard's working files under the nightly's output folder: the two
+# pristine databases each round clones (about 17 MB each) and the generated
+# plan. The nightly commits the history, the dashboard and the scorecard
+# beside them so a regression is a diff, and these are rebuilt every night.
+/compat/perf/nightly/*/
