@@ -461,6 +461,9 @@ if (-not $Force -and $previous -and "$($previous.commit)" -eq $commit -and "$($p
 }
 
 $env:CARGO_TARGET_DIR = Join-Path $Worktree 'target'
+# This machine has a network, so the HTTP client's tests fetch the real files the installer fetches
+# instead of skipping, as they do in CI.
+$env:INILLUCENT_NETWORK_TESTS = '1'
 # `onig_sys` compiles oniguruma with cl.exe, and a scheduled task has no INCLUDE.
 Import-MsvcEnvironment | Out-Null
 

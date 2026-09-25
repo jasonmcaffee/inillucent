@@ -542,11 +542,9 @@ fn run(options: &Options) -> Result<bool, String> {
     // stops that being the old wrong red is the retry above: a target only stays
     // undetermined here when a second, solitary attempt could not read it either.
     //
-    // A target excused by a declared absence is the one exception. Under
-    // `--strict` its skips panic, so its verdict is FAILED, and every one of
-    // those failures is the strict skip marker naming something this machine
-    // says it does not have. It evidenced nothing, it is reported as such, and
-    // it does not make the run red.
+    // A target whose every failure is a strict skip is not red: it evidenced
+    // nothing, and `hollow` is where that is graded, which is the one place a
+    // declared absence can excuse it.
     let red = outcomes.iter().any(is_red);
     let hollow = options.strict && !absences.unexcused.is_empty();
     if !red && nothing_was_graded(&outcomes) {
