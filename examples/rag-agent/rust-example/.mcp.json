@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "philosophy": {
+      "command": "cargo",
+      "args": ["run", "--release", "--quiet", "--", "serve", "--residency", "idle:10m"]
+    }
+  }
+}

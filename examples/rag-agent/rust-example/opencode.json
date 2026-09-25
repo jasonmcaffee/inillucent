@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "philosophy": {
+      "type": "local",
+      "command": ["cargo", "run", "--release", "--quiet", "--", "serve", "--residency", "idle:10m"],
+      "enabled": true
+    }
+  }
+}

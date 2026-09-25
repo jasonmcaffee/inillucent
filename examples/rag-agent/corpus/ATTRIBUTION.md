@@ -1,15 +1,15 @@
 # Where this corpus comes from
 
-Every passage in `greek-philosophy.rdb` is a piece of one of the Wikipedia articles below, taken
-from the 20251222 CirrusSearch dumps of the English and Simple English Wikipedias. The text is
-unchanged apart from being split into passages of about 1,100 characters with its article title
-prepended.
+Both examples in `examples/rag-agent/` search the Wikipedia articles below, taken from the
+20251222 CirrusSearch dumps of the English and Simple English Wikipedias. The text is
+unchanged. The command line example splits it into passages of about 1,100 characters with the
+article title in front, and the Rust example into overlapping chunks of about 1,000 characters.
 
 **Licence: [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).** The text is used and
 redistributed here under that licence, and anything derived from it carries the same one. Each
 article's authors are named in its page history, which the link beside it reaches.
 
-80 articles, 2,374,066 characters. `scripts/select-corpus.py` holds the list of titles and
+80 articles, 2,374,066 characters. `../cli-example/scripts/select-corpus.py` holds the list of titles and
 the reason it is a list rather than a rule.
 
 | article | wiki | characters |

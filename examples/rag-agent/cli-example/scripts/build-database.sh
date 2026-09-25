@@ -42,9 +42,9 @@ fi
 
 echo "== chunking the corpus"
 "$python_bin" scripts/chunk-corpus.py \
-  --corpus corpus/greek-philosophy.jsonl \
-  --out corpus/chunks.csv \
-  --fts-out corpus/chunks-fts.csv
+  --corpus ../corpus/greek-philosophy.jsonl \
+  --out build/chunks.csv \
+  --fts-out build/chunks-fts.csv
 
 rm -f greek-philosophy.rdb greek-philosophy.rdb-wal.0000000001
 rm -f chunks.rdb chunks.rdb-wal.0000000001
@@ -60,7 +60,7 @@ rm -f chunks.rdb chunks.rdb-wal.0000000001
 # which is why `id` is cast on the way across.
 echo "== loading the chunks"
 "$cli" create chunks.rdb
-"$cli" --db chunks.rdb import corpus/chunks.csv --table chunk
+"$cli" --db chunks.rdb import build/chunks.csv --table chunk
 
 echo "== creating the schema"
 "$cli" create greek-philosophy.rdb
@@ -119,7 +119,7 @@ echo "== indexing"
 # `unsupported` status and exit code 3. `--skip 1` drops the header row: the
 # table already exists, so `import` inserts every row it reads instead of taking
 # the first one as column names.
-"$cli" --db greek-philosophy.rdb import corpus/chunks-fts.csv --table passage_fts --skip 1
+"$cli" --db greek-philosophy.rdb import build/chunks-fts.csv --table passage_fts --skip 1
 
 # Folds the log back into the file, so what is committed is one self-contained
 # database rather than a file plus a log segment nobody would think to commit.

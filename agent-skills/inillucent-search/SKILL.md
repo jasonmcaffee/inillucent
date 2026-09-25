@@ -240,20 +240,22 @@ stays in memory:
 
 ### A corpus to try
 
-`examples/rag-agent/greek-philosophy.rdb` is already embedded: 80 Wikipedia articles on Greek and
+`examples/rag-agent/cli-example/greek-philosophy.rdb` is already embedded: 80 Wikipedia articles on Greek and
 Roman philosophy, split into 2,661 passages, each with a 768 number vector. Install the model and
 search it:
 
 ```sh
 inillucent setup-embeddings all
-inillucent --db examples/rag-agent/greek-philosophy.rdb query \
+inillucent --db examples/rag-agent/cli-example/greek-philosophy.rdb query \
   "SELECT title, body FROM passage
    ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5" \
   --params '["who was Seneca"]'
 ```
 
-`examples/rag-agent/AGENTS.md` is a good page to copy when you build a search database for someone
-else.
+`examples/rag-agent/cli-example/AGENTS.md` is a good page to copy when you build a search database for
+someone else. `examples/rag-agent/rust-example/` is an MCP server in Rust over the same articles. It
+shows overlapping chunks, a sync that embeds only changed documents, and reciprocal rank fusion next
+to the `inillucent_search` table.
 
 ## How fast it is
 

@@ -19,8 +19,12 @@ packages/go/README.md
 packages/npm/inillucent/README.md
 packages/php/README.md
 packages/python/README.md
+examples/README.md
 examples/rag-agent/README.md
-examples/rag-agent/AGENTS.md
+examples/rag-agent/cli-example/README.md
+examples/rag-agent/cli-example/AGENTS.md
+examples/rag-agent/rust-example/README.md
+examples/rag-agent/rust-example/AGENTS.md
 packaging/README.md
 packaging/PUBLISHING.md
 packaging/macos/README.md

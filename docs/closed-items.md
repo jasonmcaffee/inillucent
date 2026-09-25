@@ -410,7 +410,7 @@ wrote index entries into a transaction that never committed:
 
 A third change made the index fast: the backfill and the write path now flush the module, so a
 query reads a published generation. Before, every query replayed the whole delta log, and took
-2.34 s against 0.66 s for an exhaustive scan. All ten questions in `examples/rag-agent` are answered
+2.34 s against 0.66 s for an exhaustive scan. All ten questions in `examples/rag-agent/cli-example` are answered
 through an index, and `scripts/verify-indexed.sh` checks that.
 
 ### `embed(TEXT)` ran once a row when its argument was a constant
@@ -419,7 +419,7 @@ A deterministic function whose arguments do not change within a statement is now
 the statement. When every argument is a literal it is evaluated when the statement is compiled. When
 an argument is a bound parameter it is evaluated when execution starts, because a compiled
 statement can be bound again with other values. The documented query over the 2,661 passages in
-`examples/rag-agent` went from **105.7 s to 1.50 s**.
+`examples/rag-agent/cli-example` went from **105.7 s to 1.50 s**.
 
 ### A registered function was refused when writing
 

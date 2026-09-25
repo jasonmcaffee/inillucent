@@ -95,8 +95,8 @@ the question.
 | File | What it is |
 |---|---|
 | `README.md` | the same example written for a person, with the setup step and what to expect |
-| `corpus/greek-philosophy.jsonl` | the 80 articles the database was built from, one per line |
-| `corpus/ATTRIBUTION.md` | where each article came from, and its licence |
+| `../corpus/greek-philosophy.jsonl` | the 80 articles the database was built from, one per line |
+| `../corpus/ATTRIBUTION.md` | where each article came from, and its licence |
 | `scripts/build-database.sh` | rebuilds the database from the corpus with the `inillucent` command line |
 | `scripts/verify.sh` | asks ten questions and checks the article each one has to find. Run it after an engine change |
 | `scripts/verify-indexed.sh` | asks the same ten questions through an HNSW index built on a temporary copy |

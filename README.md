@@ -146,18 +146,22 @@ publishes the new file only when every check passes.
 
 ## A first search
 
-[`examples/rag-agent/`](examples/rag-agent/README.md) holds a ready made database of Greek
-philosophy: 80 Wikipedia articles split into 2,661 passages, each with its embedding. Install the
-embedding model and ask a question:
+[`examples/rag-agent/cli-example/`](examples/rag-agent/cli-example/README.md) holds a ready made
+database of Greek philosophy: 80 Wikipedia articles split into 2,661 passages, each with its
+embedding. Install the embedding model and ask a question:
 
 ```sh
 inillucent setup-embeddings all
 
-inillucent --db examples/rag-agent/greek-philosophy.rdb query \
+inillucent --db examples/rag-agent/cli-example/greek-philosophy.rdb query \
   "SELECT title, body FROM passage
    ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5" \
   --params '["who was Seneca"]'
 ```
+
+[`examples/rag-agent/rust-example/`](examples/rag-agent/rust-example/README.md) serves the same
+articles to an agent through an MCP server written in Rust, which chunks, embeds and syncs them
+itself. [`examples/`](examples/README.md) describes every example.
 
 ## For AI agents
 

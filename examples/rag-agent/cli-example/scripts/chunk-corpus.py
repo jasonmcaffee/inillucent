@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Turn the committed article corpus into the CSV `inillucent import` reads.
 
-Input is `corpus/greek-philosophy.jsonl`, one record per Wikipedia article.
-Output is `corpus/chunks.csv` with the columns `id,title,url,body`, which
+Input is `../corpus/greek-philosophy.jsonl`, one record per Wikipedia article.
+Output is `build/chunks.csv` with the columns `id,title,url,body`, which
 `build-database.sh` loads into a staging table and then embeds.
 
 ## Why there are no section boundaries in here

@@ -1,0 +1,35 @@
+[package]
+name = "rag-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "An MCP server that answers questions about Greek and Roman philosophy from an inillucent database."
+license = "MIT"
+
+# This example is its own workspace. Without this table, Cargo would find the
+# inillucent repository's root manifest two folders up and refuse to build a
+# package that is not one of its members. With it, the example builds the same
+# way inside the repository and in a copy of this folder anywhere else.
+[workspace]
+
+[dependencies]
+# The database, from crates.io, exactly as an application outside this
+# repository gets it.
+inillucent = "1.0.29"
+
+# `inillucent` has no `embed` feature of its own. `inillucent-engine` does, and
+# Cargo turns a feature on for every user of a crate in the build, so naming the
+# engine here with `embed` compiles `embed(TEXT)` into the engine the
+# `inillucent` crate uses. The model itself is not in the build. It is loaded at
+# run time from the folder `inillucent setup-embeddings all` installs it in.
+inillucent-engine = { version = "1.0.29", features = ["embed"] }
+
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+# The engine is large. Thin LTO keeps a release build of this example to a few
+# minutes, and the search code here is not what decides how fast a search is.
+lto = "thin"

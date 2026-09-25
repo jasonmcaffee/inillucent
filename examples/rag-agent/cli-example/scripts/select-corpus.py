@@ -6,7 +6,7 @@ produces at the top of this repository: `enwiki-articles.jsonl`, 60,000 articles
 streamed out of the English CirrusSearch content dump, and `articles.jsonl`, the
 whole Simple English one. Neither is committed - they are 1.5 GB and 333 MB - so
 this script is provenance rather than a step anybody has to run. Its output,
-`corpus/greek-philosophy.jsonl`, is committed, and `chunk-corpus.py` reads that.
+`../corpus/greek-philosophy.jsonl`, is committed, and `chunk-corpus.py` reads that.
 
 ## Why this is a list of titles and not a rule
 
@@ -28,7 +28,7 @@ exactly the ones a search will return when the corpus has nothing better.
 
 Usage:
     python scripts/select-corpus.py --derived <the derived Wikipedia directory> \\
-        --out corpus/greek-philosophy.jsonl
+        --out ../corpus/greek-philosophy.jsonl
 """
 
 import argparse

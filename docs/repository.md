@@ -144,7 +144,7 @@ SQLite file now.
 | `tools/` | the scripts that build the pinned SQLite, the feature probe, the gate fixture builder, and the documentation checks |
 | `packaging/` | the release script and the files each package format needs |
 | `agent-skills/` | one page per job, written for an AI agent |
-| `examples/` | worked examples. `examples/rag-agent/` is a Greek philosophy database with its embeddings already built, which an agent can search straight away. It is the one place a `.rdb` file and a text corpus are committed, and `.gitignore` says why |
+| `examples/` | worked examples, each a project of its own outside the Cargo workspace. `examples/rag-agent/cli-example/` is a Greek philosophy database with its embeddings already built, which an agent searches with the command line. `examples/rag-agent/rust-example/` is an MCP server in Rust that builds and syncs its own database from the same corpus. `examples/rag-agent/cli-example/greek-philosophy.rdb` is the one committed `.rdb` file, and `.gitignore` says why |
 | `fuzz/` | 16 libFuzzer targets over the decoders and parsers, built and run separately |
 | `docs/invariants/layering.toml` | the layer of every crate and the dependencies each may have |
 

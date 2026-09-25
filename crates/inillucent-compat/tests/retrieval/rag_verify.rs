@@ -1,6 +1,6 @@
 //! The RAG example's own verification scripts, run.
 //!
-//! Invariant: **`examples/rag-agent/scripts/verify.sh` and `verify-indexed.sh`
+//! Invariant: **`examples/rag-agent/cli-example/scripts/verify.sh` and `verify-indexed.sh`
 //! are executed and their exit codes are the verdict.** Both are named by
 //! `README.md`, by `AGENTS.md` and by `docs/closed-items.md`, three of the eight
 //! agent skills point a reader at the example, and neither script was called by
@@ -36,7 +36,7 @@ const SCRIPTS: [&str; 2] = ["verify.sh", "verify-indexed.sh"];
 
 /// Returns the example's directory.
 fn example() -> PathBuf {
-    workspace_root().join("examples/rag-agent")
+    workspace_root().join("examples/rag-agent/cli-example")
 }
 
 /// Returns a shell that can run a `.sh`, or nothing.
@@ -85,7 +85,7 @@ fn the_example_answers_the_questions_it_documents() {
     let database = directory.join("greek-philosophy.rdb");
     if !database.is_file() {
         inillucent_compat::differential::skipping(&format!(
-            "{} is not in this checkout; run examples/rag-agent/scripts/build-database.sh",
+            "{} is not in this checkout; run examples/rag-agent/cli-example/scripts/build-database.sh",
             database.display()
         ));
         return;

@@ -16,11 +16,15 @@
 corpus.jsonl
 /index.inillucent/
 
-# The RAG example's chunks, which `scripts/chunk-corpus.py` splits out of the
-# corpus beside them in a second. The articles are source and are committed; a
-# second copy of the same text, cut into passages, is not.
-/examples/rag-agent/corpus/chunks.csv
-/examples/rag-agent/corpus/chunks-fts.csv
+# The command line RAG example's chunks, which `scripts/chunk-corpus.py` splits
+# out of the shared corpus in a second. The articles are source and are
+# committed; a second copy of the same text, cut into passages, is not.
+/examples/rag-agent/cli-example/build/
+
+# The Rust RAG example is its own Cargo workspace. Its build output and the
+# database its server builds from the corpus are output, never source.
+/examples/rag-agent/rust-example/target/
+/examples/rag-agent/rust-example/data/
 
 # Engine databases and their log segments, wherever a test or a scratch run
 # leaves one. These are output, never source: no `.rdb` has ever been tracked,
@@ -42,13 +46,13 @@ corpus.jsonl
 --*
 
 # With one exception, and it is the point of the thing it belongs to.
-# `examples/rag-agent/greek-philosophy.rdb` is the example's deliverable: a
+# `examples/rag-agent/cli-example/greek-philosophy.rdb` is the example's deliverable: a
 # corpus that is already embedded, so a reader asks a question in their first
 # minute instead of spending an afternoon building one. A database that has to
 # be built before it can be searched is exactly what that example exists to
 # remove, so this one is source. `scripts/build-database.sh` rebuilds it, and
 # the log segment beside it is still output.
-!/examples/rag-agent/greek-philosophy.rdb
+!/examples/rag-agent/cli-example/greek-philosophy.rdb
 
 # And `tests/interop/`, where a database IS the evidence (task-2036). Each
 # subdirectory holds a file written by one published release's own binary,

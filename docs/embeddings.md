@@ -187,7 +187,7 @@ inillucent computes the value once and uses it for every row. SQLite applies
 | a bound parameter such as `?1` | once each time the statement runs |
 | a column | once for each row |
 
-This matters for speed. Over the 2,661 passages in `examples/rag-agent`, one search took 105.7
+This matters for speed. Over the 2,661 passages in `examples/rag-agent/cli-example`, one search took 105.7
 seconds when the question was embedded once per row, and 1.50 seconds when it was embedded once.
 
 A function you register yourself is computed once only if you set `FunctionFlags::deterministic`.
