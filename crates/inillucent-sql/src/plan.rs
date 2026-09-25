@@ -2095,16 +2095,21 @@ fn virtual_path(
         let Some((column, op, value)) = virtual_constraint(id, table, term) else {
             continue;
         };
+        let usable = is_available(position, ids, &value);
         offer.push(VirtualConstraint {
-            spec: crate::vtab::ConstraintSpec {
-                column,
-                op,
-                usable: is_available(position, ids, &value),
-            },
+            spec: crate::vtab::ConstraintSpec { column, op, usable },
             value,
             predicate: term.clone(),
         });
-        if let Some(slot) = consumed.get_mut(index) {
+        // **Only a constraint this term can use is this term's to answer.**
+        // One whose value a later term supplies stays in the statement's
+        // terms, so that later term can take it: `FROM json_each(...) s,
+        // json_each(s.value) r` reads as `s.value = r.json` from `s`'s side
+        // too, and `s` taking it left `r` with no document and a recheck at
+        // `s` of a column only `r` produces, which failed with "the tree read
+        // for FROM term 1 does not carry column 8". SQLite offers such a
+        // constraint as not usable and evaluates it at the later loop.
+        if let Some(slot) = consumed.get_mut(index).filter(|_| usable) {
             *slot = true;
         }
     }

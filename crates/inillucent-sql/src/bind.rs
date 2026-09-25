@@ -931,9 +931,27 @@ impl BoundExpr {
                     escape.sources_used(into);
                 }
             }
+            // **A JSON call and a registered function's call read their
+            // arguments' terms too.** Both were missing here, so `i.id =
+            // c.value ->> '$.id'` looked like it read no term: the planner put
+            // `i` first and sought it with a key that reads `c`, which had not
+            // been read yet, and the statement failed with "a seek key or range
+            // bound reads a column".
             BoundExpr::Function { arguments, .. }
             | BoundExpr::Math { arguments, .. }
-            | BoundExpr::Time { arguments, .. } => {
+            | BoundExpr::Time { arguments, .. }
+            | BoundExpr::Json { arguments, .. }
+            | BoundExpr::External { arguments, .. } => {
+                for argument in arguments {
+                    argument.sources_used(into);
+                }
+            }
+            BoundExpr::VirtualFunction {
+                source, arguments, ..
+            } => {
+                if !into.contains(source) {
+                    into.push(*source);
+                }
                 for argument in arguments {
                     argument.sources_used(into);
                 }

@@ -972,7 +972,10 @@ fn rechecks_of(
     let width = connected.table.declaration().columns.len();
     let mut rechecks: Vec<Recheck> = Vec::new();
     for (position, constraint) in offer.iter().enumerate() {
-        if promised(query, position) {
+        // A constraint that was not usable here reads a term the loop reaches
+        // later. The planner leaves it among the statement's filters, which
+        // test it where its value exists, so it is not tested here as well.
+        if promised(query, position) || !constraint.spec.usable {
             continue;
         }
         // A negative column is the rowid. It is not one of the module's
