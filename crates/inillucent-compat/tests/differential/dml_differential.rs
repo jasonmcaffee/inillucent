@@ -539,6 +539,46 @@ fn trigger_raise_message_expressions_match_sqlite() {
     assert!(compared == 0 || compared == 26, "compared {compared} steps");
 }
 
+/// `UPDATE ... FROM` changes and returns each target row once.
+///
+/// Two ways it went wrong: a derived table in `FROM` was joined a second time
+/// through its own inner table, so `RETURNING` listed every row twice; and a
+/// target row that two rows of the join matched was changed once per match,
+/// counted in `changes()` once per match and returned once per match. SQLite
+/// changes it once and uses one match's values. The harness compares the
+/// counters after every step as well as the rows.
+#[test]
+fn update_from_changes_each_row_once() {
+    let compared = compare(
+        "update-from-once",
+        &[
+            Step::Exec("CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER)"),
+            Step::Exec("INSERT INTO t VALUES(1, 10), (2, 20), (3, 30)"),
+            Step::Exec("CREATE TABLE u(id INTEGER, w INTEGER)"),
+            Step::Exec("INSERT INTO u VALUES(1, 1), (2, 2)"),
+            Step::Query("UPDATE t SET v = v + u.w FROM u WHERE u.id = t.id RETURNING t.id, t.v"),
+            Step::Query(
+                "UPDATE t SET v = v + p.w FROM (SELECT id, sum(w) AS w FROM u GROUP BY id) AS p
+                 WHERE p.id = t.id RETURNING t.id, t.v",
+            ),
+            Step::Query("SELECT changes()"),
+            Step::Exec("INSERT INTO u VALUES(2, 5)"),
+            Step::Query(
+                "UPDATE t SET v = v + u.w FROM u WHERE u.id = t.id AND t.id = 2 RETURNING t.id",
+            ),
+            Step::Query("SELECT changes()"),
+            Step::Exec("UPDATE t SET v = 0 FROM u WHERE u.id = t.id"),
+            Step::Query("SELECT changes()"),
+            Step::Query(
+                "UPDATE t SET v = v + 1 FROM (SELECT id FROM u WHERE w > 1) AS p
+                 WHERE p.id = t.id RETURNING t.id, v",
+            ),
+            Step::Query("SELECT id, v FROM t ORDER BY id"),
+        ],
+    );
+    assert!(compared == 0 || compared == 14, "compared {compared} steps");
+}
+
 /// A trigger whose body writes a table that has triggers of its own.
 ///
 /// With SQLite's default `recursive_triggers = off` a trigger already on the

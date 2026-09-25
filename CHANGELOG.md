@@ -37,6 +37,10 @@ NULL is an empty message and a number is its text.
 SQLite answers `{"day":"2026-09-20","items":["Latte","Croissant"]}`. The same holds for
 `json_array(...)` around one, and for a scalar subquery whose one column is a JSON value.
 
+**`UPDATE ... FROM` changes a target row once when several rows of the join match it.** It was
+changed once per match, `changes()` counted every match, and `RETURNING` listed the row once per
+match. SQLite changes it once, with the values of one match.
+
 **`inillucent-shell` no longer cuts a trigger at the `END` of a `CASE`.** A body written as
 `SELECT CASE WHEN NEW.n < 0 THEN RAISE(ABORT, 'negative') END; END;` was sent to the parser after
 the first `END;` and refused as incomplete. The shell now ends a trigger only at an `END` that

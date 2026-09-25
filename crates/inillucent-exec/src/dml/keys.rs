@@ -144,6 +144,46 @@ pub fn keys_query_joined(
         correlations: Vec::new(),
     })
 }
+/// Returns an `UPDATE ... FROM`'s key rows with one row per target row.
+///
+/// **SQLite updates a target row once, however many rows of the join match
+/// it.** Its documentation says which match supplies the values is arbitrary;
+/// measured against 3.53.4, `UPDATE t SET v = v + u.w FROM u WHERE u.id = t.id`
+/// with two `u` rows for one `t` row changes it once, reports `changes()` of
+/// one per target row, and returns it once from `RETURNING`, with the values of
+/// the later match. This engine applied every match in turn, each computed from
+/// the row as it was before the statement, so the stored value came out the
+/// same while `changes()` counted the matches and `RETURNING` listed the row
+/// once per match. A row keeps the place its first match had and takes the
+/// values of its last.
+///
+/// @param rows - the keys query's rows, `[key..., value...]`
+/// @param values - how many assigned values follow the key in each row
+pub fn one_row_per_target(rows: Vec<Vec<OwnedDatum>>, values: usize) -> Vec<Vec<OwnedDatum>> {
+    let mut seen: std::collections::HashMap<Vec<u8>, usize> =
+        std::collections::HashMap::with_capacity(rows.len());
+    let mut kept: Vec<Vec<OwnedDatum>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let width = row.len().saturating_sub(values);
+        let mut encoded = Vec::new();
+        for value in row.iter().take(width) {
+            inillucent_tree::key::encode_into_with(
+                &value.borrow(),
+                inillucent_value::collation::Collation::Binary,
+                &mut encoded,
+            );
+        }
+        match seen.get(&encoded).and_then(|at| kept.get_mut(*at)) {
+            Some(earlier) => *earlier = row,
+            None => {
+                seen.insert(encoded, kept.len());
+                kept.push(row);
+            }
+        }
+    }
+    kept
+}
+
 /// Returns the query that finds the rowids a write to a module will change.
 ///
 /// The same shape as [`keys_query`] and without its layout, because a virtual
