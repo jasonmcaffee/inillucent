@@ -982,6 +982,45 @@ function Get-MirrorRepo {
     return "$($Matches.owner)/$($Matches.name)"
 }
 
+function Copy-TestPrerequisite {
+    <#
+    .SYNOPSIS
+        Copies the gitignored files a strict test run needs from the main checkout into the release
+        checkout.
+
+    .DESCRIPTION
+        A release is cut from a worktree of its own, and a new worktree has none of the gitignored
+        files: the pinned SQLite build in `.sqlite-ref`, the gate fixtures in
+        `_agent_output/fixtures`, and `tests/prerequisites.local.toml`, which declares what this
+        machine never has. Without them `inillucent-testrun --strict` counts every suite that needs
+        one as a failure. The 1.0.30 release stopped here with the runner exiting 1, on a commit the
+        nightly had just graded green with the same three files, which it copies into its own
+        worktree the same way. The folders are copied when they are missing, and the declaration
+        every time, because the declaration is the machine's and can change.
+
+    .PARAMETER Root
+        The checkout the release is cut from.
+
+    .PARAMETER MainCheckout
+        The repository's main checkout, which holds the files.
+    #>
+    param([string] $Root, [string] $MainCheckout)
+
+    foreach ($folder in @('.sqlite-ref', '_agent_output/fixtures')) {
+        $from = Join-Path $MainCheckout $folder
+        $to = Join-Path $Root $folder
+        if ((Test-Path -LiteralPath $from) -and -not (Test-Path -LiteralPath $to)) {
+            Write-Host "   copying $folder from $MainCheckout"
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
+            Copy-Item -LiteralPath $from -Destination $to -Recurse
+        }
+    }
+    $declaration = Join-Path $MainCheckout 'tests/prerequisites.local.toml'
+    if (Test-Path -LiteralPath $declaration) {
+        Copy-Item -LiteralPath $declaration -Destination (Join-Path $Root 'tests/prerequisites.local.toml') -Force
+    }
+}
+
 function Invoke-ReleaseTests {
     <#
     .SYNOPSIS
@@ -1073,6 +1112,7 @@ function Invoke-ReleaseTests {
     $runner = Join-Path $targetDir 'debug/inillucent-testrun.exe'
     if (-not (Test-Path -LiteralPath $runner)) { throw "inillucent-testrun built and then could not be found. Looked at $runner." }
 
+    Copy-TestPrerequisite -Root $Root -MainCheckout (Get-MainCheckout -Root $Root)
     Write-Host "   $runner $($arguments -join ' ')"
     & $runner @arguments
     $code = $LASTEXITCODE
