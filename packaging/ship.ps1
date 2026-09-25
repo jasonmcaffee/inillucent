@@ -221,6 +221,20 @@ function Get-VersionCarriers {
             What    = '[workspace.package] version'
         },
         @{
+            # **The workspace's own crates require each other by version, and a caret stops at a
+            # major.** `inillucent-base = { path = ..., version = "0.1.0" }` is `^0.1.0`, which
+            # every 0.1.x release satisfied and nothing therefore updated. The first release past
+            # 0.x, 1.0.29, stopped at the lock refresh with `failed to select a version for the
+            # requirement inillucent-base = "^0.1.0"` after this phase had rewritten seven files.
+            # crates.io reads the same requirement, so a published crate has to name a version its
+            # siblings are actually published at. Writing the release's own version does that.
+            Path    = Join-Path $root 'Cargo.toml'
+            Pattern = '(?m)^(inillucent[a-z-]* = \{ path = "[^"]+", version = ")[^"]+(" \})'
+            Replace = "`${1}$Version`${2}"
+            Check   = "(?m)^inillucent-base = \{ path = ""crates/inillucent-base"", version = ""$escaped"" \}"
+            What    = 'the version each workspace crate requires of the others'
+        },
+        @{
             Path    = Join-Path $root 'packages/npm/inillucent/package.json'
             Pattern = '(?m)^(  "version": ")[^"]+(")'
             Replace = "`${1}$Version`${2}"
