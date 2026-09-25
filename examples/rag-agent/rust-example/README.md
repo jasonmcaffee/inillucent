@@ -476,6 +476,11 @@ outside the corpus's subject.
 Embedding in a statement of its own also means each chunk is embedded once however many tables it
 goes into, and it keeps the slow part out of the write transaction.
 
+Both statements run on the engine after 1.0.29. The release after 1.0.29 also gives the
+`inillucent` crate an `embed` feature, so `Cargo.toml` can name `inillucent` alone with
+`features = ["embed"]` in place of the second `inillucent-engine` line. This example stays on
+1.0.29 until that release is published.
+
 ## Four search modes, measured
 
 `search` takes a `mode`:

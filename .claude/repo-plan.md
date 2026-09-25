@@ -832,3 +832,9 @@ they are touching do not collide; two that have not, do.
   and an edit to `inillucent-cli/src/main.rs` is 1.9 s. There is no cheap revert, because any
   write moves the mtime, so do not probe a foundation crate to see what rebuilds. Where the time
   of a ticket goes, with the numbers: `tasks/task-2114-inillucent-build-times-tdd.md`. (task-2114)
+- **To measure `examples/rag-agent/rust-example` against the engine in your worktree, copy the example
+  to a scratch folder and add a `[patch.crates-io]` table** naming `inillucent` and
+  `inillucent-engine` by path into the worktree. The workspace version equals the published one, so
+  Cargo takes the patch and the other internal crates follow by path. Build with the MSVC environment
+  imported. A first `sync` of the corpus embeds 3,696 chunks and took 11 minutes on the processor;
+  keep the synced database and copy it for each variant rather than syncing again. (task-2130)

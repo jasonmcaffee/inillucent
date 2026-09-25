@@ -86,8 +86,7 @@ function Repair-StagedLink {
         # been failing every target's staging - Windows and Linux as well as
         # macOS - since that commit.
         @{ File = 'docs/glossary.md';            From = '[`Transaction`](../drivers/README.md)'; To = '[`Transaction`](../DRIVER.md)' },
-        @{ File = 'DRIVER.md';                   From = '](inillucent-driver-capi/include/inillucent_driver.h)'; To = '](include/inillucent_driver.h)' },
-        @{ File = 'README.md';                   From = '[**`examples/rag-agent/`**](examples/rag-agent/README.md)'; To = '**`examples/rag-agent/`**, in the repository,' }
+        @{ File = 'DRIVER.md';                   From = '](inillucent-driver-capi/include/inillucent_driver.h)'; To = '](include/inillucent_driver.h)' }
     )
 
     # Directories the archive deliberately does not carry, and what to do about a link into one.

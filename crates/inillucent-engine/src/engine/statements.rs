@@ -602,8 +602,19 @@ impl ImportedDatabase {
             // A module's own write, which this harness does not time: what it
             // costs is the module's business and not the engine's.
             Cached::VirtualDelete(..) | Cached::VirtualUpdate(..) => {}
-            Cached::VirtualInsert(statement, holds_subquery) => {
-                self.insert_into_module_folded(statement, *holds_subquery, params)?;
+            Cached::VirtualInsert(statement, holds_subquery, source) => {
+                let selected = match source {
+                    Some(query) => Some(
+                        physical::run_any_prepared(&query.plan, self, &query.prepared, params)?.0,
+                    ),
+                    None => None,
+                };
+                self.insert_into_module_folded(
+                    statement,
+                    *holds_subquery,
+                    params,
+                    selected.as_deref(),
+                )?;
             }
             Cached::SchemaInsert(statement) => {
                 self.insert_into_schema(statement, params)?;

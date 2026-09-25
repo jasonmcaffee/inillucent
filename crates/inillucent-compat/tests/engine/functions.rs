@@ -902,3 +902,220 @@ fn randomblob_honours_the_value_length_limit() {
         refusal.message()
     );
 }
+
+/// Registers `axis(n)`, which answers a three number vector pointing along axis `n`.
+///
+/// It stands in for `embed(TEXT)`, which needs a 275 MB model this suite does
+/// not load. What the cases below test is where a registered function may be
+/// called, and `axis` is looked up by the same catalog path `embed` is.
+///
+/// @param connection - the connection to register it on
+fn register_axis(connection: &inillucent_compat::facade::Connection) {
+    connection
+        .create_scalar_function(
+            "axis",
+            1,
+            FunctionFlags::external(),
+            Arc::new(|arguments: &[Value<'static>]| {
+                let along = arguments.first().and_then(Value::as_integer).unwrap_or(0);
+                let mut bytes = Vec::with_capacity(12);
+                for at in 0..3 {
+                    let component: f32 = if at == along { 1.0 } else { 0.0 };
+                    bytes.extend_from_slice(&component.to_le_bytes());
+                }
+                Value::owned_blob(&bytes)
+            }),
+        )
+        .expect("registers");
+}
+
+/// Returns the first column of every row, as integers.
+///
+/// @param connection - the connection to ask
+/// @param sql - the query
+fn column(connection: &inillucent_compat::facade::Connection, sql: &str) -> Vec<i64> {
+    connection
+        .query(sql)
+        .unwrap_or_else(|error| panic!("{sql} failed: {}", error.message()))
+        .iter()
+        .filter_map(|row| row.first().and_then(Value::as_integer))
+        .collect()
+}
+
+/// A registered scalar reaches a module's `VALUES` row and a module's constraint.
+///
+/// **Both were refused as "a call to the registered function ... from here".**
+/// A module's row is folded to constants before it is handed over, and a
+/// constraint's value is folded before the module's `filter` is called. Neither
+/// fold was given the catalog a registered function's body is found in. So
+/// `INSERT INTO chunk_search (..., vector) VALUES (..., embed('...'))` was
+/// refused while the same row went into an ordinary table, and `WHERE vector =
+/// embed('search_query: ' || ?1)` was refused while `ORDER BY
+/// vector_distance_cos(v, embed(...))` ran. A caller had to run `SELECT
+/// embed(?1)` first and bind the bytes. Each assertion names a row by its
+/// vector, so a fold that answered NULL or the wrong axis fails it.
+#[test]
+fn a_registered_scalar_reaches_a_module_row_and_constraint() {
+    let connection = connect();
+    register_axis(&connection);
+    connection
+        .execute("CREATE VIRTUAL TABLE s USING inillucent_search(title, body, dims = 3)")
+        .expect("creates the search table");
+    connection
+        .execute(
+            "INSERT INTO s (rowid, title, body, vector) VALUES \
+             (10, 'one', 'apples and pears', axis(0)), \
+             (20, 'two', 'pears alone', axis(1)), \
+             (30, 'three', 'plums and apples', axis(2))",
+        )
+        .expect("a registered function in a module's VALUES row is evaluated");
+    assert_eq!(single(&connection, "SELECT count(*) FROM s"), Some(3));
+
+    assert_eq!(
+        column(
+            &connection,
+            "SELECT rowid FROM s WHERE vector = axis(1) AND k = 1"
+        ),
+        vec![20],
+        "the vector constraint found the wrong row"
+    );
+    assert_eq!(
+        column(
+            &connection,
+            "SELECT rowid FROM s WHERE s MATCH 'apples' AND vector = axis(2) AND k = 3 \
+             ORDER BY rank LIMIT 1"
+        ),
+        vec![30],
+        "the keyword and vector constraints together ranked the wrong row first"
+    );
+}
+
+/// `INSERT ... SELECT` fills an `inillucent_search` table from an ordinary one.
+///
+/// **It was refused as unsupported,** and it is how a caller fills a search
+/// table from the table that holds the text and the vectors. The rowids are
+/// the query's, the vectors arrive intact, and `changes()` counts the rows the
+/// module took. A statement that dropped the rowid, the vector or the count
+/// fails one of the three assertions.
+#[test]
+fn an_insert_select_fills_a_search_table() {
+    let connection = connect();
+    register_axis(&connection);
+    connection
+        .execute("CREATE TABLE src (id INTEGER PRIMARY KEY, title TEXT, body TEXT, v VECTOR(3))")
+        .expect("creates the source table");
+    connection
+        .execute(
+            "INSERT INTO src (id, title, body, v) VALUES \
+             (7, 'one', 'apples', axis(0)), (8, 'two', 'pears', axis(1)), \
+             (9, 'three', 'plums', axis(2))",
+        )
+        .expect("fills the source table");
+    connection
+        .execute("CREATE VIRTUAL TABLE s USING inillucent_search(title, body, dims = 3)")
+        .expect("creates the search table");
+    connection
+        .execute("INSERT INTO s (rowid, title, body, vector) SELECT id, title, body, v FROM src")
+        .expect("an INSERT ... SELECT into a module runs");
+    assert_eq!(single(&connection, "SELECT changes()"), Some(3));
+    assert_eq!(
+        column(
+            &connection,
+            "SELECT rowid FROM s WHERE vector = axis(1) AND k = 1"
+        ),
+        vec![8],
+        "the copied vector or rowid is wrong"
+    );
+    assert_eq!(
+        column(
+            &connection,
+            "SELECT rowid FROM s WHERE s MATCH 'plums' ORDER BY rank"
+        ),
+        vec![9],
+        "the copied text is not in the keyword index"
+    );
+}
+
+/// Returns the rowid a two sided search ranks first on a table declared with `declared`.
+///
+/// Row 1 holds the keyword and points along axis 0; row 2 lacks the keyword
+/// and points along axis 1, which is the query vector. The keyword list and
+/// the vector list therefore disagree completely, and the weight alone
+/// decides which row comes first.
+///
+/// @param connection - the connection, with `axis` registered
+/// @param name - the table's name
+/// @param declared - the options after the columns, such as `vector_weight = 0.9`
+fn leader(
+    connection: &inillucent_compat::facade::Connection,
+    name: &str,
+    declared: &str,
+) -> Vec<i64> {
+    connection
+        .execute(&format!(
+            "CREATE VIRTUAL TABLE {name} USING inillucent_search(body, dims = 3{declared})"
+        ))
+        .expect("creates the search table");
+    connection
+        .execute(&format!(
+            "INSERT INTO {name} (rowid, body, vector) VALUES \
+             (1, 'apples in the orchard', axis(0)), (2, 'pears on the shelf', axis(1))"
+        ))
+        .expect("fills the search table");
+    column(
+        connection,
+        &format!(
+            "SELECT rowid FROM {name} WHERE {name} MATCH 'apples' AND vector = axis(1) \
+             AND k = 2 ORDER BY rank LIMIT 1"
+        ),
+    )
+}
+
+/// `vector_weight` fixes how much the vector list counts, and it is kept.
+///
+/// The shipped weight adapts to each query. A declared one replaces it for
+/// that table, so each of the two rows below comes first under one weight and
+/// second under the other. A weight outside 0 to 1 is refused. The weight is
+/// read back from `%_config` after the database is closed and opened again,
+/// which is the path every later session takes.
+#[test]
+fn a_declared_vector_weight_decides_the_order() {
+    let path = scratch();
+    {
+        let database = Database::open(&path).expect("opens");
+        let connection = database.session().expect("connects");
+        register_axis(&connection);
+        assert_eq!(
+            leader(&connection, "by_vector", ", vector_weight = 0.95"),
+            vec![2]
+        );
+        assert_eq!(
+            leader(&connection, "by_keyword", ", vector_weight = 0.05"),
+            vec![1]
+        );
+        let refused = connection
+            .execute("CREATE VIRTUAL TABLE wrong USING inillucent_search(body, dims = 3, vector_weight = 1.5)")
+            .expect_err("a weight above 1 must be refused");
+        let said = format!(
+            "{} {}",
+            refused.message(),
+            refused.detail().unwrap_or_default()
+        );
+        assert!(
+            said.contains("vector_weight"),
+            "the refusal does not name the option: {said}"
+        );
+    }
+    let database = Database::open(&path).expect("opens again");
+    let connection = database.session().expect("connects again");
+    register_axis(&connection);
+    assert_eq!(
+        column(
+            &connection,
+            "SELECT rowid FROM by_vector WHERE by_vector MATCH 'apples' AND vector = axis(1) \
+             AND k = 2 ORDER BY rank LIMIT 1"
+        ),
+        vec![2],
+        "the declared weight was not read back after a reopen"
+    );
+}

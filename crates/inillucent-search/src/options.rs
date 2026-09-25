@@ -266,6 +266,23 @@ pub struct Options {
     pub ef_search: Option<usize>,
     /// Whether results are exact or approximate.
     pub mode: Mode,
+    /// A fixed weight for the vector list when a search has both a keyword and
+    /// a vector part, in thousandths, when the declaration named one.
+    ///
+    /// **`None` keeps the adaptive weight the engine ships**, which starts at
+    /// 0.35 and moves between 0.05 and 0.95 with each query. It was measured on
+    /// a corpus whose questions share words with the passages that answer them.
+    /// On the 3,696 chunks of Wikipedia articles in `examples/rag-agent`, with
+    /// natural language questions, it let chunks found by keywords alone rank
+    /// first: mean reciprocal rank 0.681, and `confidence` of 0.0065 to 0.1017
+    /// for the 4 of 20 answerable questions whose top hit that was. A fixed 0.5 measured 0.789
+    /// and separated every answerable question from every unrelated one. The
+    /// weight is a property of the corpus and its questions, so it is the
+    /// caller's to declare and the default stays as measured.
+    ///
+    /// Thousandths rather than an `f32`, so the declaration stays `Eq` and the
+    /// stored value reads back exactly as it was written.
+    pub vector_weight: Option<u16>,
     /// How many delta rows may accumulate before a commit folds them in, or
     /// zero to compact only when asked.
     pub compact: Option<u64>,
@@ -298,6 +315,12 @@ pub struct Options {
 }
 
 impl Options {
+    /// Returns the declared fixed vector weight, when there is one.
+    pub fn vector_weight(&self) -> Option<f32> {
+        self.vector_weight
+            .map(|thousandths| f32::from(thousandths) / 1000.0)
+    }
+
     /// Returns whether this table has a vector branch at all.
     pub fn has_vectors(&self) -> bool {
         self.dims > 0
@@ -449,6 +472,12 @@ impl Options {
                     .unwrap_or_default(),
             ),
             ("mode".to_string(), self.mode.name().to_string()),
+            (
+                "vector_weight".to_string(),
+                self.vector_weight
+                    .map(|thousandths| format!("{}", f32::from(thousandths) / 1000.0))
+                    .unwrap_or_default(),
+            ),
             ("tokenize".to_string(), TOKENIZER.to_string()),
             (
                 "compact".to_string(),
@@ -505,6 +534,7 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
     let mut ef_construction: Option<usize> = None;
     let mut ef_search: Option<usize> = None;
     let mut mode = Mode::Exact;
+    let mut vector_weight: Option<u16> = None;
     let mut compact: Option<u64> = None;
     let mut segment_merge: Option<usize> = None;
     let mut merge_budget: Option<u64> = None;
@@ -559,6 +589,7 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
             "ef_construction" => ef_construction = Some(positive(&value, "ef_construction")?),
             "ef_search" => ef_search = Some(positive(&value, "ef_search")?),
             "mode" => mode = Mode::parse(&value)?,
+            "vector_weight" => vector_weight = Some(weight(&value)?),
             "tokenize" | "tokenizer" => {
                 if !value.eq_ignore_ascii_case(TOKENIZER) {
                     return Err(failure(format!(
@@ -608,6 +639,7 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
         ef_construction,
         ef_search,
         mode,
+        vector_weight,
         compact,
         segment_merge,
         merge_budget,
@@ -615,6 +647,26 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
         source_column,
         threads,
     })
+}
+
+/// Reads a vector weight between 0 and 1, as thousandths.
+///
+/// A weight outside the range is refused rather than clamped: 1.5 is a
+/// mistake, and a search that silently used 1.0 instead would rank by vectors
+/// alone without saying so.
+///
+/// @param value - the text the option was given
+fn weight(value: &str) -> DbResult<u16> {
+    let held = value
+        .parse::<f32>()
+        .ok()
+        .filter(|held| (0.0..=1.0).contains(held));
+    let Some(held) = held else {
+        return Err(failure(format!(
+            "inillucent_search: vector_weight must be a number from 0 to 1, not {value}"
+        )));
+    };
+    Ok((held * 1000.0).round() as u16)
 }
 
 /// Reads one positive graph parameter, or says which one was not a number.
@@ -806,6 +858,11 @@ pub fn from_config(rows: &[(String, String)], fallback: &Options) -> DbResult<Op
         ef_construction: graph("ef_construction").or(fallback.ef_construction),
         ef_search: graph("ef_search").or(fallback.ef_search),
         mode,
+        // An empty stored value is "the adaptive default", which is what every
+        // table written before the option existed says by having no row.
+        vector_weight: find("vector_weight")
+            .and_then(|value| weight(&value).ok())
+            .or(fallback.vector_weight),
         compact: compact.or(fallback.compact),
         segment_merge: segment_merge.or(fallback.segment_merge),
         merge_budget: merge_budget.or(fallback.merge_budget),

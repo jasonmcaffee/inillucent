@@ -15,6 +15,13 @@ description = "The driver: the stable surface an application uses to talk to the
 # `BoundParams` and `Value` - so that this stays one edge rather than three.
 inillucent-engine = { workspace = true }
 
+[features]
+# Compiles `embed(TEXT)` into the engine. Off by default: see
+# `inillucent-search`. The driver forwards it so an application names one crate
+# and one feature. Before this, a Rust program had to add `inillucent-engine`,
+# an internal crate, beside `inillucent` for Cargo to turn the feature on.
+embed = ["inillucent-engine/embed"]
+
 [dev-dependencies]
 # The one skip helper, `inillucent_base::testing::skipping`.
 #

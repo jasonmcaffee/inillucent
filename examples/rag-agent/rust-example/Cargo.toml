@@ -17,7 +17,9 @@ license = "MIT"
 # repository gets it.
 inillucent = "1.0.29"
 
-# `inillucent` has no `embed` feature of its own. `inillucent-engine` does, and
+# `inillucent` 1.0.29 has no `embed` feature of its own. Releases after 1.0.29
+# do, and there `inillucent = { version = "...", features = ["embed"] }` is the
+# only line needed. On 1.0.29, `inillucent-engine` has the feature, and
 # Cargo turns a feature on for every user of a crate in the build, so naming the
 # engine here with `embed` compiles `embed(TEXT)` into the engine the
 # `inillucent` crate uses. The model itself is not in the build. It is loaded at

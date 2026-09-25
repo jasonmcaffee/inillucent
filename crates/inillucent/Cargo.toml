@@ -10,6 +10,14 @@ description = "Embedded SQL database with vector and keyword retrieval: the Rust
 [dependencies]
 inillucent-driver = { workspace = true }
 
+[features]
+# Compiles `embed(TEXT)` into the engine, so an application writes
+# `inillucent = { version = "...", features = ["embed"] }`. It forwards to the
+# driver, which forwards to the engine. The model is not part of the build: it
+# is loaded at run time from the folder `inillucent setup-embeddings all`
+# installs it in.
+embed = ["inillucent-driver/embed"]
+
 # The engine's own connection surface, which four end-to-end suites here drive
 # directly. They are not tests of this crate's re-export - `smoke.rs` is that -
 # they are tests of the engine behind it: the budget counters, the log after a

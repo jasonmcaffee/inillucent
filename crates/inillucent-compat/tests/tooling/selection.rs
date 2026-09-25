@@ -670,7 +670,7 @@ fn without_comments_or_literals(line: &str) -> String {
 #[test]
 fn every_feature_is_either_built_or_written_off() {
     // A feature the runner does not build, and why that is right.
-    const UNTESTED: [(&str, &str, &str); 6] = [
+    const UNTESTED: [(&str, &str, &str); 8] = [
         (
             "inillucent-base",
             "testing",
@@ -709,6 +709,18 @@ fn every_feature_is_either_built_or_written_off() {
             "inillucent-cli",
             "embed",
             "passes `inillucent-engine/embed` through and adds no test of its own, for the \
+             same reason",
+        ),
+        (
+            "inillucent-driver",
+            "embed",
+            "passes `inillucent-engine/embed` through so an application names one crate, and \
+             adds no test of its own, for the same reason",
+        ),
+        (
+            "inillucent",
+            "embed",
+            "passes `inillucent-driver/embed` through and adds no test of its own, for the \
              same reason",
         ),
     ];

@@ -54,7 +54,7 @@ Error [unsupported]: the new engine's physical pass does not handle a LIMIT or O
 
 Keep `unsupported` separate from other errors in your code. An application can then tell its user
 "this engine cannot do that yet" instead of "check your SQL". No case in the 416 case probe against
-SQLite returns `unsupported`, and the capability table still lists 19 features as `no`, so write the
+SQLite returns `unsupported`, and the capability table still lists 17 features as `no`, so write the
 branch.
 
 **Ask the capability table before you write unusual SQL.** `inillucent capabilities` prints it, and
@@ -92,6 +92,12 @@ match connection.query_all(statement, &[]) {
 
 `Database::session` returns a `Connection`. The older name `Database::connect` still works and is
 deprecated. Rust calls the driver directly and does not go through the C library.
+
+`embed(TEXT)` is compiled in only with the `embed` feature. Name it on the crate you depend on:
+`inillucent = { version = "1.0", features = ["embed"] }`, or `features = ["embed"]` on
+`inillucent-driver`. Releases up to 1.0.29 have no such feature on either crate. With those, add
+`inillucent-engine = { version = "1.0.29", features = ["embed"] }` beside it. The model is loaded
+when `embed(TEXT)` is first called, from the folder `inillucent setup-embeddings all` installs it in.
 
 `Database::open` uses these defaults from `OpenOptions`:
 

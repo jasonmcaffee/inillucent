@@ -592,8 +592,8 @@ pub static CAPABILITIES: &[Capability] = &[
     },
     Capability {
         name: "insert_select_into_virtual_table",
-        support: Support::No,
-        note: "A virtual table takes values: `INSERT INTO d(body) SELECT body FROM t` is refused, and inserting the rows one statement at a time is the way to fill one.",
+        support: Support::Yes,
+        note: "`INSERT INTO d(body) SELECT body FROM t` fills an FTS5 or inillucent_search table from a query. The query is read in full before the first row is written, so a query that reads the table being filled sees it as it was when the statement started.",
         probe: Probe::Runs {
             setup: &["CREATE VIRTUAL TABLE d USING fts5(body)", "CREATE TABLE t (body TEXT)"],
             sql: "INSERT INTO d(body) SELECT body FROM t",

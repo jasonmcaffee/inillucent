@@ -147,8 +147,17 @@ impl crate::ImportedDatabase {
             Cached::Ddl(sql) => self.execute_ddl(sql),
             Cached::QueryPlan(lines) => Ok(query_plan_rows(lines)),
             Cached::Program(rows) => Ok(program_rows(rows)),
-            Cached::VirtualInsert(statement, holds_subquery) => {
-                self.insert_into_module_folded(statement, *holds_subquery, params)
+            Cached::VirtualInsert(statement, holds_subquery, source) => {
+                let rows = match source {
+                    Some(query) => Some(self.run_cached_query(
+                        &query.plan,
+                        &query.prepared,
+                        &query.slot,
+                        params,
+                    )?),
+                    None => None,
+                };
+                self.insert_into_module_folded(statement, *holds_subquery, params, rows.as_deref())
             }
             Cached::SchemaInsert(statement) => self.insert_into_schema(statement, params),
             Cached::Select(plan, prepared, slot, names) => {
@@ -279,18 +288,20 @@ impl crate::ImportedDatabase {
     /// @param statement - the bound insert
     /// @param holds_subquery - whether the `VALUES` list holds a subquery
     /// @param params - the values bound for this execution
+    /// @param selected - the rows a `SELECT` source produced, `None` for `VALUES`
     pub(crate) fn insert_into_module_folded(
         &mut self,
         statement: &inillucent_sql::dml::BoundInsert,
         holds_subquery: bool,
         params: &Params,
+        selected: Option<&[Vec<OwnedDatum>]>,
     ) -> DbResult<Outcome> {
         let folded = if holds_subquery {
             self.fold_values(statement, params)?
         } else {
             None
         };
-        self.insert_into_module(statement, folded.as_ref().unwrap_or(params))
+        self.insert_into_module(statement, folded.as_ref().unwrap_or(params), selected)
     }
 
     /// Folds the subqueries in an insert's `VALUES` list, when it has one.
@@ -475,7 +486,15 @@ impl crate::ImportedDatabase {
                 // is the module's business, which is what makes a module a
                 // module rather than a table with a funny name.
                 let holds_subquery = values_hold_subquery(&statement);
-                Ok(Cached::VirtualInsert(statement, holds_subquery))
+                let source = match &statement.source {
+                    inillucent_sql::dml::BoundInsertSource::Select(select) => {
+                        let plan = plan_select_with((**select).clone(), self.pragmas.levers());
+                        let prepared = physical::prepare_any(&plan, self)?;
+                        Some(Box::new(CachedQuery::new(plan, prepared)))
+                    }
+                    inillucent_sql::dml::BoundInsertSource::Values(_) => None,
+                };
+                Ok(Cached::VirtualInsert(statement, holds_subquery, source))
             }
             BoundStatement::Insert(statement) => {
                 let source = match &statement.source {

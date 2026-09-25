@@ -512,3 +512,36 @@ fn the_fts5_options_this_build_cannot_honour_are_refused() {
             .unwrap_or_else(|error| panic!("{option}: {error:?}"));
     }
 }
+
+/// `INSERT ... SELECT` fills the index from an ordinary table and from itself.
+///
+/// **It was refused as unsupported,** and `INSERT INTO docs(title, body) SELECT
+/// ... FROM src` is the FTS5 backfill idiom: the first statement somebody
+/// writes after creating the table. The rowids, the matches, `bm25()` and
+/// `changes()` are compared with SQLite's. The insert that reads `docs` itself
+/// checks that the query is read in full before the first row is written: a
+/// statement that saw its own new rows would never finish, or would add more
+/// than four.
+#[test]
+fn an_insert_select_fills_the_index() {
+    check(
+        "insert_select",
+        &[
+            Step::Exec("CREATE TABLE src (id INTEGER PRIMARY KEY, title TEXT, body TEXT)"),
+            Step::Exec(
+                "INSERT INTO src VALUES (10, 'A red kite', 'soars over the quick hills'), \
+                 (11, 'The last fox', 'sleeps in the lazy sun')",
+            ),
+            Step::Exec("INSERT INTO docs (rowid, title, body) SELECT id, title, body FROM src"),
+            Step::Query("SELECT changes()"),
+            Step::Query("SELECT rowid, title FROM docs WHERE docs MATCH 'fox' ORDER BY rowid"),
+            Step::Query(
+                "SELECT rowid, round(bm25(docs), 6) FROM docs WHERE docs MATCH 'quick' ORDER BY rank",
+            ),
+            Step::Exec("INSERT INTO docs (title, body) SELECT title, body FROM docs WHERE rowid < 3"),
+            Step::Query("SELECT changes()"),
+            Step::Query("SELECT count(*) FROM docs"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'turtle' ORDER BY rowid"),
+        ],
+    );
+}

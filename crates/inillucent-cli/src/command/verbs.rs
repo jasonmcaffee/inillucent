@@ -471,8 +471,15 @@ pub fn batch(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Fa
             .execute("BEGIN")
             .map_err(|message| Failed::said(Status::Syntax, message))?;
     }
-    let ran = context.shell().execute(&sql);
-    if let Err(message) = ran {
+    // **The engine's error is kept, so its status reaches the caller.** This
+    // went through `Shell::execute`, which returns the error's text alone, and
+    // every failure was then reported as `syntax`. A statement the engine has
+    // not built came back `syntax` with exit code 1 here and `unsupported` with
+    // exit code 3 from `exec`, so a script could not tell "not built yet" from
+    // "wrong" by running it in a batch.
+    let ran = context.shell().connection().execute_batch(&sql);
+    if let Err(error) = ran {
+        let failed = Failed::from_engine(&error);
         if !joined {
             // **The rollback's own failure is not reported over the
             // statement's.** The script's error is what the caller asked
@@ -480,13 +487,13 @@ pub fn batch(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Fa
             // rather than instead of it, because a caller who reads only
             // "cannot rollback" learns nothing about what went wrong.
             if let Err(second) = context.shell().execute("ROLLBACK") {
-                return Err(Failed::said(
-                    Status::Syntax,
-                    format!("{message} (and the rollback failed: {second})"),
-                ));
+                return Err(Failed {
+                    message: format!("{} (and the rollback failed: {second})", failed.message),
+                    ..failed
+                });
             }
         }
-        return Err(Failed::said(Status::Syntax, message));
+        return Err(failed);
     }
     if !joined {
         context

@@ -28,7 +28,9 @@ index that a program builds with that crate and saves to a directory, then opens
 It does not apply to SQL. An `inillucent_search` table and an index made with
 `CREATE INDEX ... USING inillucent_hnsw` store their vectors in tables inside the `.rdb` file. A
 search on them reads the index segments it needs from the file into this process's memory.
-[Vector search](vector-search.md) covers those.
+[Vector search](vector-search.md) covers those. The first search in a process pays for that read,
+and [The first search in a process](vector-search.md#the-first-search-in-a-process) gives the cost
+and how `compact` reduces it.
 
 ## The two modes
 

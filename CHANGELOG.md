@@ -10,6 +10,29 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**`embed(TEXT)` works in an `inillucent_search` or FTS5 table's `VALUES` row, and as a search's
+query vector.** Release 1.0.29 refused `INSERT INTO chunk_search (..., vector) VALUES (...,
+embed('...'))` and `WHERE vector = embed('search_query: ' || ?1)` with the status `unsupported`,
+while the same call worked on an ordinary table and in `ORDER BY`.
+
+**`INSERT ... SELECT` into a virtual table runs.** `INSERT INTO docs(body) SELECT body FROM t` fills
+an FTS5 or `inillucent_search` table from a query. The query is read in full before the first row is
+written. The capability `insert_select_into_virtual_table` is now `yes`, and 17 capabilities are
+`no`.
+
+**`inillucent batch` reports the engine's status.** A failure inside a batch was always `syntax`
+with exit code 1. A statement the engine has not built is now `unsupported` with exit code 3, as
+under `exec`.
+
+**The `inillucent` and `inillucent-driver` crates have an `embed` feature.** It forwards to
+`inillucent-engine`, so a Rust application no longer names the engine crate to get `embed(TEXT)`.
+
+**`inillucent_search` takes a `vector_weight` option.** It fixes the vector list's weight in a search
+with both parts, in place of the weight chosen for each query. The default is unchanged. On the
+`examples/rag-agent` corpus, a fixed 0.5 raised the mean reciprocal rank from 0.681 to 0.789 and made
+`confidence` separate answerable questions from unrelated ones. `docs/vector-search.md` also says
+when `confidence` is not reliable, and what the first search in a process costs.
+
 **A change is tested by what it touched, and the rest runs on a merge or at night.** Every tier in
 `tests/selection.toml` now has a cadence. `inillucent-testrun --changed` runs a `durability` or
 `perf` target only when a crate that changed is in the target's `covers`, and never runs the

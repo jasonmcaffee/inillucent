@@ -345,6 +345,18 @@ INSERT INTO docs (rowid, title, body, region, vector) VALUES
   (3, 'Release calendar', 'The next release ships in May.',               'us', '[0.9, 0.1, 0]');
 ```
 
+An `INSERT ... SELECT` fills the table from an ordinary table in one statement. Here `page` holds
+the same four columns and a `VECTOR(3)` column `v`:
+
+```sql
+INSERT INTO docs (rowid, title, body, region, vector)
+SELECT id, title, body, region, v FROM page;
+```
+
+The query is read in full before the first row is written. Release 1.0.29 refuses this statement
+with the status `unsupported`. [Embeddings](embeddings.md) shows the same statement with
+`embed(TEXT)` computing the vectors.
+
 Keyword only:
 
 ```sql
@@ -402,7 +414,7 @@ models already return vectors of length 1. `l2_normalize(v)` scales any other ve
 | Hidden column | As a constraint | Meaning |
 |---|---|---|
 | the table's own name | `docs MATCH 'text'` | the keyword query, in FTS5 syntax |
-| `vector` | `vector = ?1` | the query vector |
+| `vector` | `vector = ?1`, or `vector = embed('search_query: ' \|\| ?1)` | the query vector |
 | `k` | `k = 20` | how many hits the search collects. Defaults to 10 |
 | `recall` | `recall = 0.9` | in approximate mode, widens the graph walk to reach this recall. Exact mode ignores it |
 | `rank` | `ORDER BY rank` | the combined ranking. Ascending order is best first, as in FTS5 |
@@ -427,6 +439,7 @@ Three functions describe each hit:
 |---|---|---|
 | `dims = N` | the vector width. Without it the table is keyword only and refuses a vector | none |
 | `mode` | `'exact'` compares every vector. `'approximate'` walks the HNSW graph | `'exact'` |
+| `vector_weight` | a fixed weight from 0 to 1 for the vector list in a search with both parts. See [How the two rankings are combined](#how-the-two-rankings-are-combined) | chosen for each query |
 | `metric` (or `distance`) | `'cosine'` or `'l2'`. Any other value is refused | `'cosine'` |
 | `m`, `ef_construction`, `ef_search` | the HNSW graph settings, as in [Index settings](#index-settings) | 16, 64, 64 |
 | `tokenize` | the tokenizer. `porter` is the only one | `porter` |
@@ -518,6 +531,32 @@ Combining the two lets one table answer an exact identifier and a question in pl
 vector search alone ranks `parse_headers` below passages about similar functions. A keyword search
 alone misses a passage that uses different words for the same idea.
 
+The default weights were measured on a different corpus, with the queries described in the comments
+of `IndexConfig::default`. Questions in plain language, asked of prose that uses different words,
+can need a larger vector weight. `vector_weight = 0.5` in the declaration fixes the weight for that table and
+turns off the adjustment for each query:
+
+```sql
+CREATE VIRTUAL TABLE chunk_search USING inillucent_search(title, text, dims = 768, vector_weight = 0.5);
+```
+
+Measured on `examples/rag-agent`: 3,696 chunks of 80 Wikipedia articles about Greek and Roman
+philosophy, 20 questions the articles answer and 3 on other subjects, with each question's words
+joined by `OR` as the keyword query. A question counts as found when a chunk of the right article is
+in the top 5.
+
+| Vector weight | Found | Mean reciprocal rank | Lowest `confidence` of an answerable question | Highest `confidence` of a question on another subject |
+|---|---|---|---|---|
+| chosen for each query (the default) | 19 of 20 | 0.681 | 0.0065 | 0.060 |
+| 0.35, fixed | 19 of 20 | 0.708 | 0.005 | 0.053 |
+| 0.5 | 19 of 20 | 0.789 | 0.332 | 0.235 |
+| 0.65 | 18 of 20 | 0.793 | 0.430 | 0.379 |
+| 0.8 | 18 of 20 | 0.789 | 0.528 | 0.466 |
+
+A search of a plain `VECTOR(768)` column holding the same vectors found 18 of 20 with a mean
+reciprocal rank of 0.798. Measure a weight on your own questions before you set one. The option was
+added after release 1.0.29.
+
 ### Confidence is a separate number from score
 
 `score` decides the order. `confidence` says whether the best hit is any good.
@@ -533,6 +572,22 @@ Set an abstention threshold on `confidence`, and order by `score`.
 In the graded comparison in [Retrieval quality](retrieval-quality.md), asked 200 questions the
 corpus does not answer, inillucent returned a confident top result for one of them. PostgreSQL with
 pgvector returned one for all 200.
+
+**`confidence` is low for a hit that only the keyword list found.** Such a hit has no cosine
+similarity in the sum, so its confidence is its BM25 score over the ceiling, times the keyword
+weight. A question of many words joined by `OR` has a high ceiling, because no chunk holds every
+word, so that share stays small. On the corpus in the table above, with the default weight, the top
+hit of 4 of the 20 answerable questions was found by keywords alone, and their confidence was 0.0065
+to 0.1017. The three questions on other subjects scored 0.009 to 0.060, so no threshold separated the
+two groups.
+
+Check `origin(docs)` before you trust a low `confidence`. When the top hit's origin is `keyword`,
+the number says little about whether the table can answer. Two things worked on that corpus:
+
+- a fixed `vector_weight = 0.5`, which put a hit found by both lists first for every answerable
+  question. Every answerable question then scored 0.332 or more and every other one 0.235 or less;
+- the cosine distance of the best hit from a plain `VECTOR` column. Every answerable question was
+  0.341 or closer and the questions on other subjects were 0.417 to 0.530.
 
 ### Maintenance commands
 
@@ -551,6 +606,27 @@ INSERT INTO docs(docs) VALUES('compact');
 
 An `inillucent_hnsw` index takes the same commands through its own name:
 `INSERT INTO passage_v(passage_v) VALUES('compact')`.
+
+### The first search in a process
+
+The first search of an `inillucent_search` table in a process reads the table's index into memory.
+Later searches in the same process use that copy until a write changes the table. The index is
+stored as segments, plus the rows written since the last compaction. On the first search the engine
+joins the segments into one and adds those rows to it, and that is most of the cost.
+
+Measured on the `examples/rag-agent` database after a first sync: 3,696 chunks with 768 number
+vectors, stored as 3 segments and 472 rows not yet compacted.
+
+| Search | Before `compact` | After `compact` |
+|---|---|---|
+| the first keyword search in a new process | 848 ms | 106 ms |
+| the next search in the same process | under 1 ms | under 1 ms |
+| the example's first search, not counting the 780 ms that loading the embedding model takes | about 990 ms | about 115 ms |
+
+`compact` took 0.54 seconds and did not change any answer. A search of a plain `VECTOR` column reads
+no such index: the first one took 26 ms on the same file. A table collects rows until the `compact`
+option's count, 1,024 by default, so a program that opens the database often can run `compact` after
+a large load to keep the first search short.
 
 ## Search from the command line
 

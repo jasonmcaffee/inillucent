@@ -283,13 +283,17 @@ impl crate::ImportedDatabase {
                 // the ordinary write path evaluates against the row image it
                 // holds; this path has no such image, and answering with the
                 // wrong value would be worse than saying so.
-                let value = inillucent_exec::physical::literal_value(&assignment.value, params)
-                    .map_err(|_| {
-                        refusal(
-                            "an UPDATE of a virtual table assigns a constant; \
+                let value = inillucent_exec::physical::literal_value_in(
+                    &assignment.value,
+                    params,
+                    Some(&*self),
+                )
+                .map_err(|_| {
+                    refusal(
+                        "an UPDATE of a virtual table assigns a constant; \
                              an expression over the row being replaced is not supported",
-                        )
-                    })?;
+                    )
+                })?;
                 if let Some(slot) = values.get_mut(usize::from(assignment.column)) {
                     *slot = Value::from(&value.borrow()).into_owned()?;
                 }
@@ -306,25 +310,40 @@ impl crate::ImportedDatabase {
         }
         Ok(changed)
     }
+    /// Hands each row of an insert to the module that owns the table.
+    ///
+    /// **An `INSERT ... SELECT` is answered by running the query first and
+    /// handing its rows over one at a time.** It was refused as unsupported,
+    /// and it is the natural way to fill an FTS5 or `inillucent_search` table
+    /// from an ordinary one: `INSERT INTO ft(body) SELECT body FROM src` is the
+    /// FTS5 backfill idiom. The query's rows are all read before the first one
+    /// is written, so a query that reads the table being filled sees it as it
+    /// was when the statement started, which is what SQLite does.
+    ///
+    /// @param statement - the bound insert
+    /// @param params - the values bound for this execution
+    /// @param selected - the rows a `SELECT` source produced, `None` for `VALUES`
     pub(crate) fn insert_into_module(
         &mut self,
         statement: &inillucent_sql::dml::BoundInsert,
         params: &inillucent_exec::physical::Params,
+        selected: Option<&[Vec<inillucent_tree::datum::OwnedDatum>]>,
     ) -> DbResult<Outcome> {
-        let inillucent_sql::dml::BoundInsertSource::Values(values) = &statement.source else {
-            // **Exit 3, because the statement is written correctly and this
-            // engine has not built it (task-1979, section 8.1, gap 5).** It
-            // reported the status `syntax` and exit 1, which tells a caller to
-            // go and look for a mistake in an `INSERT INTO ft(body) SELECT body
-            // FROM src` that has none - and that statement is the FTS5 backfill
-            // idiom, so it is the first thing somebody writes after creating
-            // the table.
-            return Err(refusal("an INSERT ... SELECT into a virtual table")
-                .with_unsupported("an INSERT ... SELECT into a virtual table"));
+        let count = match (&statement.source, selected) {
+            (inillucent_sql::dml::BoundInsertSource::Values(values), _) => values.len(),
+            (inillucent_sql::dml::BoundInsertSource::Select(_), Some(rows)) => rows.len(),
+            // The compiled statement always runs its query before it gets
+            // here, so this is a caller that skipped it rather than a
+            // statement the engine has not built.
+            (inillucent_sql::dml::BoundInsertSource::Select(_), None) => {
+                return Err(refusal(
+                    "an INSERT ... SELECT into a virtual table reached the module without its rows",
+                ));
+            }
         };
         let width = statement.table.columns.len();
         let mut changed = 0usize;
-        for row in values {
+        for index in 0..count {
             // **Timed per row, because 4.2 ms of `extension.fts.build`'s 8.07
             // was believed to be here and is not (task-2025).** What this arm
             // costs - the owned copy of every text value, the column map, the
@@ -338,13 +357,7 @@ impl crate::ImportedDatabase {
             // The statement's own column list decides where each value lands:
             // `INSERT INTO documents(title, body)` supplies two of however many
             // the module declared, and the rest are NULL.
-            let mut supplied: Vec<Value<'static>> = Vec::with_capacity(row.len());
-            for expr in row {
-                supplied.push(
-                    Value::from(&inillucent_exec::physical::literal_value(expr, params)?.borrow())
-                        .into_owned()?,
-                );
-            }
+            let supplied = self.module_row(statement, index, params, selected)?;
             let mut cells = vec![Value::Null; width];
             for (position, column) in statement.columns.iter().enumerate() {
                 let inillucent_sql::dml::ColumnSource::Row(at) = column else {
@@ -372,10 +385,11 @@ impl crate::ImportedDatabase {
                 (None, Some(inillucent_sql::dml::ColumnSource::Row(at))) => {
                     supplied.get(*at).cloned().unwrap_or(Value::Null)
                 }
-                (None, Some(inillucent_sql::dml::ColumnSource::Expr(expr))) => {
-                    Value::from(&inillucent_exec::physical::literal_value(expr, params)?.borrow())
-                        .into_owned()?
-                }
+                (None, Some(inillucent_sql::dml::ColumnSource::Expr(expr))) => Value::from(
+                    &inillucent_exec::physical::literal_value_in(expr, params, Some(&*self))?
+                        .borrow(),
+                )
+                .into_owned()?,
                 // Nothing named one, so the module allocates - which is what
                 // `Null` asks it for.
                 (None, Some(inillucent_sql::dml::ColumnSource::Generated(_)) | None) => Value::Null,
@@ -441,6 +455,45 @@ impl crate::ImportedDatabase {
             },
         })
     }
+    /// Returns the values one row of an insert supplies, in statement order.
+    ///
+    /// **A `VALUES` row is folded with the catalog in reach.** It was folded
+    /// without one, so `INSERT INTO chunk_search(rowid, text, vector) VALUES
+    /// (1, 'x', embed('search_document: x'))` was refused as "a call to the
+    /// registered function embed from here" while the same row went into an
+    /// ordinary table. `docs/embeddings.md` says `embed(TEXT)` can go in a
+    /// `VALUES` row, and for a module's table it could not.
+    ///
+    /// @param statement - the bound insert
+    /// @param index - which row, counting from zero
+    /// @param params - the values bound for this execution
+    /// @param selected - the rows a `SELECT` source produced, `None` for `VALUES`
+    fn module_row(
+        &self,
+        statement: &inillucent_sql::dml::BoundInsert,
+        index: usize,
+        params: &inillucent_exec::physical::Params,
+        selected: Option<&[Vec<inillucent_tree::datum::OwnedDatum>]>,
+    ) -> DbResult<Vec<Value<'static>>> {
+        let mut supplied: Vec<Value<'static>> = Vec::new();
+        match (&statement.source, selected) {
+            (inillucent_sql::dml::BoundInsertSource::Values(values), _) => {
+                for expr in values.get(index).map(Vec::as_slice).unwrap_or_default() {
+                    let value =
+                        inillucent_exec::physical::literal_value_in(expr, params, Some(self))?;
+                    supplied.push(Value::from(&value.borrow()).into_owned()?);
+                }
+            }
+            (inillucent_sql::dml::BoundInsertSource::Select(_), rows) => {
+                let row = rows.and_then(|rows| rows.get(index));
+                for value in row.map(Vec::as_slice).unwrap_or_default() {
+                    supplied.push(Value::from(&value.borrow()).into_owned()?);
+                }
+            }
+        }
+        Ok(supplied)
+    }
+
     /// Flushes every connected module before the engine commits.
     ///
     /// **Once per transaction, not once per row.** FTS5 holds a segment in

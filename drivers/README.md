@@ -134,6 +134,20 @@ match connection.query_all(statement, &[]) {
 `Database::session` returns a `Connection`. The older name `Database::connect` still works and is
 deprecated.
 
+`embed(TEXT)` is compiled in only with the `embed` feature, on `inillucent` or on
+`inillucent-driver`:
+
+```toml
+[dependencies]
+inillucent = { version = "1.0", features = ["embed"] }
+```
+
+The feature forwards to `inillucent-engine`. Releases up to 1.0.29 have no `embed` feature on
+`inillucent` or `inillucent-driver`. With those, add
+`inillucent-engine = { version = "1.0.29", features = ["embed"] }` beside the dependency, and Cargo
+turns the feature on for the engine the driver uses. The model is not part of the build.
+`docs/embeddings.md` says how to install it.
+
 Rust calls the driver directly. It does not go through the C library. Going through the C library
 would add a pointer conversion and a panic guard to every call, and would turn Rust errors into C
 integers and back.

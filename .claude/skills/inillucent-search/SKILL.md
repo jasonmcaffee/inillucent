@@ -154,19 +154,31 @@ SELECT title FROM store WHERE store MATCH 'body' ORDER BY rank;
 SELECT title FROM store WHERE vector = ?1 AND k = 10;
 -- both, combined into one ranking
 SELECT title FROM store WHERE store MATCH 'body' AND vector = ?1 AND k = 10 ORDER BY rank;
+
+-- fill the table from an ordinary one, and embed the question in the query
+INSERT INTO store (rowid, title, body, vector) SELECT id, title, body, v FROM note;
+SELECT title FROM store
+WHERE store MATCH ?1 AND vector = embed('search_query: ' || ?1) AND k = 10 ORDER BY rank;
 ```
+
+Release 1.0.29 refuses the last two statements with the status `unsupported`. With 1.0.29, insert
+the rows one `VALUES` row at a time, and run `SELECT embed(?1)` first and bind the bytes.
 
 | Declaration or column | What it does |
 |---|---|
 | `dims = N` | makes the table hold vectors of N numbers. Without `dims`, an insert with a vector is refused with the status `constraint` |
 | `mode = 'exact'` or `mode = 'approximate'` | how the vector half searches. The default is `exact` |
+| `vector_weight = 0.5` | fixes the vector list's weight, from 0 to 1, in place of the weight chosen for each query. Added after 1.0.29 |
 | `store MATCH '...'` | the keyword query, in FTS5 syntax |
 | `vector = ?` | the query vector |
 | `k = 10` | how many results to retrieve |
 | `ORDER BY rank` | best result first |
 
 When a query has both a keyword part and a vector part, inillucent runs both searches and combines
-the two ranked lists into one. [Vector search](../../docs/vector-search.md) explains how the lists
+the two ranked lists into one. A hit whose `origin(store)` is `keyword` has a low `confidence` even
+when it is the right answer, so check the origin before using `confidence` to decide that the table
+cannot answer. On natural language questions over prose, `vector_weight = 0.5` ranked better and
+made `confidence` separate answerable questions from unrelated ones. [Vector search](../../docs/vector-search.md) explains how the lists
 are combined and the `confidence` value each hit has.
 
 `inillucent search` also works on an `inillucent_search` table.

@@ -70,7 +70,7 @@ use std::sync::Mutex;
 use inillucent_base::DbResult;
 use inillucent_core::filter::{AttributeFilter, Filter};
 use inillucent_core::index::{Index, IndexConfig};
-use inillucent_core::rank::HitOrigin;
+use inillucent_core::rank::{AdaptiveWeights, Fusion, HitOrigin};
 use inillucent_core::store::ChunkInput;
 use inillucent_ext::vtab::{failure, Context};
 
@@ -220,9 +220,11 @@ impl Cache {
 /// exponent, proximity, phrase weighting, the adaptive weighting - is left at
 /// the measured defaults `inillucent_core` ships, because those are the settings
 /// the existing quality scorecard was produced with and this phase is required
-/// not to change what the reader answers. What the declaration decides is only
-/// the shape: how wide a vector is, and whether the vector branch is allowed to
-/// approximate.
+/// not to change what the reader answers. What the declaration decides is the
+/// shape: how wide a vector is, and whether the vector branch is allowed to
+/// approximate. The one ranking setting a declaration may name is a fixed
+/// `vector_weight`, which replaces the adaptive weight for that table only;
+/// see `Options::vector_weight` for what it was measured against.
 /// @param options - the table's declaration
 pub fn configuration(options: &Options) -> IndexConfig {
     let mut config = IndexConfig {
@@ -297,7 +299,31 @@ pub fn configuration(options: &Options) -> IndexConfig {
     // ever inserted, not only the search call at the end. `IndexConfig::metric`
     // is the field that carries it there.
     config.metric = core_metric(options.metric);
+    if let Some(weight) = options.vector_weight() {
+        config.fusion = Fusion::NormalizedScore {
+            vector_weight: weight,
+        };
+        config.adaptive_fusion = false;
+    }
     config
+}
+
+/// Applies a declared fixed vector weight to an index read back from a segment.
+///
+/// A segment stores the ranking settings of the build that wrote it, so a
+/// loaded index answers with the shipped adaptive weight whatever the table
+/// declares. The weight is a query time setting that nothing in the stored
+/// index depends on, so it is set on every index this table searches.
+///
+/// @param index - the index a search is about to use
+/// @param options - the table's declaration
+fn apply_ranking(index: &mut Index, options: &Options) {
+    if let Some(weight) = options.vector_weight() {
+        index.set_fusion(Fusion::NormalizedScore {
+            vector_weight: weight,
+        });
+        index.set_adaptive_fusion(false, AdaptiveWeights::default());
+    }
 }
 
 /// Maps the table's own metric spelling onto the one the retrieval engine
@@ -1046,6 +1072,7 @@ fn refresh(
         }
     }
     apply(&mut index, context, store, options, &visible)?;
+    apply_ranking(&mut index, options);
     let rows = live_rows_of(&index);
     *held = Some(Cached {
         segments: ids,

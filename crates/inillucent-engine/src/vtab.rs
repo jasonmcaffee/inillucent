@@ -513,7 +513,7 @@ impl ImportedDatabase {
         let plan = FilterPlan {
             index_number: query.index_number,
             index_string: query.index_string.clone(),
-            arguments: filter_arguments(&query, offer, params, supplied)?,
+            arguments: filter_arguments(&query, offer, params, supplied, self)?,
         };
         let width = connected.table.declaration().columns.len();
         let shape = RowShape {
@@ -525,7 +525,7 @@ impl ImportedDatabase {
             // wanted otherwise.
             carries_rowid: needed.rowid || rowid_recheck_needed(offer, &query),
             needed,
-            rechecks: rechecks_of(connected, offer, &query, supplied, params)?,
+            rechecks: rechecks_of(connected, offer, &query, supplied, params, self)?,
         };
         let mut cursor = connected.table.open()?;
         let store = ReadStore {
@@ -744,13 +744,25 @@ fn read_row(
 ///
 /// @param query - what `best_index` answered
 /// @param offer - the constraints the planner offered
+/// **A constraint's value may call a registered function.** `vector =
+/// embed('search_query: ' || ?2)` is how a caller hands `inillucent_search` a
+/// question, and it was refused as "a call to the registered function embed
+/// from here" because this fold had no catalog to find `embed`'s body in. The
+/// same call worked in `ORDER BY vector_distance_cos(v, embed(...))`, whose
+/// fold is given one, so a caller had to run `SELECT embed(?1)` first and bind
+/// the blob.
+///
+/// @param query - what `best_index` answered
+/// @param offer - the constraints the planner offered
 /// @param params - the values bound to `?1`, `?2`, ...
 /// @param supplied - a lateral join's per-row values, empty for an ordinary scan
+/// @param catalog - where a registered function's body is looked up
 fn filter_arguments(
     query: &IndexQuery,
     offer: &[inillucent_sql::plan::VirtualConstraint],
     params: &inillucent_exec::physical::Params,
     supplied: &[OwnedDatum],
+    catalog: &dyn inillucent_exec::physical::TreeCatalog,
 ) -> DbResult<Vec<Value<'static>>> {
     let mut arguments: Vec<Value<'static>> = Vec::new();
     if supplied.is_empty() {
@@ -758,9 +770,10 @@ fn filter_arguments(
             let Some(constraint) = offer.get(position) else {
                 continue;
             };
-            arguments.push(owned_value(&inillucent_exec::physical::literal_value(
+            arguments.push(owned_value(&inillucent_exec::physical::literal_value_in(
                 &constraint.value,
                 params,
+                Some(catalog),
             )?)?);
         }
     } else {
@@ -866,12 +879,14 @@ fn columns_wanted(
 /// @param query - what `best_index` answered
 /// @param supplied - a lateral join's per-row values, empty for an ordinary scan
 /// @param params - the values bound to `?1`, `?2`, ...
+/// @param catalog - where a registered function's body is looked up
 fn rechecks_of(
     connected: &Connected,
     offer: &[inillucent_sql::plan::VirtualConstraint],
     query: &IndexQuery,
     supplied: &[OwnedDatum],
     params: &inillucent_exec::physical::Params,
+    catalog: &dyn inillucent_exec::physical::TreeCatalog,
 ) -> DbResult<Vec<Recheck>> {
     let width = connected.table.declaration().columns.len();
     let mut rechecks: Vec<Recheck> = Vec::new();
@@ -892,7 +907,7 @@ fn rechecks_of(
         rechecks.push((
             column,
             constraint.spec.op,
-            recheck_value(constraint, position, supplied, params)?,
+            recheck_value(constraint, position, supplied, params, catalog)?,
             collation,
         ));
     }
@@ -947,15 +962,20 @@ fn hidden_columns(table: &inillucent_sql::catalog_view::TableInfo) -> Vec<i32> {
 /// @param supplied - the lateral join's per-row values, empty for an ordinary
 ///   scan
 /// @param params - the values bound to `?1`, `?2`, ...
+/// @param catalog - where a registered function's body is looked up, for the
+///   reason `filter_arguments` gives
 fn recheck_value(
     constraint: &inillucent_sql::plan::VirtualConstraint,
     position: usize,
     supplied: &[OwnedDatum],
     params: &inillucent_exec::physical::Params,
+    catalog: &dyn inillucent_exec::physical::TreeCatalog,
 ) -> DbResult<OwnedDatum> {
     match supplied.get(position) {
         Some(value) => Ok(value.clone()),
-        None => inillucent_exec::physical::literal_value(&constraint.value, params),
+        None => {
+            inillucent_exec::physical::literal_value_in(&constraint.value, params, Some(catalog))
+        }
     }
 }
 

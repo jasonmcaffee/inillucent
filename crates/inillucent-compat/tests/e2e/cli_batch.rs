@@ -200,3 +200,54 @@ fn a_batch_that_succeeds_commits_every_statement() {
     let (code, _, stderr) = run(&program, &database, &["integrity-check"]);
     assert_eq!(code, 0, "the database checks out: {stderr}");
 }
+
+/// A failure inside `batch` reports the engine's status, as `exec` does.
+///
+/// **`batch` reported every failure as `syntax` with exit code 1.** It read the
+/// error's text and dropped the error, so a statement the engine has not built
+/// came back `syntax` from `batch` and `unsupported`, exit code 3, from `exec`.
+/// A script could not tell "not built yet" from "wrong" by running it in a
+/// batch, which is the distinction the exit codes exist for. Each statement
+/// below is run both ways and the two must agree on the exit code and on the
+/// status name.
+#[test]
+fn a_batch_reports_the_same_status_as_exec() {
+    let program = cliproc::program("inillucent");
+    let database = scratch("status-batch.rdb");
+    let (code, _, stderr) = run(
+        &program,
+        &database,
+        &[
+            "exec",
+            "CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)",
+        ],
+    );
+    assert_eq!(code, 0, "the schema is created: {stderr}");
+    let (code, _, stderr) = run(
+        &program,
+        &database,
+        &["exec", "INSERT INTO note (id, body) VALUES (1, 'one')"],
+    );
+    assert_eq!(code, 0, "the row is written: {stderr}");
+
+    let cases: [(&str, i32, &str); 3] = [
+        ("SELECT id FROM note LIMIT 1 + 1", 3, "\"unsupported\""),
+        (
+            "INSERT INTO note (id, body) VALUES (1, 'again')",
+            1,
+            "\"constraint\"",
+        ),
+        ("SELECT no_such_function(1)", 1, "\"not_found\""),
+    ];
+    for (sql, expected, status) in cases {
+        for verb in ["exec", "batch"] {
+            let (code, stdout, stderr) = run(&program, &database, &[verb, sql, "--output", "json"]);
+            let said = format!("{stdout}{stderr}");
+            assert_eq!(code, expected, "{verb} {sql} exited {code}: {said}");
+            assert!(
+                said.contains(status),
+                "{verb} {sql} did not report {status}: {said}"
+            );
+        }
+    }
+}

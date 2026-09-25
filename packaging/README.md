@@ -58,7 +58,7 @@ repository the worktree belongs to. A worktree on another drive needs no extra a
 | `-SkipTests` | Skips the test phase. `ship.ps1` prints that the release is untested and writes the same sentence into the GitHub release notes. |
 | `-AllowDirty` | Builds from a checkout with uncommitted changes. |
 | `-Otp <six digits>` | A one time code for npm, for an npm token that cannot publish without one. |
-| `-SitePath <path>` | The site folder. The default is `black-rainbow-labs-sites/sites/inillucent` beside the main checkout (task-2128 moved the site there). |
+| `-SitePath <path>` | The site folder. The default is `black-rainbow-labs-sites/sites/inillucent` beside the main checkout. The site moved there from this repository on 25 September 2026. |
 | `-TapPath <path>` | The Homebrew tap checkout. The default is a folder named `homebrew-inillucent` beside the main checkout. |
 
 ## The six phases

@@ -84,7 +84,13 @@ pub(crate) enum Cached {
     /// when the statement is compiled, for the same reason [`Cached::Insert`]
     /// carries one: an FTS5 load is one of these per document, and walking
     /// every value per execution to find no subquery is a cost on that path.
-    VirtualInsert(Box<inillucent_sql::dml::BoundInsert>, bool),
+    /// The query is the `SELECT` of an `INSERT ... SELECT`, planned once, and
+    /// `None` for a `VALUES` list.
+    VirtualInsert(
+        Box<inillucent_sql::dml::BoundInsert>,
+        bool,
+        Option<Box<CachedQuery>>,
+    ),
     /// An insert into `sqlite_schema` under `PRAGMA writable_schema`.
     ///
     /// It writes a catalog row through the same `record` every `CREATE` uses,

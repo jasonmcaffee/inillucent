@@ -151,6 +151,20 @@ checkout gets the feature with:
 cargo build --release -p inillucent-cli --features inillucent-cli/embed
 ```
 
+A Rust application turns it on through the `inillucent` crate:
+
+```toml
+[dependencies]
+inillucent = { version = "1.0", features = ["embed"] }
+```
+
+The feature compiles `embed(TEXT)` into the engine. The model is not part of the build. It is
+loaded when `embed(TEXT)` is first called, from the folder `inillucent setup-embeddings all`
+installs it in. Release 1.0.29 and earlier have no `embed` feature on the `inillucent` crate. With
+those, add `inillucent-engine = { version = "1.0.29", features = ["embed"] }` beside `inillucent`.
+Cargo turns a feature on for every user of a crate in the build, so the engine that `inillucent`
+uses gets it too.
+
 ## Using `embed(TEXT)` in SQL
 
 `embed(TEXT)` can go anywhere an expression can go: a `SELECT` list, `WHERE`, `ORDER BY`, a `VALUES`
@@ -167,6 +181,25 @@ SELECT id, body FROM note
 ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1))
 LIMIT 10;
 ```
+
+It works the same way on an `inillucent_search` table, in the row you insert, in an
+`INSERT ... SELECT` that fills the table from another one, and as the query vector of a search:
+
+```sql
+CREATE VIRTUAL TABLE note_search USING inillucent_search(body, dims = 768);
+
+INSERT INTO note_search (rowid, body, vector)
+SELECT id, body, embed('search_document: ' || body) FROM note;
+
+SELECT rowid, body FROM note_search
+WHERE note_search MATCH ?1 AND vector = embed('search_query: ' || ?1) AND k = 10
+ORDER BY rank;
+```
+
+Release 1.0.29 refuses three of these with the status `unsupported`: `embed(TEXT)` in a `VALUES` row
+of an `inillucent_search` or FTS5 table, an `INSERT ... SELECT` into either kind of table, and
+`vector = embed(...)` in a search. With 1.0.29, run `SELECT embed(?1)` first and bind the bytes it
+returns.
 
 `nomic-embed-text-v1.5` was trained with a prefix on every text. Put `search_document: ` in front of
 text you store and `search_query: ` in front of a question. `embed(TEXT)` embeds exactly the text it
