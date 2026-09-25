@@ -616,8 +616,8 @@ Four operations touch the index, and each costs a different amount:
 | `compact = N` | the delta log folds at `N` entries | a larger `N` means fewer, larger segments: less work at query time, more work in the commit that folds |
 | `compact = 0` | nothing folds automatically | the delta log grows without limit, and every query reads all of it until `compact` runs. A bulk load wants this, and the migration declares it |
 | `threads = N` | a fold and a build use `N` cores | `threads = 1` keeps the engine on one core and makes a fold about `N` times slower |
-| `mode = 'approximate'` (the default) | a vector search walks the HNSW graph | recall depends on the graph |
-| `mode = 'exact'` | a vector search compares every row | recall is 1.000, and a fold cannot change an answer |
+| `mode = 'exact'` (the default) | a vector search compares every row | recall is 1.000, and a fold cannot change an answer |
+| `mode = 'approximate'` | a vector search walks the HNSW graph | recall depends on the graph |
 
 ### What folding costs
 

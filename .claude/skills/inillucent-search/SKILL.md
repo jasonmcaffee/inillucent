@@ -92,9 +92,10 @@ shows it:
 SEARCH embedding USING VECTOR INDEX embedding_v (k=10)
 ```
 
-- The default search mode is `approximate`. The search walks the HNSW graph, which is fast and can
-  miss a true neighbor.
-- `mode = 'exact'` compares the query with every row, so the answer is the true top k.
+- On an index made with `USING inillucent_hnsw`, the search compares the query with every stored
+  vector, so the answer is the true top k.
+- On an `inillucent_search` table, `mode = 'exact'` (the default) compares every row, and
+  `mode = 'approximate'` walks the HNSW graph, which is faster and can miss a true neighbor.
 - With no index, the same query compares every row and still returns the correct answer. Build the
   index when that query becomes slow.
 
@@ -153,7 +154,7 @@ SELECT title FROM store WHERE store MATCH 'body' AND vector = ?1 AND k = 10 ORDE
 | Declaration or column | What it does |
 |---|---|
 | `dims = N` | makes the table hold vectors of N numbers. Without `dims`, an insert with a vector is refused with the status `constraint` |
-| `mode = 'exact'` or `mode = 'approximate'` | how the vector half searches. The default is `approximate` |
+| `mode = 'exact'` or `mode = 'approximate'` | how the vector half searches. The default is `exact` |
 | `store MATCH '...'` | the keyword query, in FTS5 syntax |
 | `vector = ?` | the query vector |
 | `k = 10` | how many results to retrieve |
