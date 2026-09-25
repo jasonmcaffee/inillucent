@@ -44,6 +44,16 @@ ingredient i ON i.id = c.value ->> '$.id'` failed with "a seek key or range boun
 Both now answer as SQLite does. The same planner fix applies to a registered function's call and to
 an FTS5 auxiliary function in a join condition.
 
+**A `WHERE` on a view or derived table filters inside it.** `SELECT * FROM order_summary WHERE id
+= 57` built every row of the view, correlated subqueries included, before it applied the `WHERE`,
+so its cost grew with the table: 2.50 ms against 0.048 ms for the same query written without the
+view, on the coffee shop example's 270 orders. A condition that reads only the view's columns is
+now copied into the view's own query, which can then search by key. In a debug build, 30 runs of
+that lookup over 2,000 orders went from 4,581 ms to 88 ms, the same as the query written out. The
+copy is not made where it could change the answer: the right side of a `LEFT JOIN`, a view with
+`DISTINCT`, `LIMIT`, `GROUP BY`, a window function or a compound, and a condition holding a
+subquery or `random()`.
+
 **Two window function queries that were refused now run.** A correlated scalar subquery in the
 select list beside a window function, such as a count of each order's lines next to `row_number()
 OVER (ORDER BY paid_at)`, was refused with "a correlated subquery used as a value". A windowed

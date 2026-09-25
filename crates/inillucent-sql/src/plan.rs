@@ -23,6 +23,7 @@ use crate::cost;
 mod hint;
 mod partial;
 mod pattern;
+mod pushdown;
 mod range;
 mod terms;
 pub use hint::unanswerable_index_hint;
@@ -809,6 +810,7 @@ impl Levers {
 /// @param levers - which optimizations are on
 pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
     let mut select = select;
+    pushdown::push_into_derived_tables(&mut select);
     let compound_arms = core::mem::take(&mut select.compounds);
     let terms = statement_terms(&select);
     // The order the terms are visited in is chosen before their paths are, and
