@@ -39,9 +39,9 @@
 //! the readers out and there is nothing left to grade. Normal is also the
 //! default, so this is the arrangement an application gets.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use inillucent_compat::cliproc::program;
@@ -105,25 +105,100 @@ fn writer_script(directory: &Path, commits: usize) -> PathBuf {
     path
 }
 
-/// Writes one reader's script and returns its path.
+/// Returns what one reader asks: the four numbers a prefix is recognised by,
+/// over and over.
 ///
-/// The four numbers a prefix is recognised by, asked over and over. An empty
-/// table answers `0|0|0|0`, which is a prefix of length zero and is graded as
-/// one.
+/// An empty table answers `0|0|0|0`, which is a prefix of length zero and is
+/// graded as one.
 ///
-/// @param directory - where to write it
-/// @param who - which reader it is
 /// @param reads - how many times to ask
-fn reader_script(directory: &Path, who: usize, reads: usize) -> PathBuf {
-    let mut text = String::from("PRAGMA busy_timeout = 30000;\n");
+fn reader_asks(reads: usize) -> String {
     let probe = "SELECT count(*), coalesce(max(n), 0), count(DISTINCT n), coalesce(min(n), 0) \
                  FROM note;\n";
-    for _ in 0..reads {
-        text.push_str(probe);
+    probe.repeat(reads)
+}
+
+/// A reader shell that has opened the file and is waiting for its asks.
+struct Reader {
+    /// The shell.
+    child: Child,
+    /// Where its asks are written.
+    input: ChildStdin,
+    /// Its answers, past the line that said it had opened.
+    output: BufReader<ChildStdout>,
+    /// Its standard error, read on a thread of its own.
+    errors: std::thread::JoinHandle<String>,
+}
+
+/// Starts a reader shell and waits until it has the file open with its own
+/// thirty second timeout set.
+///
+/// **The open cannot be given a timeout, so it has to happen before the
+/// writer starts.** A shell opens its file before it reads a line of input,
+/// and the open waits `DEFAULT_BUSY_MILLIS` - five seconds - because there is
+/// no connection yet to carry a pragma. `busy_timeout.rs` explains the same
+/// thing and opens its shells first for the same reason. This suite used to
+/// start its readers while the writer was committing in a tight loop. On the
+/// GitHub Windows runner, whose disk is slower, the writer held the file for
+/// most of every five seconds, and all four readers exited with "another
+/// process holds the file for writing ... waited 5013 ms of the 5000 ms"
+/// having answered nothing. Once a connection is open, every read waits on
+/// the connection's own `busy_timeout`, and that is thirty seconds here.
+///
+/// @param shell - the built `inillucent-shell`
+/// @param database - the file, which nothing may be holding yet
+fn opened_reader(shell: &Path, database: &Path) -> Reader {
+    let mut child = Command::new(shell)
+        .arg(database.to_string_lossy().replace('\\', "/"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("a shell did not start: {error}"));
+    let errors = standard_error(&mut child);
+    let (Some(mut input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
+        panic!("a reader shell has no pipes");
+    };
+    input
+        .write_all(b"PRAGMA busy_timeout = 30000;\nSELECT 'reader-is-open';\n")
+        .expect("the reader takes its first lines");
+    input.flush().expect("the reader takes its first lines");
+    let mut output = BufReader::new(output);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = output.read_line(&mut line).unwrap_or(0);
+        if read == 0 {
+            let _ = child.wait();
+            panic!(
+                "a reader shell ended before it said it was open: {}",
+                errors.join().unwrap_or_default()
+            );
+        }
+        if line.contains("reader-is-open") {
+            break;
+        }
     }
-    let path = directory.join(format!("reader-{who}.sql"));
-    std::fs::write(&path, text).expect("a reader's script is written");
-    path
+    Reader {
+        child,
+        input,
+        output,
+        errors,
+    }
+}
+
+/// Sends a reader its asks on a thread and closes its input, so the shell
+/// ends when it has answered them.
+///
+/// On a thread because the asks are larger than a pipe holds, and the four
+/// readers have to be asking at the same time.
+///
+/// @param input - the reader's standard input
+/// @param asks - what it asks
+fn send_asks(mut input: ChildStdin, asks: String) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let _ = input.write_all(asks.as_bytes());
+    })
 }
 
 /// Starts a shell reading a script, with its output on a pipe.
@@ -230,13 +305,16 @@ fn standard_error(child: &mut Child) -> std::thread::JoinHandle<String> {
 
 /// Reads a reader's output and grades every answer.
 ///
-/// @param child - the reader
+/// @param child - the reader's shell
+/// @param output - its answers
+/// @param errors - its standard error, being read on a thread
 /// @param who - which reader it is, for the failure message
-fn graded(mut child: Child, who: usize) -> Seen {
-    let Some(output) = child.stdout.take() else {
-        panic!("reader {who} has no output");
-    };
-    let errors = standard_error(&mut child);
+fn graded(
+    mut child: Child,
+    output: BufReader<ChildStdout>,
+    errors: std::thread::JoinHandle<String>,
+    who: usize,
+) -> Seen {
     let mut seen = Seen {
         answers: 0,
         furthest: 0,
@@ -246,7 +324,7 @@ fn graded(mut child: Child, who: usize) -> Seen {
     };
     let mut unread: Vec<String> = Vec::new();
     let mut highest_so_far = 0u64;
-    for line in BufReader::new(output).lines().map_while(Result::ok) {
+    for line in output.lines().map_while(Result::ok) {
         let numbers: Vec<u64> = line
             .trim()
             .split('|')
@@ -309,8 +387,11 @@ fn readers_beside_a_writer_see_only_prefixes(arm: &Arm) {
     let reads = commits / 2;
 
     let writer_path = writer_script(&directory, commits);
-    let reader_paths: Vec<PathBuf> = (0..READERS)
-        .map(|who| reader_script(&directory, who, reads))
+    // Open before the writer starts, and ask only once it has a row: the
+    // first for the reason `opened_reader` gives, the second for the reason
+    // `a_row_exists` gives.
+    let readers: Vec<Reader> = (0..READERS)
+        .map(|_| opened_reader(&shell, &database))
         .collect();
 
     let writer = started(&shell, &database, &writer_path);
@@ -320,18 +401,20 @@ fn readers_beside_a_writer_see_only_prefixes(arm: &Arm) {
          reader to see a prefix of",
         arm.name
     );
-    let readers: Vec<Child> = reader_paths
-        .iter()
-        .map(|script| started(&shell, &database, script))
-        .collect();
+    let mut senders = Vec::new();
+    let mut listening = Vec::new();
+    for reader in readers {
+        senders.push(send_asks(reader.input, reader_asks(reads)));
+        listening.push((reader.child, reader.output, reader.errors));
+    }
 
     let mut all_broken: Vec<String> = Vec::new();
     let mut total_answers = 0usize;
     let mut saw_rows = 0usize;
     let mut furthest = 0u64;
     let mut readers_said: Vec<String> = Vec::new();
-    for (who, reader) in readers.into_iter().enumerate() {
-        let seen = graded(reader, who);
+    for (who, (child, output, errors)) in listening.into_iter().enumerate() {
+        let seen = graded(child, output, errors, who);
         readers_said.push(seen.said);
         total_answers = total_answers.saturating_add(seen.answers);
         if seen.saw_a_row {
@@ -339,6 +422,9 @@ fn readers_beside_a_writer_see_only_prefixes(arm: &Arm) {
         }
         furthest = furthest.max(seen.furthest);
         all_broken.extend(seen.broken);
+    }
+    for sender in senders {
+        let _ = sender.join();
     }
 
     let mut writer = writer;
