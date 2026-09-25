@@ -215,7 +215,14 @@ fn a_live_mysql_database_migrates_verified_and_reads_back() {
 #[test]
 fn the_catalog_is_read_before_a_single_row_moves() {
     let Some(url) = url() else { return };
-    let mut source = inillucent_remote::MysqlSource::connect(&url).expect("connects");
+    // The transport the migration itself would use, not `connect`, which
+    // always asks for verified TLS. MySQL 8.4 answers with its own self signed
+    // certificate, so the first run against a stock server (the Linux CI job's
+    // container) had this case refused while the migration beside it, which
+    // takes a loopback URL with no `ssl-mode` as plaintext, passed.
+    let transport = url.transport(false).expect("a transport the policy allows");
+    let mut source =
+        inillucent_remote::MysqlSource::connect_over(&url, transport).expect("connects");
     let tables = source.describe().expect("describes");
     let note = tables
         .iter()

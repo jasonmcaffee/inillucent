@@ -267,7 +267,14 @@ fn a_destination_that_exists_is_refused() {
 #[test]
 fn the_catalog_is_read_before_a_single_row_moves() {
     let Some(url) = url() else { return };
-    let mut source = inillucent_remote::PostgresSource::connect(&url).expect("connects");
+    // The transport the migration itself would use, not `connect`, which
+    // always asks for verified TLS. A loopback URL with no `sslmode` is
+    // plaintext to `migrate`, so the first run against a server with TLS off
+    // (the Linux CI job's container) had this case refused while the migration
+    // beside it passed. TLS itself is `transport.rs`'s subject.
+    let transport = url.transport(false).expect("a transport the policy allows");
+    let mut source =
+        inillucent_remote::PostgresSource::connect_over(&url, transport).expect("connects");
     let tables = source.describe().expect("describes");
     let note = tables
         .iter()

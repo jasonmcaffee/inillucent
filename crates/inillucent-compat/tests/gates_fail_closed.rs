@@ -183,9 +183,24 @@ fn nested_target_dir() -> std::path::PathBuf {
 /// @param gate - the built runner
 /// @param arguments - the command line
 fn run_nested(gate: &str, arguments: &[&str]) -> Output {
-    Command::new(gate)
+    run_nested_without(gate, arguments, &[])
+}
+
+/// Runs a nested `inillucent-testrun` with some variables taken out of its
+/// environment.
+///
+/// @param gate - the program to run
+/// @param arguments - its arguments
+/// @param unset - environment variables the nested run must not see
+fn run_nested_without(gate: &str, arguments: &[&str], unset: &[&str]) -> Output {
+    let mut command = Command::new(gate);
+    command
         .args(arguments)
-        .env("CARGO_TARGET_DIR", nested_target_dir())
+        .env("CARGO_TARGET_DIR", nested_target_dir());
+    for name in unset {
+        command.env_remove(name);
+    }
+    command
         .output()
         .unwrap_or_else(|error| panic!("{gate} did not start: {error}"))
 }
@@ -1278,15 +1293,17 @@ fn testrun_passes_a_real_run_with_code_zero() {
 ///
 /// `--strict` over the two suites that need a database server is a red run
 /// already in the tree. They run, their tests execute and report nothing, and
-/// `--strict` turns that into a failure. A machine with both servers running
-/// gets a green and the case skips, because a prerequisite that is present is
-/// not a reason to assert the opposite.
+/// `--strict` turns that into a failure.
+///
+/// The nested run is given no server URLs, so it goes red on every machine.
+/// This case used to skip wherever both servers were configured, and the first
+/// GitHub Linux run, which starts both servers, was exactly such a machine.
 #[test]
 fn testrun_exits_one_when_the_run_went_red() {
     let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
         return;
     };
-    let output = run_nested(
+    let output = run_nested_without(
         gate,
         &[
             "--no-build",
@@ -1296,16 +1313,15 @@ fn testrun_exits_one_when_the_run_went_red() {
             "--target",
             "inillucent-remote::live_mysql",
         ],
+        &["INILLUCENT_TEST_POSTGRES_URL", "INILLUCENT_TEST_MYSQL_URL"],
     );
     let text = said(&output);
     refuse_a_contended_run("a real run that goes red", &text);
-    if !text.contains("ran without a prerequisite") {
-        inillucent_compat::differential::skipping(
-            "both database servers answered, so neither suite went without its prerequisite \
-             and there is no red run here to measure",
-        );
-        return;
-    }
+    assert!(
+        text.contains("ran without a prerequisite"),
+        "the nested run was given no server URL and still did not report the two suites as \
+         missing their prerequisite. It printed:\n{text}"
+    );
     assert_eq!(
         code(&output),
         1,

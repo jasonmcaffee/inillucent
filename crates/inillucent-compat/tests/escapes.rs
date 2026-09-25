@@ -491,7 +491,15 @@ fn the_differs_variant_is_used_as_often_as_the_comparison_records() {
         };
         // The case's own block, which ends where the next one begins.
         let block = after.split("        name: \"").next().unwrap_or(after);
-        if !block.contains("expect: Differs,") {
+        // Any `expect:` line naming `Differs`, so a case whose difference is
+        // measured against one platform's reference shell and not the other's
+        // still counts. `shell.limit.trigger.depth` is written
+        // `expect: if cfg!(windows) { Differs } else { Agrees },` because the
+        // Linux reference shell was built with the default trigger depth.
+        let expects_a_difference = block
+            .lines()
+            .any(|line| line.trim_start().starts_with("expect:") && line.contains("Differs"));
+        if !expects_a_difference {
             absent.push(format!(
                 "{case}: the case no longer expects a difference ({about})"
             ));
