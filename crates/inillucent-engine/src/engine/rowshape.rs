@@ -15,7 +15,7 @@ use inillucent_catalog::paged::{schema_create_sql, ObjectKind, SchemaEntry};
 use inillucent_exec::physical::SourceLayout;
 use inillucent_exec::StaticType;
 use inillucent_pool::Database;
-use inillucent_sql::catalog_view::{IndexInfo, TableInfo};
+use inillucent_sql::catalog_view::{IndexColumnInfo, IndexInfo, TableInfo};
 use inillucent_sqlite_reader::SqliteFile;
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::types::{ColumnSpec, PhysicalType};
@@ -537,6 +537,26 @@ pub(crate) fn corrupt_index(said: String) -> DbError {
     inillucent_base::error::corrupt(said.clone()).with_detail(said)
 }
 
+/// Returns the collation one index key column is ordered by.
+///
+/// The one the *index* declared, and the column's own only when the index did
+/// not name one. That is SQLite's rule and it is the order the entries are
+/// physically in, which is what the tree's comparisons have to agree with.
+///
+/// @param table - the table the index is on
+/// @param declared - the key column's declared position in the table
+/// @param column - the key column
+fn key_collation(table: &TableInfo, declared: usize, column: &IndexColumnInfo) -> Collation {
+    if !column.collation.is_empty() {
+        return collation_of(&column.collation);
+    }
+    table
+        .columns
+        .get(declared)
+        .map(|info| collation_of(&info.collation))
+        .unwrap_or(Collation::Binary)
+}
+
 /// Returns the column directory and the layout an index tree is built with.
 ///
 /// Shared by the fixture import, which fills the tree from SQLite's own index
@@ -581,38 +601,17 @@ pub(crate) fn index_shape(
             types.push(StaticType::Unknown);
             continue;
         };
-        if column.expr_sql.is_some() {
-            // A `VIRTUAL` generated column: the key is its expression's value,
-            // which is computed with no affinity applied and so may be of any
-            // type. The table carries no slot for it to map, and a walk of this
-            // tree is not ordered by any column a query can name.
-            ordered = false;
-            columns.push(
-                ColumnSpec::key(PhysicalType::Any)
-                    .with_collation(collation_of(&column.collation))
-                    .with_descending(column.descending),
-            );
-            types.push(StaticType::Unknown);
-            continue;
-        }
+        // A key on a `VIRTUAL` generated column holds its expression's value,
+        // which is computed with no affinity applied and so may be of any
+        // type. The table carries no slot for it to map, and a walk of this
+        // tree is not ordered by any column a query can name.
+        let computed = column.expr_sql.is_some();
         let (physical, static_type) = match table.columns.get(declared) {
-            Some(info) => physical_for(info.affinity),
-            None => (PhysicalType::Any, StaticType::Unknown),
+            Some(info) if !computed => physical_for(info.affinity),
+            _ => (PhysicalType::Any, StaticType::Unknown),
         };
-        // An index column's collation is the one the *index* declared, and the
-        // column's own only when the index did not name one. That is SQLite's
-        // rule and it is the order the entries are physically in, which is what
-        // the tree's comparisons have to agree with.
-        let collation = if column.collation.is_empty() {
-            table
-                .columns
-                .get(declared)
-                .map(|info| collation_of(&info.collation))
-                .unwrap_or(Collation::Binary)
-        } else {
-            collation_of(&column.collation)
-        };
-        if collation != Collation::Binary {
+        let collation = key_collation(table, declared, column);
+        if collation != Collation::Binary || computed {
             // A tree ordered by anything but BINARY is still *seekable* - the
             // comparisons below use the collation - but it is not "already
             // sorted" for an `ORDER BY` that did not name the same collation,
@@ -642,7 +641,7 @@ pub(crate) fn index_shape(
                 .with_descending(column.descending),
         );
         types.push(static_type);
-        if let Some(slot) = slots.get_mut(declared) {
+        if let Some(slot) = slots.get_mut(declared).filter(|_| !computed) {
             *slot = Some(position);
         }
     }
