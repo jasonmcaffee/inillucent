@@ -1,0 +1,49 @@
+{
+  "label": "nightly-20260925-072550",
+  "platform": "windows-x86_64",
+  "rounds": 30,
+  "seed": 17900001,
+  "scales": [
+    {
+      "scale": "medium",
+      "rows": 100000,
+      "headline": {"ratio": 0.759137, "low": 0.750219, "high": 0.766118},
+      "workloads": [
+        {"workload": "prepare.trivial", "family": "open.prepare", "agreed": true, "inillucent_nanos": 18404800.0, "sqlite_nanos": 1606500.0, "ratio": 0.086994, "low": 0.086488, "high": 0.088173, "samples": 30, "detail": ""},
+        {"workload": "prepare.point", "family": "open.prepare", "agreed": true, "inillucent_nanos": 36076050.0, "sqlite_nanos": 45254100.0, "ratio": 1.251762, "low": 1.246704, "high": 1.278918, "samples": 30, "detail": ""},
+        {"workload": "point.rowid", "family": "read.point", "agreed": true, "inillucent_nanos": 19675450.0, "sqlite_nanos": 38695900.0, "ratio": 1.977169, "low": 1.953948, "high": 2.032976, "samples": 30, "detail": ""},
+        {"workload": "point.index", "family": "read.point", "agreed": true, "inillucent_nanos": 25278500.0, "sqlite_nanos": 30127700.0, "ratio": 1.179592, "low": 1.168645, "high": 1.204116, "samples": 30, "detail": ""},
+        {"workload": "point.miss", "family": "read.point", "agreed": true, "inillucent_nanos": 18406050.0, "sqlite_nanos": 26393900.0, "ratio": 1.440762, "low": 1.417191, "high": 1.460042, "samples": 30, "detail": ""},
+        {"workload": "range.covering", "family": "read.range", "agreed": true, "inillucent_nanos": 19847400.0, "sqlite_nanos": 10682750.0, "ratio": 0.539767, "low": 0.533998, "high": 0.546101, "samples": 30, "detail": ""},
+        {"workload": "range.lookaside", "family": "read.range", "agreed": true, "inillucent_nanos": 38372750.0, "sqlite_nanos": 34300800.0, "ratio": 0.893533, "low": 0.883196, "high": 0.912735, "samples": 30, "detail": ""},
+        {"workload": "range.reverse", "family": "read.range", "agreed": true, "inillucent_nanos": 9410200.0, "sqlite_nanos": 14370850.0, "ratio": 1.528882, "low": 1.513921, "high": 1.565168, "samples": 30, "detail": ""},
+        {"workload": "scan.aggregate", "family": "read.analytical", "agreed": true, "inillucent_nanos": 226376600.0, "sqlite_nanos": 90891000.0, "ratio": 0.401533, "low": 0.399701, "high": 0.404656, "samples": 30, "detail": ""},
+        {"workload": "scan.group", "family": "read.analytical", "agreed": true, "inillucent_nanos": 205716800.0, "sqlite_nanos": 76276200.0, "ratio": 0.371137, "low": 0.368033, "high": 0.374480, "samples": 30, "detail": ""},
+        {"workload": "scan.sort", "family": "read.analytical", "agreed": true, "inillucent_nanos": 29016800.0, "sqlite_nanos": 279282200.0, "ratio": 9.610894, "low": 9.495238, "high": 9.707793, "samples": 30, "detail": ""},
+        {"workload": "scan.distinct", "family": "read.analytical", "agreed": true, "inillucent_nanos": 156614350.0, "sqlite_nanos": 982750.0, "ratio": 0.006296, "low": 0.006228, "high": 0.006441, "samples": 30, "detail": ""},
+        {"workload": "join.selective", "family": "read.join", "agreed": true, "inillucent_nanos": 18316250.0, "sqlite_nanos": 20317500.0, "ratio": 1.105506, "low": 1.083400, "high": 1.119684, "samples": 30, "detail": ""},
+        {"workload": "join.range", "family": "read.join", "agreed": true, "inillucent_nanos": 61480750.0, "sqlite_nanos": 22599700.0, "ratio": 0.364828, "low": 0.361914, "high": 0.373994, "samples": 30, "detail": ""},
+        {"workload": "correlated.exists", "family": "read.correlated", "agreed": true, "inillucent_nanos": 2258800.0, "sqlite_nanos": 169700.0, "ratio": 0.073942, "low": 0.072982, "high": 0.101627, "samples": 30, "detail": ""},
+        {"workload": "correlated.in", "family": "read.correlated", "agreed": true, "inillucent_nanos": 1500200.0, "sqlite_nanos": 91100.0, "ratio": 0.060085, "low": 0.059635, "high": 0.066221, "samples": 30, "detail": ""},
+        {"workload": "correlated.exists.selective", "family": "read.correlated", "agreed": true, "inillucent_nanos": 55150.0, "sqlite_nanos": 16900.0, "ratio": 0.308222, "low": 0.284492, "high": 0.336449, "samples": 30, "detail": ""},
+        {"workload": "correlated.scalar.selective", "family": "read.correlated", "agreed": true, "inillucent_nanos": 44350.0, "sqlite_nanos": 16000.0, "ratio": 0.355956, "low": 0.352788, "high": 0.374389, "samples": 30, "detail": ""},
+        {"workload": "write.insert.batch", "family": "write", "agreed": true, "inillucent_nanos": 18181350.0, "sqlite_nanos": 19611700.0, "ratio": 1.071599, "low": 0.730594, "high": 0.987725, "samples": 30, "detail": ""},
+        {"workload": "write.insert.autocommit", "family": "write", "agreed": true, "inillucent_nanos": 132949550.0, "sqlite_nanos": 424484700.0, "ratio": 3.201567, "low": 3.124130, "high": 3.520516, "samples": 30, "detail": ""},
+        {"workload": "write.update.indexed", "family": "write", "agreed": true, "inillucent_nanos": 620279050.0, "sqlite_nanos": 98726100.0, "ratio": 0.157380, "low": 0.149607, "high": 0.160455, "samples": 30, "detail": ""},
+        {"workload": "write.delete", "family": "write", "agreed": true, "inillucent_nanos": 176596750.0, "sqlite_nanos": 93482250.0, "ratio": 0.519397, "low": 0.503955, "high": 0.535383, "samples": 30, "detail": ""},
+        {"workload": "write.upsert", "family": "write", "agreed": true, "inillucent_nanos": 5833250.0, "sqlite_nanos": 6570550.0, "ratio": 1.104176, "low": 1.064229, "high": 1.150447, "samples": 30, "detail": ""},
+        {"workload": "txn.autocommit", "family": "transaction", "agreed": true, "inillucent_nanos": 137736200.0, "sqlite_nanos": 120680250.0, "ratio": 0.869987, "low": 0.837107, "high": 0.898369, "samples": 30, "detail": ""},
+        {"workload": "txn.batched", "family": "transaction", "agreed": true, "inillucent_nanos": 270309300.0, "sqlite_nanos": 866500600.0, "ratio": 3.205467, "low": 3.035843, "high": 3.275053, "samples": 30, "detail": ""},
+        {"workload": "txn.large", "family": "transaction", "agreed": true, "inillucent_nanos": 54863250.0, "sqlite_nanos": 8913950.0, "ratio": 0.162132, "low": 0.157051, "high": 0.167314, "samples": 30, "detail": ""},
+        {"workload": "schema.index", "family": "schema", "agreed": true, "inillucent_nanos": 31542900.0, "sqlite_nanos": 45711950.0, "ratio": 1.441642, "low": 1.418648, "high": 1.471020, "samples": 30, "detail": ""},
+        {"workload": "extension.json", "family": "extension", "agreed": true, "inillucent_nanos": 19059550.0, "sqlite_nanos": 1128000.0, "ratio": 0.059168, "low": 0.058579, "high": 0.062540, "samples": 30, "detail": ""},
+        {"workload": "extension.fts.build", "family": "extension", "agreed": true, "inillucent_nanos": 5296150.0, "sqlite_nanos": 5534300.0, "ratio": 1.058066, "low": 1.028703, "high": 1.212104, "samples": 30, "detail": ""},
+        {"workload": "extension.fts.query", "family": "extension", "agreed": true, "inillucent_nanos": 18361500.0, "sqlite_nanos": 9080100.0, "ratio": 0.495601, "low": 0.488410, "high": 0.501298, "samples": 30, "detail": ""},
+        {"workload": "extension.rtree.insert", "family": "extension", "agreed": true, "inillucent_nanos": 2731150.0, "sqlite_nanos": 5558900.0, "ratio": 2.001540, "low": 1.833373, "high": 2.071475, "samples": 30, "detail": ""},
+        {"workload": "extension.rtree.query", "family": "extension", "agreed": true, "inillucent_nanos": 4468200.0, "sqlite_nanos": 4107600.0, "ratio": 0.917704, "low": 0.914196, "high": 0.946955, "samples": 30, "detail": ""},
+        {"workload": "large.read", "family": "large.values", "agreed": true, "inillucent_nanos": 11270650.0, "sqlite_nanos": 13619550.0, "ratio": 1.211110, "low": 1.191258, "high": 1.217294, "samples": 30, "detail": ""},
+        {"workload": "large.write", "family": "large.values", "agreed": true, "inillucent_nanos": 1458050.0, "sqlite_nanos": 4282050.0, "ratio": 2.976152, "low": 2.176233, "high": 3.170887, "samples": 30, "detail": ""}
+      ]
+    }
+  ]
+}

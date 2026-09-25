@@ -21,3 +21,6 @@ stamp	commit	machine	target	verdict	seconds
 2026-09-23T09:06:21Z	97cff60-dirty	machine-c9df3d5a	inillucent-compat::nightly::release_format_history	pass	4.8
 2026-09-23T09:06:21Z	97cff60-dirty	machine-c9df3d5a	inillucent-compat::nightly::story_large_table_nightly	pass	3352.2
 2026-09-23T09:06:21Z	97cff60-dirty	machine-c9df3d5a	inillucent::story_ledger_day_nightly	pass	3991.2
+2026-09-25T07:57:54Z	HEAD is	machine-c9df3d5a	inillucent-compat::nightly::release_format_history	pass	212.5
+2026-09-25T07:57:54Z	HEAD is	machine-c9df3d5a	inillucent-compat::nightly::story_large_table_nightly	pass	1016.6
+2026-09-25T07:57:54Z	HEAD is	machine-c9df3d5a	inillucent::story_ledger_day_nightly	pass	1027.1
