@@ -352,6 +352,7 @@ fn combine(
     if !kind.needs_right_first() {
         // Both unions push both arms through the same operator, because neither
         // needs to know about the other in advance.
+        operation.next_arm();
         ValuesScan::new(right).run_without_finish(&mut operation)?;
     }
     operation.finish()?;

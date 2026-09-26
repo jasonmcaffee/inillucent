@@ -180,9 +180,12 @@ pub struct SetOp {
     collations: Vec<Collation>,
     /// The right branch's keys, for `EXCEPT` and `INTERSECT`.
     right: SetKeys,
-    /// Where each key already held sits in `kept`, for the three distinct
-    /// operations.
-    seen: HashMap<Vec<u8>, usize>,
+    /// Where each key already held sits in `kept`, and which arm it came from,
+    /// for the three distinct operations.
+    seen: HashMap<Vec<u8>, (usize, usize)>,
+    /// Which arm is being pushed: 0 for the first, one more for each
+    /// [`SetOp::next_arm`].
+    arm: usize,
     /// The answer so far, for the three distinct operations, in the order the
     /// keys were first seen.
     kept: Vec<Vec<OwnedDatum>>,
@@ -207,9 +210,18 @@ impl SetOp {
             collations,
             right,
             seen: HashMap::new(),
+            arm: 0,
             kept: Vec::new(),
             downstream,
         }
+    }
+
+    /// Says that the rows pushed from here on come from the next arm.
+    ///
+    /// See [`SetOp::hold`]: which of two equal rows is kept depends on whether
+    /// they came from one arm or from two.
+    pub fn next_arm(&mut self) {
+        self.arm = self.arm.saturating_add(1);
     }
 
     /// Reports whether one row belongs in the answer at all.
@@ -227,10 +239,10 @@ impl SetOp {
     }
 
     /// Puts one row of a distinct operation into the answer, replacing an
-    /// earlier row with the same key.
+    /// earlier row with the same key from an earlier arm.
     ///
-    /// **The later of two rows that compare equal is the one SQLite keeps
-    /// (task-1979, F20).** Its `UNION` fills an ephemeral index with
+    /// **Of two rows that compare equal, SQLite keeps the one from the later
+    /// arm (task-1979, F20), and the first one within an arm.** Its `UNION` fills an ephemeral index with
     /// `OP_IdxInsert`, and a b-tree insert whose key matches an existing entry
     /// overwrites that entry's payload. Two rows can carry different values
     /// and still match: 1 and 1.0 compare equal, and so do `'a'` and `'A'`
@@ -239,14 +251,23 @@ impl SetOp {
     /// integer 1; this operator kept whichever arrived first and answered the
     /// integer for both.
     ///
+    /// **Within one arm the first row stays.** `SELECT a FROM t UNION SELECT 7`
+    /// over the rows 0 then 0.0 answers the integer 0 in SQLite, and over 0.0
+    /// then 0 answers 0.0; the same two rows as two arms answer the later one.
+    /// Measured on the pinned 3.53.4, and found by the statement matrix's
+    /// random layer, where the later row of one arm was kept.
+    ///
     /// The rows come out in key order; see [`SetOp::finish`].
     ///
     /// @param encoded - the row's key
     /// @param row - the row itself
     fn hold(&mut self, encoded: &[u8], row: Vec<OwnedDatum>) -> DbResult<()> {
-        if let Some(at) = self.seen.get(encoded).copied() {
-            if let Some(held) = self.kept.get_mut(at) {
-                *held = row;
+        if let Some((at, arm)) = self.seen.get(encoded).copied() {
+            if arm != self.arm {
+                if let Some(held) = self.kept.get_mut(at) {
+                    *held = row;
+                }
+                self.seen.insert(encoded.to_vec(), (at, self.arm));
             }
             return Ok(());
         }
@@ -256,7 +277,7 @@ impl SetOp {
         inillucent_base::budget::materialise(
             crate::ops::owned_row_bytes(&row).saturating_add(encoded.len() as u64),
         )?;
-        self.seen.insert(encoded.to_vec(), self.kept.len());
+        self.seen.insert(encoded.to_vec(), (self.kept.len(), self.arm));
         self.kept.push(row);
         Ok(())
     }
@@ -305,7 +326,8 @@ impl Sink for SetOp {
     /// encoded key sorts the way the tree does, under each column's collation,
     /// so sorting by it is sorting the way SQLite's index does.
     fn finish(&mut self) -> DbResult<()> {
-        let mut order: Vec<(Vec<u8>, usize)> = self.seen.drain().collect();
+        let mut order: Vec<(Vec<u8>, usize)> =
+            self.seen.drain().map(|(key, (at, _))| (key, at)).collect();
         order.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         let mut kept: Vec<Option<Vec<OwnedDatum>>> = std::mem::take(&mut self.kept)
             .into_iter()
@@ -322,6 +344,7 @@ impl Sink for SetOp {
     /// Returns this operator and everything below it to its pre-input state.
     fn reset(&mut self) -> DbResult<()> {
         self.seen.clear();
+        self.arm = 0;
         self.kept.clear();
         self.downstream.reset()
     }
@@ -440,12 +463,18 @@ mod tests {
         );
         op.push(&Batch::new(2, vec![Vector::Values(&rows)]))
             .expect("the push succeeds");
+        // Under NOCASE the two spellings are one row. Within one arm the first
+        // spelling stays, as it does in SQLite.
+        let later: Vec<Datum<'_>> = vec![Datum::Text(b"Blue")];
+        op.next_arm();
+        op.push(&Batch::new(1, vec![Vector::Values(&later)]))
+            .expect("the push succeeds");
         op.finish().expect("the finish succeeds");
-        // Under NOCASE the two spellings are one row, and the row is the
-        // *later* spelling, which is the entry a b-tree insert with an equal
-        // key leaves behind in SQLite (task-1979, F20). Under BINARY the two
-        // spellings are two rows and neither replaces the other.
-        assert_eq!(text_column(&folded.borrow()), vec![b"BLUE".to_vec()]);
+        // A later arm's equal row replaces it, which is the entry a b-tree
+        // insert with an equal key leaves behind in SQLite (task-1979, F20).
+        // Under BINARY the two spellings are two rows and neither replaces the
+        // other.
+        assert_eq!(text_column(&folded.borrow()), vec![b"Blue".to_vec()]);
         let exact = Rc::new(RefCell::new(Vec::new()));
         let mut binary = SetOp::new(
             SetKind::Union,
