@@ -652,7 +652,18 @@ impl crate::ImportedDatabase {
                 i64::from(self.pragmas.writable_schema()),
             ));
         };
-        self.pragmas.set_writable_schema(argument_boolean(argument));
+        let asked = argument_boolean(argument);
+        // **Defensive mode refuses `ON` and says so by not moving.** The same
+        // rule `pragma_journal_mode` follows: SQLite only ever lets ON through
+        // when `SQLITE_Defensive` is clear, so the reference's shell - which
+        // turns the flag on - reads writable_schema back as 0 no matter what
+        // was asked for. `OFF` always works, in both engines. Found by the
+        // feature probe's `prag.schema.switches`, which compares against that
+        // shell rather than the matrix's own connections, where defensive
+        // defaults off.
+        if !(asked && self.pragmas.defensive()) {
+            self.pragmas.set_writable_schema(asked);
+        }
         Ok(Outcome::empty())
     }
     /// Reads or sets whether this connection may write.
