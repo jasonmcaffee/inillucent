@@ -169,7 +169,6 @@ ddl_view-771de28793d4	40	PRAGMA table_info on a view reports no declared type fo
 ddl_table-390042c209da	41	A generated column is computed from the value before its source column's type converts it.
 maintenance-0c90a3ac751f	42	VACUUM fails on a table with a STORED generated column.
 maintenance-cd55551515df	42	VACUUM fails on a table with a STORED generated column.
-insert-e2bf17ca55b4	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
 ddl_table-3fc9f2d11670	50	PRAGMA table_info reports notnull 0 for a STRICT table's PRIMARY KEY column, which SQLite reports as NOT NULL.
 
 # The retained corpus: the smallest case for each bug (retained/bugs.slt).
@@ -207,8 +206,6 @@ retained-bug-61-replace-empty-pattern	61	The smallest case for bug 61.
 retained-bug-63-json-quote-blob	63	The smallest case for bug 63.
 retained-bug-64-collate-on-json-each	64	The smallest case for bug 64.
 retained-bug-65-wide-table-small-page	65@small-pool,sqlite-page	The smallest case for bug 65.
-window-74449de1b5ba	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
-window-719f4ff45681	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
 function-2698bb329630	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
 function-68b7aed95a6d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
 function-a17a563ebc25	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
@@ -477,7 +474,6 @@ function-8206eccf8295	37	A STRICT table's ANY column converts text that looks li
 window-effa8af166e8	37	A STRICT table's ANY column converts text that looks like a number into a number.
 window-b71eda42930d	37	A STRICT table's ANY column converts text that looks like a number into a number.
 function-ef3d1ca82e72	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-1750d8e34d0a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 expression-791beddca2fc	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 expression-ba83140e44e5	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 expression-941d0bd96d48	47	The remainder of a real by an integer is an integer where SQLite returns a real.
