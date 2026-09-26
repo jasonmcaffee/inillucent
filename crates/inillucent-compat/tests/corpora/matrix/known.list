@@ -29,10 +29,6 @@ constraint-ec8dae14560d	26	With PRAGMA defer_foreign_keys set on a fresh connect
 pragma-3e7b0abd2608	30	The pragma_<name> table valued function of a setting pragma is "no such table".
 vtab-502dc2c0ee37	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-6d0c72e53a98	33	MATCH in this placement is refused as unsupported and no capability row says so.
-ddl_view-04962724de19	37	A STRICT table's ANY column converts text that looks like a number into a number.
-ddl_view-0c7d030f2a49	37	A STRICT table's ANY column converts text that looks like a number into a number.
-ddl_view-5bb6734f4135	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_view-f3ba8519d974	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 
 # The retained corpus: the smallest case for each bug (retained/bugs.slt).
 retained-bug-65-wide-table-small-page	65@small-pool,sqlite-page	The smallest case for bug 65.
