@@ -938,6 +938,10 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// back before the replacement is read, so `replace('0.5', '', NULL)` is
 /// `'0.5'` and not NULL. A NULL subject or pattern is still NULL.
 ///
+/// SQLite tests the pattern for being empty by its first byte, so a pattern
+/// that starts with a zero byte counts as empty too:
+/// `replace(x'00ff', x'00ff', '')` hands back `x'00ff'` as text.
+///
 /// @param arguments - the subject, the pattern and the replacement
 /// @param encoding - the database's text encoding
 fn replace(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'static> {
@@ -951,7 +955,7 @@ fn replace(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'stati
     }
     let subject = eval::text_bytes(subject, encoding);
     let from = eval::text_bytes(from, encoding);
-    if from.is_empty() {
+    if from.first().is_none_or(|byte| *byte == 0) {
         return Value::owned_text(&subject).unwrap_or(Value::Null);
     }
     if to.is_null() {
@@ -1005,35 +1009,19 @@ fn substring(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'sta
     if start_value.is_null() {
         return Value::Null;
     }
-    let mut start = cast::integer_value(start_value);
-    let mut count = match arguments.get(2) {
+    let start = cast::integer_value(start_value);
+    let count = match arguments.get(2) {
         Some(value) if value.is_null() => return Value::Null,
         Some(value) => cast::integer_value(value),
-        None => total,
+        None => i64::MAX,
     };
-    // A negative start counts back from the end; a negative length runs
-    // backwards from the start. Both are SQLite behaviours a naive slice gets
-    // wrong by silently returning nothing.
-    if start < 0 {
-        start = total.saturating_add(start).saturating_add(1);
-        if start < 1 {
-            count = count.saturating_add(start).saturating_sub(1);
-            start = 1;
-        }
-    } else if start == 0 {
-        count = count.saturating_sub(1);
-        start = 1;
-    }
-    if count < 0 {
-        start = start.saturating_add(count);
-        count = count.saturating_neg();
-        if start < 1 {
-            count = count.saturating_add(start).saturating_sub(1);
-            start = 1;
-        }
-    }
-    let first = start.saturating_sub(1).max(0) as usize;
-    let last = first.saturating_add(count.max(0) as usize).min(units.len());
+    let (first, count) = substring_span(start, count, total);
+    let first = usize::try_from(first)
+        .unwrap_or(usize::MAX)
+        .min(units.len());
+    let last = first
+        .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
+        .min(units.len());
     let mut out = Vec::new();
     for unit in units.get(first.min(units.len())..last).unwrap_or(&[]) {
         out.extend_from_slice(unit);
@@ -1042,6 +1030,46 @@ fn substring(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'sta
         return Value::owned_blob(&out).unwrap_or(Value::Null);
     }
     Value::owned_text(&out).unwrap_or(Value::Null)
+}
+
+/// Returns the zero based first unit and the unit count `substr` takes.
+///
+/// This follows the steps of SQLite's `substrFunc` one for one. A negative
+/// start counts back from the end and a negative length runs backwards from the
+/// start. An earlier version worked in one based positions and negated the
+/// length before moving the start, which was off by one for a length of
+/// `i64::MIN`: `substr('-9223372036854775808', -1.75, -9223372036854775808)`
+/// answered 18 characters where SQLite answers 19.
+///
+/// @param start - the start argument as an integer, counting from one
+/// @param count - the length argument, or `i64::MAX` when there is none
+/// @param total - how many units the subject holds
+fn substring_span(start: i64, count: i64, total: i64) -> (i64, i64) {
+    let (mut first, mut count) = (start, count);
+    if first < 0 {
+        first = first.saturating_add(total);
+        if first < 0 {
+            count = if count < 0 {
+                0
+            } else {
+                count.saturating_add(first)
+            };
+            first = 0;
+        }
+    } else if first > 0 {
+        first -= 1;
+    } else if count > 0 {
+        count -= 1;
+    }
+    if count < 0 {
+        count = if count < -first {
+            first
+        } else {
+            count.saturating_neg()
+        };
+        first -= count;
+    }
+    (first, count.max(0))
 }
 
 /// Splits bytes into characters, borrowing rather than copying.
@@ -2054,6 +2082,37 @@ mod tests {
                 vec![text(), Value::Integer(4), Value::Integer(-2)]
             ),
             Value::owned_text(b"bc").expect("owned")
+        );
+    }
+
+    /// A length of `i64::MIN` takes the characters SQLite takes: the steps of
+    /// its `substrFunc` give 19 here, and an earlier order of the steps gave 18.
+    #[test]
+    fn substr_with_the_smallest_length_takes_what_sqlite_takes() {
+        assert_same!(
+            run(
+                ScalarFunc::Substr,
+                vec![
+                    Value::owned_text(b"-9223372036854775808").expect("owned"),
+                    Value::Integer(-1),
+                    Value::Integer(i64::MIN)
+                ]
+            ),
+            Value::owned_text(b"-922337203685477580").expect("owned")
+        );
+    }
+
+    /// A pattern whose first byte is zero is an empty pattern to SQLite, so
+    /// `replace` hands the subject back unchanged.
+    #[test]
+    fn replace_treats_a_pattern_starting_with_a_zero_byte_as_empty() {
+        let subject = || Value::owned_blob(&[0, 255]).expect("owned");
+        assert_same!(
+            run(
+                ScalarFunc::Replace,
+                vec![subject(), subject(), Value::owned_text(b"").expect("owned")]
+            ),
+            Value::owned_text(&[0, 255]).expect("owned")
         );
     }
 
