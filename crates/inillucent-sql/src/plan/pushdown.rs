@@ -21,12 +21,29 @@
 
 use super::*;
 
+mod unused;
+
+/// Copies each `WHERE` conjunct that reads only one derived table's columns
+/// into that derived table's own `WHERE`, and then replaces each derived
+/// table's unread result columns with NULL.
+///
+/// The second step is in [`unused`]. It runs here because it is the other
+/// half of treating a derived table the way SQLite's flattener does, and
+/// `plan.rs` is at its recorded size.
+///
+/// @param select - the statement being planned, whose derived tables may gain
+///   a filter and lose result columns
+pub(super) fn push_into_derived_tables(select: &mut BoundSelect) {
+    push_filters(select);
+    unused::drop_unread_columns(select);
+}
+
 /// Copies each `WHERE` conjunct that reads only one derived table's columns
 /// into that derived table's own `WHERE`.
 ///
 /// @param select - the statement being planned, whose derived tables may gain
 ///   a filter
-pub(super) fn push_into_derived_tables(select: &mut BoundSelect) {
+fn push_filters(select: &mut BoundSelect) {
     let Some(filter) = select.filter.as_ref() else {
         return;
     };

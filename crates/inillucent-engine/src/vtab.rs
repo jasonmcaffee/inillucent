@@ -985,7 +985,11 @@ fn rechecks_of(
         // it, and `Collation::Binary` is what a rowid - always an integer -
         // compares under.
         let (column, collation) = match usize::try_from(constraint.spec.column) {
-            Ok(column) => (column, connected.table.collation(column)),
+            Ok(column) => (
+                column,
+                comparison_collation(&constraint.predicate)
+                    .unwrap_or_else(|| connected.table.collation(column)),
+            ),
             Err(_) => (width, inillucent_value::collation::Collation::Binary),
         };
         rechecks.push((
@@ -996,6 +1000,29 @@ fn rechecks_of(
         ));
     }
     Ok(rechecks)
+}
+
+/// Returns the collation a comparison predicate was bound with.
+///
+/// **The comparison's collation, not the column's.** The binder has already
+/// decided which collation `s.value = 'ABC' COLLATE NOCASE` compares under,
+/// by SQLite's rules, and wrote it on the node: the explicit `COLLATE` on the
+/// right wins over the column's own. Testing the recheck under the column's
+/// collation compared that as BINARY, so `json_each` counted one of `'abc'`,
+/// `'ABC'` and `'aBc'` where SQLite counts all three.
+///
+/// `None` for a predicate that is not a comparison, such as `LIKE`, which
+/// keeps the column's collation.
+///
+/// @param predicate - the whole predicate the constraint was taken from
+fn comparison_collation(
+    predicate: &inillucent_sql::bind::BoundExpr,
+) -> Option<inillucent_value::collation::Collation> {
+    match predicate {
+        inillucent_sql::bind::BoundExpr::Compare { collation, .. }
+        | inillucent_sql::bind::BoundExpr::Is { collation, .. } => Some(*collation),
+        _ => None,
+    }
 }
 
 /// One constraint the engine has to test for itself: which column, which

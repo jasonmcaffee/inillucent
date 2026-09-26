@@ -1134,7 +1134,10 @@ fn push_filters(
     }
     if let Some(constant) = &up.plan.constant_filter {
         let translated = translate_scan(constant, up.space, up.params)?;
-        chain = Box::new(Filter::new(compile(&translated, up.scan_types)?, chain));
+        chain = Box::new(Filter::constant(
+            compile(&translated, up.scan_types)?,
+            chain,
+        ));
         operators.add(|| "FILTER CONSTANT".to_string());
     }
     for residual in up.plan.residuals.iter().flatten() {

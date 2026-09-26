@@ -496,7 +496,16 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         module: None,
     };
     for column in columns {
-        info.columns.push(column_info(sql, &parsed.ast, column));
+        let mut built = column_info(sql, &parsed.ast, column);
+        // **An `ANY` column of a `STRICT` table converts nothing.** SQLite
+        // gives it BLOB affinity, so `' 7'` stays the text `' 7'` and `-0.0`
+        // stays a real. Outside `STRICT`, `ANY` is an ordinary declared type
+        // and the naming rules make it NUMERIC, which is what it was given here
+        // in both kinds of table.
+        if info.strict && built.declared_type.eq_ignore_ascii_case(b"ANY") {
+            built.affinity = affinity::Affinity::Blob;
+        }
+        info.columns.push(built);
     }
     info.checks = collect_checks(sql, &parsed.ast, columns, constraints);
     info.foreign_keys = collect_foreign_keys(&info, &parsed.ast, columns, constraints);

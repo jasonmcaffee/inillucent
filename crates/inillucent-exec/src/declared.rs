@@ -536,11 +536,16 @@ fn already_stored_as(value: &OwnedDatum, affinity: Affinity) -> bool {
             !matches!(value, OwnedDatum::Text(_) | OwnedDatum::Real(_))
         }
         // A REAL column stores a real, so an integer is widened and a real is
-        // already where it is going.
-        Affinity::Real => matches!(
-            value,
-            OwnedDatum::Null | OwnedDatum::Blob(_) | OwnedDatum::Real(_)
-        ),
+        // already where it is going, except a negative zero. SQLite stores a
+        // real with no fraction in a REAL column as an integer and reads it
+        // back as a real, which keeps every such value but the sign of zero:
+        // `-0.0` stored there reads back as `0.0`. The conversion does the
+        // same, through the integer and back.
+        Affinity::Real => match value {
+            OwnedDatum::Null | OwnedDatum::Blob(_) => true,
+            OwnedDatum::Real(number) => !(*number == 0.0 && number.is_sign_negative()),
+            _ => false,
+        },
     }
 }
 

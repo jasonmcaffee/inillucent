@@ -195,26 +195,7 @@ pub fn update_at_cached(
                 *cell = value;
             }
         }
-        // **The stored generated columns, against the row the assignments
-        // produced (task-1913).** A row that is rewritten rewrites them, which
-        // is what SQLite does and what this did not: `c GENERATED ALWAYS AS
-        // (a + 1) STORED` kept the value written when the row was inserted, so
-        // `UPDATE g SET a = 5` left `c` reading 2 where the reference reads 6.
-        // The stale number is in the record on the disk, so every later read
-        // of that file is wrong too, and an index over the column indexes it.
-        // Read from `after` rather than `before` for the obvious reason, and
-        // computed in column order, which is the order the insert path
-        // computes them in.
-        for (slot, eval) in generated {
-            let value = space.evaluate_with(eval.as_ref(), &[after.as_slice()], &answers)?;
-            if let Some(cell) = after.get_mut(*slot) {
-                *cell = value;
-            }
-        }
-        // **Affinity is applied before the key is compared**, because the
-        // converted value is what the key is built from: `UPDATE t SET id =
-        // '7'` moves the row to key 7, not to the text `'7'`.
-        declarations.apply_affinity(&mut after);
+        convert_after(space, generated, declarations, &answers, &mut after)?;
         // **Every uniqueness the row moved onto, not just the table's own key.**
         //
         // Moving a key moves the row, so the new key has to be free; that much
@@ -551,6 +532,52 @@ fn row_resolver(source: usize, layout: &SourceLayout) -> impl Fn(&BoundExpr) -> 
         _ => None,
     }
 }
+/// Computes the stored generated columns of an updated row and applies the
+/// table's affinity to it.
+///
+/// **The stored generated columns, against the row the assignments produced
+/// (task-1913).** A row that is rewritten rewrites them, which is what SQLite
+/// does and what this did not: `c GENERATED ALWAYS AS (a + 1) STORED` kept the
+/// value written when the row was inserted, so `UPDATE g SET a = 5` left `c`
+/// reading 2 where the reference reads 6. The stale number is in the record on
+/// the disk, so every later read of that file is wrong too, and an index over
+/// the column indexes it. Read from `after` rather than `before` for the
+/// obvious reason, and computed in column order, which is the order the insert
+/// path computes them in.
+///
+/// The ordinary columns take their affinity first, as SQLite's
+/// `sqlite3ComputeGeneratedColumns` does, so a generated column reads the value
+/// that will be stored and not the value as written.
+///
+/// **Affinity is applied before the key is compared**, because the converted
+/// value is what the key is built from: `UPDATE t SET id = '7'` moves the row
+/// to key 7, not to the text `'7'`.
+///
+/// @param space - the statement's row space
+/// @param generated - each stored generated column's slot and compiled value
+/// @param declarations - the table's compiled declarations
+/// @param answers - the row's correlated subquery answers
+/// @param after - the row image, completed in place
+fn convert_after(
+    space: &RowSpace,
+    generated: &[(usize, Box<dyn Eval>)],
+    declarations: &WriteDeclarations,
+    answers: &[OwnedDatum],
+    after: &mut Vec<OwnedDatum>,
+) -> DbResult<()> {
+    if !generated.is_empty() {
+        declarations.apply_affinity(after);
+    }
+    for (slot, eval) in generated {
+        let value = space.evaluate_with(eval.as_ref(), &[after.as_slice()], answers)?;
+        if let Some(cell) = after.get_mut(*slot) {
+            *cell = value;
+        }
+    }
+    declarations.apply_affinity(after);
+    Ok(())
+}
+
 /// Answers every prepared correlated block against one row image.
 ///
 /// @param correlated - the prepared blocks

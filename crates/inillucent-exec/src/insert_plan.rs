@@ -20,6 +20,7 @@ use inillucent_sql::catalog_view::TableInfo;
 use inillucent_sql::dml::{codes, BoundInsert, ColumnSource};
 use inillucent_tree::datum::OwnedDatum;
 
+use crate::declared::WriteDeclarations;
 use crate::dml::{CompiledUpsert, Row, RowSpace};
 use crate::expr::Eval;
 use crate::physical::{Params, SourceLayout, TreeCatalog};
@@ -305,6 +306,44 @@ impl InsertPlan {
         // The generated columns, now that the rest of the row exists.
         self.apply_generated(space, &mut row, &[])?;
         Ok(row)
+    }
+
+    /// Applies the table's affinity to a row image and then computes its
+    /// stored generated columns from the converted values.
+    ///
+    /// **The stored generated columns again, from the converted row.** SQLite
+    /// applies the table's affinity to the ordinary columns before it computes
+    /// a generated one, so `a || 'x'` over an `INTEGER` column given `' 7'` is
+    /// `'7x'`: it reads the 7 that is stored. `build_row` computed them from the
+    /// value as supplied, which gave `' 7x'`. They are computed there as well
+    /// because the `BEFORE` triggers read the image. The second affinity pass
+    /// converts the generated values.
+    ///
+    /// @param declarations - the table's compiled declarations
+    /// @param space - the row space the expressions read
+    /// @param row - the row image, converted in place
+    pub(crate) fn convert(
+        &self,
+        declarations: &WriteDeclarations,
+        space: &RowSpace,
+        row: &mut [OwnedDatum],
+    ) -> DbResult<()> {
+        declarations.apply_affinity(row);
+        if self.has_stored_generated() {
+            self.apply_generated(space, row, &[])?;
+            declarations.apply_affinity(row);
+        }
+        Ok(())
+    }
+
+    /// Reports whether the table has a `STORED` generated column to compute.
+    ///
+    /// Lets the insert path skip its second affinity pass for every other
+    /// table.
+    pub(crate) fn has_stored_generated(&self) -> bool {
+        self.columns.iter().any(|planned| {
+            planned.slot.is_some() && matches!(planned.from, PlannedValue::Generated(_))
+        })
     }
 
     /// Recomputes every `STORED` generated column against a row.

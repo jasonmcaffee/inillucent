@@ -841,8 +841,18 @@ fn char_of(arguments: &[Value<'static>]) -> Value<'static> {
 }
 
 /// `unicode(x)`, which returns the first code point.
+///
+/// SQLite reads the value as a NUL terminated string and answers NULL when its
+/// first byte is zero, so `unicode(char(0, 65))` and `unicode(x'00ff')` are
+/// NULL there, not 0.
+///
+/// @param value - the argument
+/// @param encoding - the database's text encoding
 fn unicode(value: &Value<'_>, encoding: TextEncoding) -> Value<'static> {
     let bytes = eval::text_bytes(value, encoding);
+    if bytes.first() == Some(&0) {
+        return Value::Null;
+    }
     let text = String::from_utf8_lossy(&bytes);
     match text.chars().next() {
         Some(character) => Value::Integer(u32::from(character) as i64),
@@ -923,21 +933,31 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// `replace(text, from, to)`.
+///
+/// The order of the checks is SQLite's: an empty pattern hands the subject
+/// back before the replacement is read, so `replace('0.5', '', NULL)` is
+/// `'0.5'` and not NULL. A NULL subject or pattern is still NULL.
+///
+/// @param arguments - the subject, the pattern and the replacement
+/// @param encoding - the database's text encoding
 fn replace(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'static> {
     let (Some(subject), Some(from), Some(to)) =
         (arguments.first(), arguments.get(1), arguments.get(2))
     else {
         return Value::Null;
     };
-    if subject.is_null() || from.is_null() || to.is_null() {
+    if subject.is_null() || from.is_null() {
         return Value::Null;
     }
     let subject = eval::text_bytes(subject, encoding);
     let from = eval::text_bytes(from, encoding);
-    let to = eval::text_bytes(to, encoding);
     if from.is_empty() {
         return Value::owned_text(&subject).unwrap_or(Value::Null);
     }
+    if to.is_null() {
+        return Value::Null;
+    }
+    let to = eval::text_bytes(to, encoding);
     let mut out = Vec::with_capacity(subject.len());
     let mut index = 0usize;
     while index < subject.len() {
@@ -965,6 +985,12 @@ fn substring(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'sta
     }
     let is_blob = matches!(subject, Value::Blob(_));
     let bytes = eval::text_bytes(subject, encoding);
+    // SQLite reads a blob subject with `sqlite3_value_blob`, which gives no
+    // pointer at all for an empty blob, and answers NULL for that whatever the
+    // start and length are. An empty text subject is still the empty text.
+    if is_blob && bytes.is_empty() {
+        return Value::Null;
+    }
     // A blob counts in bytes and text counts in characters, which is SQLite's
     // rule. Both borrow from `bytes`, so neither allocates per unit.
     let units: Vec<&[u8]> = if is_blob {
@@ -1119,6 +1145,13 @@ fn round(arguments: &[Value<'static>]) -> Value<'static> {
     if !real.is_finite() {
         return Value::Real(real);
     }
+    // **A zero comes back as a positive zero.** SQLite's printf writes a sign
+    // only for a value below zero, so `round(-0.0, 1)` formats `0.0` and reads
+    // back 0.0, where Rust's formatting kept the sign. `round(-0.04, 1)` is
+    // still -0.0 in both, because that value is below zero.
+    if real == 0.0 {
+        return Value::Real(0.0);
+    }
     // **Zero places rounds the number; more places round its decimal text
     // (task-1979, F10).** That is not a nicety: `2.675` as a double is
     // 2.674999999999999822, so scaling it by a hundred and rounding half away
@@ -1141,7 +1174,10 @@ fn round(arguments: &[Value<'static>]) -> Value<'static> {
         }
         // `f64::round` already rounds half away from zero, which is what
         // SQLite's own zero-places branch does with `(sqlite_int64)(r+0.5)`.
-        return Value::Real(scaled.round() / factor);
+        // That branch goes through an integer, so a value that rounds to zero
+        // is a positive zero: `round(-0.4)` is 0.0 there, and adding 0.0 is
+        // what turns Rust's -0.0 into it.
+        return Value::Real(scaled.round() / factor + 0.0);
     }
     let places = usize::try_from(digits).unwrap_or(0);
     match rounded_text(real, places).parse::<f64>() {

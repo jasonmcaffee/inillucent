@@ -819,6 +819,22 @@ impl Accumulator {
     ///
     /// @param value - the value to add
     fn push_numeric(&mut self, value: &Datum<'_>) {
+        // **Text that is an integer is added as an integer.** SQLite's
+        // `sumStep` asks `sqlite3_value_numeric_type`, which applies numeric
+        // affinity to text first, so `sum(a)` over the text `'2'` and `'3'` is
+        // the integer 5. Adding every text value as a double made it 5.0. Text
+        // that is not wholly a number, and every blob, is still added as a
+        // double, which is what SQLite does with them.
+        if let Datum::Text(_) = value {
+            let converted = inillucent_value::affinity::apply_numeric_affinity(
+                inillucent_value::value::Value::from(value),
+                false,
+            );
+            if let inillucent_value::value::Value::Integer(number) = converted {
+                self.push_numeric(&Datum::Int(number));
+                return;
+            }
+        }
         match value {
             Datum::Int(number) if !self.is_real => match self.integer_sum.checked_add(*number) {
                 Some(total) => self.integer_sum = total,

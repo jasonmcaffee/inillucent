@@ -191,6 +191,33 @@ pub fn from_blob(blob: &[u8]) -> DbResult<Node> {
     Ok(node)
 }
 
+/// Reports whether a blob's outer header says it could be JSONB.
+///
+/// This is SQLite's `jsonFuncArgMightBeBinary`, the test `json_quote` and the
+/// functions that store a value into a document apply to a blob they were not
+/// told is JSON. It reads only the first header: the type must be one of the
+/// thirteen, the header and its payload must cover the blob exactly, and
+/// `null`, `true` and `false` must have no payload. So `json_quote(x'00')` is
+/// the document `null`, and `json_quote(x'ff')` is still the error a blob
+/// with no JSON spelling gets.
+///
+/// @param blob - the blob
+pub fn might_be_binary(blob: &[u8]) -> bool {
+    let Some(first) = blob.first() else {
+        return false;
+    };
+    if first & 0x0f > TYPE_OBJECT {
+        return false;
+    }
+    let Ok(header) = read_header(blob, 0) else {
+        return false;
+    };
+    if header.end(0) != blob.len() {
+        return false;
+    }
+    !(header.kind <= TYPE_FALSE && header.payload_size > 0)
+}
+
 /// Reports whether a blob is a well-formed JSONB document.
 pub fn is_valid(blob: &[u8]) -> bool {
     from_blob(blob).is_ok()

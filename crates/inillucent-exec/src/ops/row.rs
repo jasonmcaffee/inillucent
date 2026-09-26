@@ -17,6 +17,11 @@ pub struct Filter {
     predicate: Box<dyn Eval>,
     downstream: Box<dyn Sink>,
     pub(crate) selection: Vec<u32>,
+    /// Whether the predicate reads no column of the rows it filters, and so
+    /// is evaluated once at the end when no row arrived.
+    constant: bool,
+    /// Whether any batch has arrived since the last reset.
+    saw_rows: bool,
 }
 impl Filter {
     /// Returns a filter over a compiled predicate.
@@ -28,11 +33,34 @@ impl Filter {
             predicate,
             downstream,
             selection: Vec::with_capacity(crate::batch::BATCH_ROWS),
+            constant: false,
+            saw_rows: false,
+        }
+    }
+
+    /// Returns a filter over a predicate that reads no column of the rows.
+    ///
+    /// **Such a predicate is evaluated even when no row arrives.** SQLite
+    /// tests a `WHERE` term that reads no table of its query once, before the
+    /// loop, so a term that fails fails the statement over an empty table:
+    /// `SELECT count(*) FROM e WHERE abs(-9223372036854775808) IS NULL` is
+    /// "integer overflow" there. This filter tested it per row, and with no
+    /// row it answered 0. It is still tested per row when rows arrive, which
+    /// keeps a term such as `random() > 0` a per row test, as SQLite keeps it;
+    /// when none did, `finish` evaluates it once and reports its failure.
+    ///
+    /// @param predicate - the compiled predicate
+    /// @param downstream - what to push the surviving rows into
+    pub fn constant(predicate: Box<dyn Eval>, downstream: Box<dyn Sink>) -> Filter {
+        Filter {
+            constant: true,
+            ..Filter::new(predicate, downstream)
         }
     }
 }
 impl Sink for Filter {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        self.saw_rows = true;
         self.selection.clear();
         for nth in 0..batch.live() {
             // SQL's WHERE keeps a row only when the predicate is definitely
@@ -56,12 +84,18 @@ impl Sink for Filter {
     }
 
     fn finish(&mut self) -> DbResult<()> {
+        if self.constant && !self.saw_rows {
+            // One row with no columns: the predicate reads none.
+            let empty = Batch::new(1, Vec::new());
+            self.predicate.value(&empty, 0)?;
+        }
         self.downstream.finish()
     }
 
     /// Returns this operator and everything below it to its pre-input state.
     fn reset(&mut self) -> DbResult<()> {
         self.selection.clear();
+        self.saw_rows = false;
         self.downstream.reset()
     }
 }

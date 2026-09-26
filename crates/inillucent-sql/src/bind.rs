@@ -3607,6 +3607,16 @@ impl<'a> Binder<'a> {
                 negated.extend_from_slice(text);
                 return Ok(integer_literal(&negated));
             }
+            // A negated real literal is folded the same way, as SQLite's
+            // `codeReal` does. Unary minus on anything else is `0 - x`, and
+            // `0 - 0.0` is a positive zero, so without this `-0.0` would lose
+            // the sign SQLite keeps: `INSERT INTO t VALUES (-0.0)` into an ANY
+            // column of a STRICT table reads back `-0.0`.
+            if let Some(Expr::Literal(Literal::Float(text))) = self.ast.expr(operand) {
+                let parsed =
+                    inillucent_value::numeric::atof(text, inillucent_value::TextEncoding::Utf8);
+                return Ok(BoundExpr::Real(-parsed.value));
+            }
         }
         let operand = Box::new(self.bind_expr(operand)?);
         match op {

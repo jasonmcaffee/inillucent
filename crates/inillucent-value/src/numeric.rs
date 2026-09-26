@@ -84,6 +84,9 @@ pub struct ParsedReal {
     pub digits: usize,
     /// Whether an exponent, if one was written, had digits after it.
     pub exponent_valid: bool,
+    /// Whether a decimal point was read. `syntax` cannot say so once an
+    /// exponent follows the point, and SQLite's return code counts both.
+    pub point: bool,
 }
 
 impl ParsedReal {
@@ -107,20 +110,27 @@ impl ParsedReal {
     /// code is the "looks like a real but has trailing bytes" case, and it
     /// also has the bit set.
     ///
-    ///  - `1`, `2`, `3` - the whole input was an integer, a fraction, or an
-    ///    exponential form;
-    ///  - `-1` - a fraction or an exponential form followed by something else;
+    /// SQLite's `eType` starts at 1 and counts one for a decimal point and one
+    /// for an exponent, so it is 2 for `1.5` and for `1e5`, and 3 only for a
+    /// form with both:
+    ///
+    ///  - `1`, `2`, `3` - the whole input was a number, with neither, one or
+    ///    both of a point and an exponent;
+    ///  - `-1` - a prefix with a point or a complete exponent, followed by
+    ///    something else;
     ///  - `0` - anything else, including text that is not a number at all.
+    ///
+    /// The count matters for the `-1` case. `'1e'` has an exponent with no
+    /// digits, so its `eType` is 2 with the exponent invalid, which is 0 and
+    /// not -1: SQLite's arithmetic reads `'1e' + 0` as the integer 1, and
+    /// `'1.e' + 0`, whose `eType` is 3, as the real 1.0. Counting every
+    /// exponent as 3 made `'1e'` the real case.
     pub fn code(self) -> i32 {
-        let kind = match self.syntax {
-            RealSyntax::NotNumeric => return 0,
-            RealSyntax::Integer => 1,
-            RealSyntax::Fractional => 2,
-            RealSyntax::Exponential => 3,
-        };
-        if self.digits == 0 {
+        if self.syntax == RealSyntax::NotNumeric || self.digits == 0 {
             return 0;
         }
+        let exponent = self.syntax == RealSyntax::Exponential;
+        let kind = 1 + i32::from(self.point) + i32::from(exponent);
         if self.complete {
             return kind;
         }
@@ -293,14 +303,25 @@ fn compare_to_two_pow_63(digits: &[u8]) -> std::cmp::Ordering {
 }
 
 /// Reads a double out of text, as `sqlite3AtoF` does.
+///
+/// **The text ends at its first NUL.** SQLite's scanner reads a NUL as the end
+/// of the string, so `'12' || x'00'` is the complete integer 12 to it: stored
+/// in a NUMERIC column it becomes the integer 12, and `('-1.75' || x'00ff') - 0`
+/// is -1.75. `atoi64` does not stop there, and SQLite's does not either, which
+/// is why `('12' || x'00') + 1` is the real 13.0 in 3.53.4: this scanner calls
+/// the text a complete integer and the integer scanner finds trailing bytes.
+///
+/// @param bytes - the text, in `encoding`
+/// @param encoding - how the text is encoded
 pub fn atof(bytes: &[u8], encoding: TextEncoding) -> ParsedReal {
-    let (text, non_ascii) = ascii_view(bytes, encoding);
+    let (text, non_ascii) = ascii_view(before_nul(bytes, encoding), encoding);
     let not_a_number = ParsedReal {
         value: 0.0,
         syntax: RealSyntax::NotNumeric,
         complete: false,
         digits: 0,
         exponent_valid: true,
+        point: false,
     };
     if text.is_empty() {
         return not_a_number;
@@ -346,9 +367,11 @@ pub fn atof(bytes: &[u8], encoding: TextEncoding) -> ParsedReal {
     }
 
     let mut exponent_valid = true;
+    let mut point = false;
     if text.get(index) == Some(&b'.') {
         index = index.saturating_add(1);
         syntax = RealSyntax::Fractional;
+        point = true;
         while text.get(index).copied().is_some_and(is_digit) {
             if significand < SIGNIFICAND_CEILING {
                 let digit = i64::from(text.get(index).copied().unwrap_or(b'0').wrapping_sub(b'0'));
@@ -407,6 +430,28 @@ pub fn atof(bytes: &[u8], encoding: TextEncoding) -> ParsedReal {
         complete,
         digits: digit_count,
         exponent_valid,
+        point,
+    }
+}
+
+/// Returns the text up to its first NUL character.
+///
+/// In UTF-16 the NUL is a code unit of two zero bytes at an even offset, so a
+/// character such as U+0100, whose low byte is zero, does not end the text.
+///
+/// @param bytes - the text, in `encoding`
+/// @param encoding - how the text is encoded
+fn before_nul(bytes: &[u8], encoding: TextEncoding) -> &[u8] {
+    let end = match encoding {
+        TextEncoding::Utf8 => bytes.iter().position(|byte| *byte == 0),
+        TextEncoding::Utf16Le | TextEncoding::Utf16Be => bytes
+            .chunks_exact(2)
+            .position(|unit| unit == [0, 0])
+            .map(|unit| unit.saturating_mul(2)),
+    };
+    match end {
+        Some(end) => bytes.get(..end).unwrap_or(bytes),
+        None => bytes,
     }
 }
 
@@ -713,8 +758,15 @@ mod tests {
         assert_eq!(code("123"), 1);
         assert_eq!(code("  123  "), 1);
         assert_eq!(code("1.5"), 2);
-        assert_eq!(code("1e18"), 3);
-        assert_eq!(code("1E18"), 3);
+        assert_eq!(code("1e18"), 2);
+        assert_eq!(code("1E18"), 2);
+        assert_eq!(code("1.5e18"), 3);
+        // An exponent with no digits leaves an integer prefix: 0, not -1.
+        assert_eq!(code("1e"), 0);
+        assert_eq!(code("1.e"), -1);
+        // A NUL ends the text, so what follows it is not trailing bytes.
+        assert_eq!(code("12\0x"), 1);
+        assert_eq!(code("-1.75\0"), 2);
         assert_eq!(code("abc"), 0);
         assert_eq!(code(""), 0);
         // Integer syntax with trailing bytes is not a number at all.

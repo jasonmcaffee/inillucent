@@ -154,8 +154,9 @@ fn real_node(value: f64) -> Node {
 ///
 /// This is the other half of the subtype rule. Unmarked text becomes a JSON
 /// string; marked text is a document and is embedded. An unmarked blob has no
-/// JSON spelling at all and is an error, which is the message applications see
-/// when they pass a `zeroblob` to `json_array` by accident.
+/// JSON spelling unless its header says it could be JSONB, and is otherwise an
+/// error, which is the message applications see when they pass a `zeroblob` to
+/// `json_array` by accident.
 fn stored(argument: &Argument<'_>, raw: bool) -> DbResult<Node> {
     match argument.value {
         Value::Null => Ok(Node::Null),
@@ -163,7 +164,7 @@ fn stored(argument: &Argument<'_>, raw: bool) -> DbResult<Node> {
         Value::Real(value) => Ok(real_node(*value)),
         Value::Blob(blob) => {
             if !argument.json {
-                return Err(failure("JSON cannot hold BLOB values"));
+                return unmarked_blob(blob.raw());
             }
             binary::from_blob(blob.raw())
         }
@@ -671,13 +672,28 @@ fn quote(arguments: &[Argument<'_>]) -> DbResult<Answer> {
         Value::Null => Node::Null,
         Value::Integer(value) => Node::Int(value.to_string()),
         Value::Real(value) => real_node(*value),
-        Value::Blob(_) => return Err(failure("JSON cannot hold BLOB values")),
+        Value::Blob(blob) => unmarked_blob(blob.raw())?,
         Value::Text(text) => {
             let bytes = text.utf8_bytes();
             Node::text_escaped(std::str::from_utf8(&bytes).map_err(|_| malformed())?)
         }
     };
     answer(&node, false)
+}
+
+/// Reads a blob that was not marked as JSON, as a value to quote or store.
+///
+/// SQLite reads such a blob as JSONB when its outer header says it could be
+/// one, and fails with "JSON cannot hold BLOB values" only when it could not.
+/// Failing for every blob made `json_quote(x'00')` an error where SQLite
+/// answers `null`, because `x'00'` is the JSONB encoding of `null`.
+///
+/// @param blob - the blob's bytes
+fn unmarked_blob(blob: &[u8]) -> DbResult<Node> {
+    if !binary::might_be_binary(blob) {
+        return Err(failure("JSON cannot hold BLOB values"));
+    }
+    binary::from_blob(blob)
 }
 
 /// Folds one value into a `json_group_array` accumulator.
@@ -793,6 +809,23 @@ mod tests {
     fn an_unmarked_blob_is_refused() {
         let blob = Value::owned_blob(b"ab").expect("a blob");
         assert!(run(JsonFunc::Array, &[blob]).is_err());
+    }
+
+    /// An unmarked blob whose header could be JSONB is read as JSONB, as
+    /// SQLite does: `x'00'` is `null`, and `x'ff'` has no such header.
+    #[test]
+    fn an_unmarked_blob_with_a_jsonb_header_is_read_as_jsonb() {
+        let null = Value::owned_blob(&[0x00]).expect("a blob");
+        assert_eq!(
+            rendered(&run(JsonFunc::Quote, &[null.clone()]).expect("succeeds")),
+            "null"
+        );
+        assert_eq!(
+            rendered(&run(JsonFunc::Array, &[null]).expect("succeeds")),
+            "[null]"
+        );
+        let not_jsonb = Value::owned_blob(&[0xff]).expect("a blob");
+        assert!(run(JsonFunc::Quote, &[not_jsonb]).is_err());
     }
 
     /// Several paths answer an array, and one answers the element.

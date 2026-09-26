@@ -339,114 +339,32 @@ pub(crate) fn generic_arith<'p>(
 
 /// Returns a value as the number SQLite's arithmetic reads it as.
 ///
-/// An integer or a real stays what it is; a text or blob becomes an integer
-/// when its numeric prefix is integral and fits, a real when it is not, and the
-/// integer zero when there is no numeric prefix at all - which is what makes
-/// `x'00' + x'00'` an integer.
+/// An integer or a real stays what it is, and a text or blob gets the class
+/// [`inillucent_value::cast::arithmetic_number`] gives it, which is SQLite's
+/// `computeNumericType`. That one function is shared with the operators this
+/// module does not specialise (`/`, `%` and unary minus in
+/// `inillucent_scalar::eval`), so the two cannot give `'abc' + 1` and
+/// `'abc' / 1` different classes.
+///
+/// **This had its own prefix scanner, which read the text as UTF-8** and
+/// answered zero for anything that was not valid UTF-8. Text made by
+/// concatenating a blob usually is not: `('-1.75' || x'00ff') - 0` was 0 where
+/// SQLite answers -1.75.
 ///
 /// @param value - the operand
 fn numeric_datum<'p>(value: &Datum<'_>) -> Datum<'p> {
-    let (Datum::Text(bytes) | Datum::Blob(bytes)) = value else {
-        return match value {
-            Datum::Int(number) => Datum::Int(*number),
-            Datum::Real(number) => Datum::Real(*number),
-            _ => Datum::Null,
-        };
-    };
-    if let Some(number) = prefix_integer(bytes) {
-        return Datum::Int(number);
-    }
-    Datum::Real(prefix_number(bytes))
-}
-
-/// Returns the numeric prefix as an integer, when it is one.
-///
-/// `None` when the prefix is a real - a point with a digit on one side of it,
-/// or a complete exponent - and `Some(0)` when there is no number at the front
-/// at all, which is what SQLite reads `'abc' + 0` as.
-///
-/// **The shape is read before it is judged (task-1979, F3).** The scan this
-/// replaces refused a point or an exponent only *after* it had seen a digit,
-/// so a leading point was not a point at all: `'.5'` fell out of the loop with
-/// nothing read and came back as the integer zero, and every leading-dot
-/// numeral in arithmetic did the same - `'.5'+0` was 0 where SQLite says 0.5.
-/// It also read `'1e'` as a real, because it stopped at the `e` and handed the
-/// rest to the real parser; SQLite reads the exponent as incomplete, so the
-/// prefix ends at the `1` and the answer is the integer 1.
-///
-/// Checked against the pinned 3.53.4 for each shape: `'1.'+0` is 1.0 real,
-/// `'.'+0` is 0 integer, `'1e'+0` and `'1e+'+0` are 1 integer, `'.5e'+0` is 0.5
-/// real, `'1abc'+0` is 1 integer, `'1e2'+0` is 100.0 real.
-///
-/// @param bytes - the string to read
-fn prefix_integer(bytes: &[u8]) -> Option<i64> {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return Some(0);
-    };
-    let raw = text.as_bytes();
-    let mut at = 0usize;
-    while raw
-        .get(at)
-        .copied()
-        .is_some_and(|byte| byte == b' ' || byte.is_ascii_whitespace())
-    {
-        at = at.saturating_add(1);
-    }
-    let began = at;
-    if matches!(raw.get(at), Some(b'+') | Some(b'-')) {
-        at = at.saturating_add(1);
-    }
-    let before = digits_from(raw, &mut at);
-    // A point is part of the number only when a digit sits on one side of it.
-    // `'.'` on its own is not a number, which is why the count is taken before
-    // the decision.
-    let mut fractional = false;
-    if raw.get(at) == Some(&b'.') {
-        let mut after_point = at.saturating_add(1);
-        let after = digits_from(raw, &mut after_point);
-        if before.saturating_add(after) > 0 {
-            fractional = true;
-            at = after_point;
+    match value {
+        Datum::Int(number) => Datum::Int(*number),
+        Datum::Real(number) => Datum::Real(*number),
+        Datum::Null => Datum::Null,
+        Datum::Text(_) | Datum::Blob(_) => {
+            match inillucent_value::cast::arithmetic_number(&Value::from(value)) {
+                Value::Integer(number) => Datum::Int(number),
+                Value::Real(number) => Datum::Real(number),
+                _ => Datum::Int(0),
+            }
         }
     }
-    if before == 0 && !fractional {
-        // No number at all, which SQLite reads as the integer zero.
-        return Some(0);
-    }
-    // An exponent counts only when it has at least one digit of its own;
-    // without one the number ends before the `e`.
-    if matches!(raw.get(at), Some(b'e') | Some(b'E')) {
-        let mut after_e = at.saturating_add(1);
-        if matches!(raw.get(after_e), Some(b'+') | Some(b'-')) {
-            after_e = after_e.saturating_add(1);
-        }
-        let mut counting = after_e;
-        if digits_from(raw, &mut counting) > 0 {
-            return None;
-        }
-    }
-    if fractional {
-        return None;
-    }
-    text.get(began..at)
-        .and_then(|prefix| prefix.parse::<i64>().ok())
-}
-
-/// Advances past a run of ASCII digits and returns how many there were.
-///
-/// @param raw - the bytes being read
-/// @param at - the position, moved past the digits
-fn digits_from(raw: &[u8], at: &mut usize) -> usize {
-    let mut counted = 0usize;
-    while raw
-        .get(*at)
-        .copied()
-        .is_some_and(|byte| byte.is_ascii_digit())
-    {
-        *at = at.saturating_add(1);
-        counted = counted.saturating_add(1);
-    }
-    counted
 }
 
 /// Arithmetic over anything.
@@ -711,47 +629,13 @@ pub fn numeric(value: &Datum<'_>) -> f64 {
 
 /// Reads the longest numeric prefix of a byte string, as SQLite does.
 ///
+/// This is `sqlite3AtoF` through [`inillucent_value::numeric::atof`], which
+/// reads the bytes as they are. The scanner this replaces refused text that
+/// was not valid UTF-8 and answered 0.0 for it, whatever number it began with.
+///
 /// @param bytes - the string to read
 fn prefix_number(bytes: &[u8]) -> f64 {
-    let text = match std::str::from_utf8(bytes) {
-        Ok(text) => text.trim_start(),
-        Err(_) => return 0.0,
-    };
-    let raw = text.as_bytes();
-    let mut at = 0usize;
-    if matches!(raw.get(at), Some(b'+') | Some(b'-')) {
-        at = at.saturating_add(1);
-    }
-    let before = digits_from(raw, &mut at);
-    let mut after = 0usize;
-    if raw.get(at) == Some(&b'.') {
-        let mut after_point = at.saturating_add(1);
-        after = digits_from(raw, &mut after_point);
-        if before.saturating_add(after) > 0 {
-            at = after_point;
-        }
-    }
-    if before.saturating_add(after) == 0 {
-        return 0.0;
-    }
-    // **An exponent counts only when it has a digit of its own (task-1979,
-    // F3).** The scan this replaces accepted a trailing `e`, so `'.5e'` came
-    // back as the four bytes `.5e`, which `parse::<f64>` refuses - and the
-    // fallback answered 0.0 for a string whose numeric prefix is 0.5. SQLite
-    // ends the number before an exponent it cannot complete.
-    if matches!(raw.get(at), Some(b'e') | Some(b'E')) {
-        let mut after_e = at.saturating_add(1);
-        if matches!(raw.get(after_e), Some(b'+') | Some(b'-')) {
-            after_e = after_e.saturating_add(1);
-        }
-        let mut counting = after_e;
-        if digits_from(raw, &mut counting) > 0 {
-            at = counting;
-        }
-    }
-    text.get(..at)
-        .and_then(|prefix| prefix.parse::<f64>().ok())
-        .unwrap_or(0.0)
+    inillucent_value::numeric::atof(bytes, inillucent_value::TextEncoding::Utf8).value
 }
 
 /// Renders a double the way the dialect's text conversion does.
@@ -1077,6 +961,8 @@ mod tests {
         assert_eq!(prefix_number(b"."), 0.0);
         assert_eq!(prefix_number(b"1.2.3"), 1.2);
         assert_eq!(prefix_number(b"+7"), 7.0);
+        // Bytes that are not UTF-8 after the number do not hide it.
+        assert_eq!(prefix_number(b"-1.75\x00\xff"), -1.75);
     }
 
     /// A bare column reference reports which column it is, so the aggregate

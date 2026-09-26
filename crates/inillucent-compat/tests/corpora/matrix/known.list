@@ -233,29 +233,18 @@ update-4ef2683419b0	34	UPDATE ... FROM over a table with an index on a column th
 update-6fef6d29ac84	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
 update-ecd76ed72594	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
 compound-values-order	36	An ORDER BY after a VALUES arm of several rows is accepted where SQLite refuses it.
-compound-0364d7c812d7	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-04962724de19	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-0c7d030f2a49	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-71b2c66d8196	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-399586159851	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-3b3e6b5a9cd9	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-9282db63543f	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-bbe4e2ae65a3	37	A STRICT table's ANY column converts text that looks like a number into a number.
-update-3e63718215bd	37	A STRICT table's ANY column converts text that looks like a number into a number.
-ddl_index-1b6fce0c9265	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-c5978c6cf3ab	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 ddl_view-5bb6734f4135	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 ddl_view-f3ba8519d974	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-delete-4ba69b8726dd	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-f83e2eb6accd	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-update-0bb9b2ba0377	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 ddl_view-1644fad59dd0	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
 ddl_view-2364343b8236	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
 ddl_view-2b4128272c38	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
 ddl_view-37cf5d6cfa1d	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
 ddl_view-76eaa8a82a2c	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
 ddl_view-771de28793d4	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
-ddl_table-390042c209da	41	A generated column is computed from the value before its source column's type converts it.
 maintenance-0c90a3ac751f	42	VACUUM fails on a table with a STORED generated column.
 maintenance-cd55551515df	42	VACUUM fails on a table with a STORED generated column.
 delete-bc5389dc988e	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
@@ -292,27 +281,20 @@ retained-bug-22-analyze-schema	22	The smallest case for bug 22.
 retained-bug-23-ctas-with	23	The smallest case for bug 23.
 retained-bug-26-deferred-fk	26	The smallest case for bug 26.
 retained-bug-27-right-join	27	The smallest case for bug 27.
-retained-bug-28-sum-text	28	The smallest case for bug 28.
 retained-bug-29-stat1-empty	29	The smallest case for bug 29.
 retained-bug-30-pragma-function	30	The smallest case for bug 30.
 retained-bug-31-unique-without-rowid	31	The smallest case for bug 31.
 retained-bug-33-match-derived	33	The smallest case for bug 33.
 retained-bug-34-update-from-partial-index	34	The smallest case for bug 34.
-retained-bug-35-unread-column	35	The smallest case for bug 35.
-retained-bug-37-strict-any	37	The smallest case for bug 37.
-retained-bug-38-negative-zero	38	The smallest case for bug 38.
 retained-bug-39-groups-offset	39	The smallest case for bug 39.
 retained-bug-40-view-type	40	The smallest case for bug 40.
-retained-bug-41-generated-before-type	41	The smallest case for bug 41.
 retained-bug-42-vacuum-generated	42	The smallest case for bug 42.
 retained-bug-43-returning-virtual-table	43	The smallest case for bug 43.
 retained-bug-43-upsert-virtual-table	43	The smallest case for bug 43.
 retained-bug-44-insert-ignore-fts	44	The smallest case for bug 44.
 retained-bug-45-or-rollback-virtual-table	45	The smallest case for bug 45.
 retained-bug-46-shadow-tables	46	The smallest case for bug 46.
-retained-bug-47-real-remainder	47	The smallest case for bug 47.
 retained-bug-48-upsert-target	48	The smallest case for bug 48.
-retained-bug-49-range-over-text	49	The smallest case for bug 49.
 retained-bug-50-strict-primary-key	50	The smallest case for bug 50.
 capability-changing-a-schema-row	51	UPDATE sqlite_schema without writable_schema fails with code 21 where SQLite fails with code 1.
 pragma-temp-store-directory	52	PRAGMA temp_store_directory answers no column where SQLite answers a temp_store_directory column with no rows.
@@ -338,16 +320,8 @@ syntax-delete-stmt-p3@batch	54	execute_batch runs a statement with RETURNING wit
 retained-bug-51-schema-update-code	51	The smallest case for bug 51.
 retained-bug-52-store-directory	52	The smallest case for bug 52.
 retained-bug-54-batch-returning@batch	54	The smallest case for bug 54.
-retained-bug-55-unicode-of-nul	55	The smallest case for bug 55.
-retained-bug-56-negating-text	56	The smallest case for bug 56.
-retained-bug-57-division-by-text	57	The smallest case for bug 57.
 retained-bug-58-seek-union-join	58	The smallest case for bug 58.
-retained-bug-59-failing-constant	59	The smallest case for bug 59.
-retained-bug-60-substr-of-empty-blob	60	The smallest case for bug 60.
-retained-bug-61-replace-empty-pattern	61	The smallest case for bug 61.
 retained-bug-62-virtual-table-update-from-row	62	The smallest case for bug 62.
-retained-bug-63-json-quote-blob	63	The smallest case for bug 63.
-retained-bug-64-collate-on-json-each	64	The smallest case for bug 64.
 retained-bug-65-wide-table-small-page	65@small-pool,sqlite-page	The smallest case for bug 65.
 retained-bug-66-changes-after-failed-from	66	The smallest case for bug 66.
 window-74449de1b5ba	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
@@ -605,8 +579,6 @@ join-c4fd26c402a9	27	A RIGHT or FULL JOIN puts the right table's values in the l
 join-d657682d8a16	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
 join-064bc1d02aaf	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
 join-ce3e1dd451df	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-function-bb650048102f	28	sum() over text holding integers returns a real where SQLite returns an integer.
-function-0f628af25f99	28	sum() over text holding integers returns a real where SQLite returns an integer.
 function-91503b177814	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 join-10fda17974a3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 join-7b632a93dc37	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
@@ -644,10 +616,8 @@ window-89ef43d1b7f9	32	A correlated subquery reading a column the joined row doe
 window-cb49fd29642c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 window-2f6dd5c8d5b2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 window-077cfe314ec0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-a0c918ebb7d5	35	An error in a result column the outer query does not read fails the statement.
 function-7aba340fa062	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
 function-62bf8374420a	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-select-e54294d81d26	37	A STRICT table's ANY column converts text that looks like a number into a number.
 cte-37065638322b	37	A STRICT table's ANY column converts text that looks like a number into a number.
 cte-67a79e7a3a16	37	A STRICT table's ANY column converts text that looks like a number into a number.
 cte-296598539dc1	37	A STRICT table's ANY column converts text that looks like a number into a number.
@@ -656,15 +626,8 @@ cte-413f4ec208f6	37	A STRICT table's ANY column converts text that looks like a 
 cte-a6a6a75f6dce	37	A STRICT table's ANY column converts text that looks like a number into a number.
 cte-eebe2416ebbc	37	A STRICT table's ANY column converts text that looks like a number into a number.
 cte-d92b9d6acd26	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-8206eccf8295	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-effa8af166e8	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-b71eda42930d	37	A STRICT table's ANY column converts text that looks like a number into a number.
 function-ef3d1ca82e72	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 window-1750d8e34d0a	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-expression-791beddca2fc	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-ba83140e44e5	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-941d0bd96d48	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-window-fc355d3b0cf1	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
 function-8c464b79147b	63	json_quote() of a blob fails where SQLite returns the JSON text null.
 constraint-0363a7224b87	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 constraint-0565b761a794	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
@@ -6420,4 +6383,3 @@ constraint-bab07571f5db	66	changes() after an UPDATE ... FROM or INSERT ... SELE
 constraint-05ad544170ba	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 function-ddb471ea2153	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 function-1dafb9cd4199	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
-retained-bug-67-text-with-nul	67	The smallest case for bug 67.
