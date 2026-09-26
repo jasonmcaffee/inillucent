@@ -530,161 +530,9 @@ expression-ba83140e44e5	47	The remainder of a real by an integer is an integer w
 expression-941d0bd96d48	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 window-fc355d3b0cf1	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
 function-8c464b79147b	63	json_quote() of a blob fails where SQLite returns the JSON text null.
-constraint-0363a7224b87	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-0565b761a794	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-1e9cc0a0b8e2	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-2c433321c580	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-2dce3c6c2088	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-3536c990eb0b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-368d097a8070	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-36a83f7a2666	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-3812653b57f1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-383c02aa8b82	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-3be799a2f0da	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-405550efd0ba	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-45b28e0a8c16	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-4ab08cc7d841	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-4ebd7a7b464a	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-54aeb315258f	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-5684825b18e5	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-58291f416ffe	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-596420d6f5d4	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-5e794dc16ca7	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-75b3f9bf2a06	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-84ffba1ce84c	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-882122041502	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-88e363ec538b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-9002d755cc49	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-96abfbe7333d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-a8f3d677f586	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-a98d51ac40d3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-aca9fe79ff6d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-adab012cc9d9	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-b153fe9517e6	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-b69ef0c93d55	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-b6d7ff708ec5	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-b7daf85264e5	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-bb086959e081	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-c42bef1a07b8	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-c732f1c628fb	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-c85d83ea7e57	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-cbc4a91b46fb	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-d8208a7224ef	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-db1ab22c4c78	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-03b027c7c267	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-0401f2cfc39c	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-0739c5b533cc	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-0a3b39256137	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-0d1105c8db48	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-1b53349a60bf	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-1fb1cb7b7e51	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-25d1a11354b9	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-266ada9ba9a2	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-3bc11d8b4785	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-47d94ee8c175	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-4fe559ceeaa3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-500c6adcd4bb	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-586ec2990eac	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-5a3f80b09b02	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-655fcd0146ca	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-66065fd78e12	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 constraint-690285108c13	1	A transaction misuse fails with code 21 where SQLite gives 1.
-constraint-6ab12d5e7a22	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-6bc0ec5ff6ac	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-76daf26313e0	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-7bf3244b61da	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-7c41f688a5d5	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-7e1323e6bb7a	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-810176089e3d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-8405d5211776	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-8532b0d8783d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-88070ea4a0df	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-89a9268ba143	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-8b83af3d36df	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-90f6a02345a7	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-a4aa5ef19a8b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-b49d471136b1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-b94860c04b11	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-d139ba8a6d4e	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-d155a8381b22	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 constraint-dc38cbee1a45	1	A transaction misuse fails with code 21 where SQLite gives 1.
-constraint-decbd4ed44da	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-e2e243833bba	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-f17d6a15d810	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-f6607cdc534c	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-f7b021b1a9a6	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-0a310436bfb2	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-12201c9d33e3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-13f086a0004e	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-15b38ad62862	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-19ad00b6d124	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-1e08287e9c55	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-23dd9921ff20	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-24b43a6a11ed	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-25dacc123932	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-37e07aa230f9	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-385179b68889	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-45c58ae15025	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-47f907e942e6	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-57f8e4afb1e6	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-5ad8646e4e8d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-69cff51d51b6	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-741f5527934e	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-79d60b3ef28b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-7be024788fc2	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 constraint-7f13864f6326	1	A transaction misuse fails with code 21 where SQLite gives 1.
-constraint-7f28431bf8a0	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-8668df9d69c1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-888fa0b64425	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-8e0ee46d7374	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-8e7fc000c7a0	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-907492a52c1e	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-90b164d0b77d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-a409d64f161b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-a503b1bccaef	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-aba6326af70c	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-be04a2c469c3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-ce782ed36078	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-e46078836abd	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-ea173a894719	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-ea68004e1ba5	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-ff77243fe63a	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-0e2fcdcd12b3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-17e28ec187e5	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-27acd2a034fb	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-2b0eb3e33871	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-321c20fd3f38	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-39a5cc699c91	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-490a99cb4ed1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-4a65876c5b80	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-4aa188351702	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-5f37f2fdcc8f	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-650826861cd8	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-6976d96bdbb8	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-6c0601e9c013	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-6c557fa5c1ba	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-72f10f9a3b5e	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-72fa31c0fd55	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-7994141fc37c	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-7a3cf9b4e53a	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-7cd26a5cc111	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-7e07d4bde858	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-88d037e26f0f	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-88f93c8849e2	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-89ad9974098e	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-8b6baf2f36fc	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-936f04221891	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-9fb03c855b6b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-a75767f5b1b2	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-ab745302d106	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-b55352cd3f92	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-c7c8ec2a67e7	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-c9865a80c7dc	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-d1f5a8265ce3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-ded09dcba898	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-e826c847c76d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-ef73026ba4b1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-fbd05072a6c1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 insert-5aa1dfe0b5fb	1	A transaction misuse fails with code 21 where SQLite gives 1.
 insert-10da80761533	1	A transaction misuse fails with code 21 where SQLite gives 1.
 insert-c501d978b033	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
@@ -693,9 +541,6 @@ insert-a64443b3091f	1	COMMIT or ROLLBACK with no transaction fails with result c
 insert-b0ce0f9e9a98	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 insert-d40a3e91040d	1	A transaction misuse fails with code 21 where SQLite gives 1.
 ddl_index-9d12f13af767	6	CREATE UNIQUE INDEX over duplicate values fails with code 21 where SQLite gives 19.
-constraint-1787443fef02	7	A DELETE refused by ON DELETE RESTRICT reports extended code 787 where SQLite reports 1811.
-constraint-02b3768bbfac	7	A DELETE refused by ON DELETE RESTRICT reports extended code 787 where SQLite reports 1811.
-constraint-5c0061b64571	7	A DELETE refused by ON DELETE RESTRICT reports extended code 787 where SQLite reports 1811.
 ddl_table-00be720d8e3c	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 ddl_table-0cb36e2c925c	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 ddl_table-1924d8f3ad92	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
@@ -762,9 +607,6 @@ function-3aeccbee7d9e	9	last_insert_rowid() after a statement whose trigger fail
 function-61916351cd50	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
 function-17232e51861f	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
 function-e16acbdaca74	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
-constraint-defff6747126	10	last_insert_rowid() counts a row the INSERT skipped.
-constraint-3fef0046730d	10	last_insert_rowid() counts a row the INSERT skipped.
-constraint-f902d7289ee0	10	last_insert_rowid() counts a row the INSERT skipped.
 ddl_index-1c429e241ce3	10	last_insert_rowid() counts a row the INSERT skipped.
 ddl_index-7c058cee5bb4	10	last_insert_rowid() counts a row the INSERT skipped.
 ddl_table-8d326329c6a8	10	last_insert_rowid() counts a row the INSERT skipped.

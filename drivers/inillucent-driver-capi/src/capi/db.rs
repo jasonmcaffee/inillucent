@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::ffi::{c_char, CString};
 use std::rc::Rc;
 
-use inillucent_driver::{Database, Error, OpenOptions, Status};
+use inillucent_driver::{CancelHandle, Database, Error, OpenOptions, Status};
 
 use crate::capi::error::*;
 use crate::capi::value::*;
@@ -21,6 +21,15 @@ pub struct inillucent_db {
     live: Live,
     /// The driver's database.
     pub(crate) database: Database,
+    /// The flag [`inillucent_cancel`] sets, taken when the database opened.
+    ///
+    /// **The one thing a cancel touches.** A cancel arrives on another thread
+    /// while a statement runs on this one, and `Database` is not `Sync`: it
+    /// holds `Rc`, `RefCell` and `Cell`, which the running statement is using.
+    /// `inillucent_cancel` used to open a connection through it to set the
+    /// flag, which wrote those fields from the second thread. This holds the
+    /// flag alone and is `Send + Sync`.
+    cancel: CancelHandle,
     /// The file, as a C string, so [`inillucent_path`] can hand one back.
     path: CString,
     /// How many connections are open on it.
@@ -154,6 +163,7 @@ pub unsafe extern "C" fn inillucent_open(
                 let held = Box::new(inillucent_db {
                     live: Live::new(inillucent_db::MAGIC),
                     path: c_string(&database.path().display().to_string()),
+                    cancel: database.cancel_handle(),
                     database,
                     connections: Cell::new(0),
                 });
@@ -556,11 +566,10 @@ pub unsafe extern "C" fn inillucent_cancel(
 ) -> i32 {
     guarded("inillucent_cancel", error, || match database_of(conn) {
         None => misused("inillucent_cancel", error),
-        Some(database) => finish(
-            database.database.session_as(session_of(conn)).cancel(),
-            error,
-            false,
-        ),
+        Some(database) => {
+            database.cancel.cancel();
+            INILLUCENT_OK
+        }
     })
 }
 /// Opens a transaction.

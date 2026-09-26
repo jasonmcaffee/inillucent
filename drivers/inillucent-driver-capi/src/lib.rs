@@ -518,4 +518,55 @@ mod tests {
         assert_eq!(unsafe { inillucent_error_status(error) }, INILLUCENT_MISUSE);
         unsafe { inillucent_error_free(error) };
     }
+
+    /// `inillucent_cancel` from a second thread stops the statement the
+    /// first thread is running, and the connection is usable afterwards.
+    ///
+    /// **It used to open a connection through the database to set the flag**,
+    /// which wrote the database's `RefCell` and `Cell` fields from the second
+    /// thread while the first was using them. It sets the flag through a
+    /// `CancelHandle` the handle took at open now, and reads nothing else.
+    #[test]
+    fn a_cancel_from_another_thread_stops_the_running_statement() {
+        let file =
+            std::env::temp_dir().join(format!("inillucent-capi-cancel-{}.rdb", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let path = CString::new(file.display().to_string()).unwrap();
+        let mut db: *mut inillucent_db = std::ptr::null_mut();
+        let mut conn: *mut inillucent_conn = std::ptr::null_mut();
+        let none: *mut *mut inillucent_error = std::ptr::null_mut();
+        let opened =
+            unsafe { inillucent_open(path.as_ptr(), INILLUCENT_OPEN_CREATE, &mut db, none) };
+        assert_eq!(opened, INILLUCENT_OK);
+        assert_eq!(
+            unsafe { inillucent_connect(db, &mut conn, none) },
+            INILLUCENT_OK
+        );
+        let address = conn as usize;
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            unsafe { inillucent_cancel(address as *mut inillucent_conn, std::ptr::null_mut()) }
+        });
+        let long = CString::new(
+            "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c \
+             WHERE n < 100000000) SELECT count(*) FROM c",
+        )
+        .unwrap();
+        let mut rows: *mut inillucent_rows = std::ptr::null_mut();
+        let status = unsafe { inillucent_execute(conn, long.as_ptr(), 1, &mut rows, none) };
+        assert_eq!(canceller.join().unwrap(), INILLUCENT_OK);
+        assert_eq!(status, inillucent_driver::Status::Interrupted as i32);
+        unsafe { inillucent_rows_free(rows) };
+        let one = CString::new("SELECT 1").unwrap();
+        let mut after: *mut inillucent_rows = std::ptr::null_mut();
+        let status = unsafe { inillucent_execute(conn, one.as_ptr(), 1, &mut after, none) };
+        assert_eq!(
+            status, INILLUCENT_OK,
+            "the connection is usable after the cancel"
+        );
+        unsafe { inillucent_rows_free(after) };
+        unsafe { inillucent_conn_free(conn) };
+        assert_eq!(unsafe { inillucent_close(db, none) }, INILLUCENT_OK);
+        let _ = std::fs::remove_file(&file);
+    }
 }

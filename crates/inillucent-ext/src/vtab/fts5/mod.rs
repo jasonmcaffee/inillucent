@@ -342,6 +342,14 @@ const PLAN_ROWID: i32 = 1;
 const PLAN_MATCH: i32 = 2;
 /// The plan bit that says the rows come back ranked.
 const PLAN_RANKED: i32 = 4;
+/// Where a plan keeps the column a `MATCH` was written on, plus one.
+///
+/// **`body MATCH 'ships'` searches one column**, as SQLite's FTS5 does: it
+/// means `{body} : (ships)`. Only the table's own hidden column was accepted,
+/// so a match written on an indexed column was declined, and the engine,
+/// which cannot evaluate `MATCH` itself, refused the statement. The column
+/// travels in the plan number above the three plan bits.
+const PLAN_COLUMN_SHIFT: u32 = 8;
 
 /// One connected FTS5 table.
 struct Fts5Table {
@@ -525,6 +533,14 @@ impl VirtualTable for Fts5Table {
             if constraint.op == ConstraintOp::Match && constraint.column == self.match_column() {
                 query.use_constraint(index, true);
                 plan = PLAN_MATCH;
+                break;
+            }
+            // A match on one indexed column; see `PLAN_COLUMN_SHIFT`.
+            if constraint.op == ConstraintOp::Match
+                && (0..self.match_column()).contains(&constraint.column)
+            {
+                query.use_constraint(index, true);
+                plan = PLAN_MATCH | (constraint.column.saturating_add(1) << PLAN_COLUMN_SHIFT);
                 break;
             }
             // **`docid` is the rowid**, so a predicate on it is a rowid

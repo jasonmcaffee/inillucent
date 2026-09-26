@@ -618,15 +618,16 @@ fn user_collation(path: &Path) -> Result<Option<String>, String> {
     ))
 }
 
-/// A cancel with no statement running cancels nothing: the next statement
-/// runs to the end and the connection stays usable.
+/// A cancel with no statement running cancels nothing, and a cancel from
+/// another thread stops the statement that is running.
 ///
-/// **This is the half of the `cancel` row a Rust caller can reach.** The
-/// driver's `Database` and `Connection` are neither `Send` nor `Sync`, so safe
-/// Rust cannot call `cancel` from another thread while a statement runs, which
-/// is the only time it would stop anything. The C API reaches it through a raw
-/// handle; the matrix links no C API, so the half that stops a running
-/// statement is left to the driver's own suites.
+/// **Both halves of the `cancel` row are reachable from safe Rust now.** The
+/// driver's `Database` and `Connection` are neither `Send` nor `Sync`, so a
+/// connection's `cancel` could only be called between statements, where it
+/// stops nothing. `Database::cancel_handle` hands out the flag alone, which
+/// crosses threads, so the half that stops a running statement is checked
+/// here as well: a count to a hundred million is interrupted, and the
+/// connection answers the statement after it.
 ///
 /// @param path - the database file
 fn cancel(path: &Path) -> Result<Option<String>, String> {
@@ -638,6 +639,27 @@ fn cancel(path: &Path) -> Result<Option<String>, String> {
         return Ok(Some(format!(
             "after a cancel with nothing running, {problem}"
         )));
+    }
+    let handle = database.cancel_handle();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        handle.cancel();
+    });
+    let long = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c \
+                WHERE n < 100000000) SELECT count(*) FROM c";
+    let outcome = connection.query(long, &[], 1);
+    let _ = canceller.join();
+    match outcome {
+        Err(error) if error.status == inillucent_driver::Status::Interrupted => {}
+        Err(error) => return Ok(Some(format!(
+            "a cancel from another thread failed the statement with {} rather than interrupting it",
+            error.status.name()
+        ))),
+        Ok(_) => {
+            return Ok(Some(
+                "a cancel from another thread did not stop the running statement".to_string(),
+            ))
+        }
     }
     Ok(expect_value(&connection, "SELECT 1", "1"))
 }

@@ -347,3 +347,51 @@ fn a_temp_table_lasts_and_a_statement_opens_no_session() {
     drop(database);
     let _ = std::fs::remove_dir_all(path.parent().expect("the scratch directory"));
 }
+
+/// A statement is stopped from another thread through a [`CancelHandle`].
+///
+/// **The half of cancelling that safe Rust could not reach.** `Database` and
+/// `Connection` are neither `Send` nor `Sync`, so `Connection::cancel` could
+/// only run on the thread running the statement, where it stops nothing. The
+/// handle holds only the flag the executor reads, so it crosses threads: a
+/// query counting to a hundred million is stopped part way with
+/// `Interrupted`, and the connection answers the next statement.
+///
+/// [`CancelHandle`]: inillucent_driver::CancelHandle
+#[test]
+fn a_cancel_handle_stops_a_statement_running_on_another_thread() {
+    fn crosses_threads<T: Send + Sync + 'static>(_: &T) {}
+    let path = scratch("cancel-handle");
+    let database = inillucent_driver::Database::open(&path).expect("the database opens");
+    let connection = database.session();
+    let handle = database.cancel_handle();
+    crosses_threads(&handle);
+    let started = std::time::Instant::now();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        handle.cancel();
+    });
+    let long = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c \
+                WHERE n < 100000000) SELECT count(*) FROM c";
+    let refused = connection
+        .query(long, &[], 1)
+        .expect_err("the statement is cancelled before it counts that far");
+    canceller.join().expect("the cancelling thread finishes");
+    assert_eq!(
+        refused.status,
+        inillucent_driver::Status::Interrupted,
+        "{refused}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "the cancel took {:?} to stop the statement",
+        started.elapsed()
+    );
+    let after = connection
+        .query("SELECT 1", &[], 1)
+        .expect("the connection is usable after the cancel");
+    assert_eq!(
+        after.rows.first().and_then(|row| row.first()),
+        Some(&Value::Integer(1))
+    );
+}

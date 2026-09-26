@@ -516,9 +516,25 @@ impl VirtualCursor for Fts5Cursor {
         // the `MATCH` with nothing. The refusal belongs on the one query whose
         // answer depends on the dictionary. See `layout.rs`.
         super::layout::readable(context, &self.shadows, &self.pending, &self.table)?;
-        let Some(pattern) = plan.arguments.first().and_then(text_of) else {
+        let Some(mut pattern) = plan.arguments.first().and_then(text_of) else {
             return Ok(());
         };
+        // A match written on one column searches that column alone, which is
+        // the column filter `{name} : (query)`; see `PLAN_COLUMN_SHIFT`.
+        let column = (plan.index_number >> PLAN_COLUMN_SHIFT).saturating_sub(1);
+        if plan.index_number >> PLAN_COLUMN_SHIFT != 0 {
+            if let Some(name) = usize::try_from(column)
+                .ok()
+                .and_then(|at| self.names.get(at))
+            {
+                let mut filtered = b"{".to_vec();
+                filtered.extend_from_slice(name);
+                filtered.extend_from_slice(b"} : (");
+                filtered.extend_from_slice(&pattern);
+                filtered.push(b')');
+                pattern = filtered;
+            }
+        }
         self.pattern = pattern.clone();
         let query = Query::parse(&pattern, &self.tokenizer, &self.names)?;
         // **The buffered totals, not the row.** A score is computed from the
