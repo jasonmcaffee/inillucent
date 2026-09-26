@@ -277,7 +277,8 @@ impl SetOp {
         inillucent_base::budget::materialise(
             crate::ops::owned_row_bytes(&row).saturating_add(encoded.len() as u64),
         )?;
-        self.seen.insert(encoded.to_vec(), (self.kept.len(), self.arm));
+        self.seen
+            .insert(encoded.to_vec(), (self.kept.len(), self.arm));
         self.kept.push(row);
         Ok(())
     }
