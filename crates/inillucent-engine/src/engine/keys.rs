@@ -98,7 +98,13 @@ impl ImportedDatabase {
         if !self.pragmas.foreign_keys() || !self.has_deferred_foreign_keys() {
             return Ok(());
         }
+        // `PRAGMA defer_foreign_keys` defers every key, so every key is the
+        // commit's to check while it is on.
+        let every_key = self.pragmas.defer_foreign_keys();
         for query in self.schema.violation_queries(None)? {
+            if !query.deferred && !every_key {
+                continue;
+            }
             if self.query_internally(&query.sql)?.is_empty() {
                 continue;
             }
@@ -159,4 +165,11 @@ pub(crate) struct ViolationQuery {
     pub(crate) parent: Vec<u8>,
     /// The key's position in its table, which the pragma reports as `fkid`.
     pub(crate) key: u16,
+    /// Whether the key is `DEFERRABLE INITIALLY DEFERRED`.
+    ///
+    /// Only such a key can be broken when a transaction commits: an immediate
+    /// key was checked by the statement that wrote the row. A row that broke
+    /// an immediate key while `foreign_keys` was off is not the commit's
+    /// business, and SQLite commits over it.
+    pub(crate) deferred: bool,
 }

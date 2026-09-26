@@ -336,9 +336,22 @@ impl crate::ImportedDatabase {
         selected: Option<&[Vec<inillucent_tree::datum::OwnedDatum>]>,
     ) -> DbResult<Outcome> {
         let mut changed = 0usize;
-        if let Err(error) = self.insert_rows_into_module(statement, params, selected, &mut changed)
+        let mut images: Vec<Vec<inillucent_tree::datum::OwnedDatum>> = Vec::new();
+        if let Err(error) =
+            self.insert_rows_into_module(statement, params, selected, &mut changed, &mut images)
         {
             self.record_changes(changed as i64, changed as i64);
+            // **`OR ROLLBACK` ends the transaction when the module refuses a
+            // row as a constraint**, as it does for an ordinary table: SQLite
+            // sets the statement's error action from the conflict clause, so
+            // after the failure there is no transaction open. The rollback
+            // tells the modules as well, so their buffered rows go too.
+            if module_rolls_back(statement, &error) {
+                self.counters.last_changes.set(0);
+                if let Err(undo) = self.rollback() {
+                    return Err(undo);
+                }
+            }
             return Err(error);
         }
         // Outside a transaction the statement is its own, so the module flushes
@@ -356,14 +369,58 @@ impl crate::ImportedDatabase {
         // no triggers of its own, so every row this loop counted is both this
         // statement's own change and the whole of what it changed.
         self.record_changes(changed as i64, changed as i64);
+        let returned = self.module_returning(statement, params, &images)?;
         Ok(Outcome {
-            rows: Vec::new(),
-            names: std::rc::Rc::new(Vec::new()),
+            rows: returned.clone(),
+            names: std::rc::Rc::new(
+                statement
+                    .returning
+                    .iter()
+                    .map(|column| String::from_utf8_lossy(&column.name).into_owned())
+                    .collect(),
+            ),
             changes: inillucent_exec::dml::Changes {
                 rows: changed,
+                returned,
                 ..Default::default()
             },
         })
+    }
+    /// Evaluates an insert's `RETURNING` list over the rows the module took.
+    ///
+    /// **A module's insert returns rows like any other.** SQLite evaluates
+    /// `RETURNING` over the values it handed the module, and this path used
+    /// to answer no columns and no rows. The images are the declared columns
+    /// followed by the rowid, which is the shape `module_layout` describes.
+    ///
+    /// @param statement - the bound insert
+    /// @param params - the values bound for this execution, with the
+    ///   `RETURNING` subqueries already folded
+    /// @param images - one row image per inserted row
+    fn module_returning(
+        &self,
+        statement: &inillucent_sql::dml::BoundInsert,
+        params: &inillucent_exec::physical::Params,
+        images: &[Vec<inillucent_tree::datum::OwnedDatum>],
+    ) -> DbResult<Vec<Vec<inillucent_tree::datum::OwnedDatum>>> {
+        if statement.returning.is_empty() {
+            return Ok(Vec::new());
+        }
+        let layout = inillucent_exec::dml::module_layout(&statement.table);
+        let space = inillucent_exec::dml::RowSpace::new(&[statement.target_source], &layout);
+        let mut compiled = Vec::with_capacity(statement.returning.len());
+        for column in &statement.returning {
+            compiled.push(space.compile(&column.expr, params, self)?);
+        }
+        let mut returned = Vec::with_capacity(images.len());
+        for image in images {
+            let mut row = Vec::with_capacity(compiled.len());
+            for eval in &compiled {
+                row.push(space.evaluate(eval.as_ref(), &[image.as_slice()])?);
+            }
+            returned.push(row);
+        }
+        Ok(returned)
     }
     /// Hands each row of an insert to the module, counting as it goes.
     ///
@@ -377,12 +434,15 @@ impl crate::ImportedDatabase {
     /// @param params - the values bound for this execution
     /// @param selected - the rows a `SELECT` source produced, `None` for `VALUES`
     /// @param changed - how many rows were handed over, advanced per row
+    /// @param images - where each inserted row's image goes, the columns and
+    ///   then the rowid, when the statement has a `RETURNING` list
     pub(crate) fn insert_rows_into_module(
         &mut self,
         statement: &inillucent_sql::dml::BoundInsert,
         params: &inillucent_exec::physical::Params,
         selected: Option<&[Vec<inillucent_tree::datum::OwnedDatum>]>,
         changed: &mut usize,
+        images: &mut Vec<Vec<inillucent_tree::datum::OwnedDatum>>,
     ) -> DbResult<()> {
         let count = match (&statement.source, selected) {
             (inillucent_sql::dml::BoundInsertSource::Values(values), _) => values.len(),
@@ -466,23 +526,68 @@ impl crate::ImportedDatabase {
             // is what makes a refused command's `changes()` its own instead
             // of an earlier statement's leftover.
             let built = super::stages::elapsed(row_started);
-            let applied = self.change_module(
-                &statement.table.name,
-                &Change::Insert {
-                    rowid,
-                    values: cells,
-                },
-            );
+            let change = Change::Insert {
+                rowid,
+                values: cells,
+            };
+            let applied = match self.change_module(&statement.table.name, &change) {
+                // **`OR REPLACE` removes the row whose rowid is taken and
+                // tries again**, which is what SQLite asks FTS5 to do for it.
+                // Only a constraint failure on a rowid the statement named
+                // can be answered that way.
+                Err(error) if module_replaces(statement, &error, &change) => {
+                    self.replace_in_module(&statement.table.name, &change)
+                }
+                applied => applied,
+            };
             let whole = super::stages::elapsed(row_started);
             super::stages::record(|stages| {
                 stages.rows = stages.rows.saturating_add(1);
                 stages.values = stages.values.saturating_add(built);
                 stages.whole = stages.whole.saturating_add(whole);
             });
-            applied?;
+            // **The `RETURNING` image is kept before the outcome is known.**
+            // SQLite evaluates `RETURNING` for a virtual table from the values
+            // it hands the module, so a row `OR IGNORE` skips is still
+            // returned, and a rowid the module chooses reads as -1: the
+            // statement never learns it.
+            if let (false, Change::Insert { rowid, values }) =
+                (statement.returning.is_empty(), &change)
+            {
+                let mut image: Vec<inillucent_tree::datum::OwnedDatum> = values
+                    .iter()
+                    .map(inillucent_tree::datum::OwnedDatum::from)
+                    .collect();
+                image.push(match rowid {
+                    Value::Null => inillucent_tree::datum::OwnedDatum::Int(-1),
+                    supplied => inillucent_tree::datum::OwnedDatum::from(supplied),
+                });
+                images.push(image);
+            }
+            match applied {
+                Ok(_) => {}
+                // **`OR IGNORE` skips a row the module refused as a
+                // constraint.** SQLite's `OP_VUpdate` turns a module's
+                // constraint failure into success under `IGNORE` and counts no
+                // change for it, so `INSERT OR IGNORE INTO f(rowid, ...)
+                // SELECT ...` skips the rowid that is taken and inserts the
+                // rest. Any other failure still fails the statement.
+                Err(error) if module_ignores(statement, &error) => continue,
+                Err(error) => return Err(error),
+            }
             *changed = changed.saturating_add(1);
         }
         Ok(())
+    }
+    /// Deletes the row a replacing insert collided with, then inserts again.
+    ///
+    /// @param table - the virtual table's name
+    /// @param change - the insert the module refused
+    fn replace_in_module(&mut self, table: &[u8], change: &Change) -> DbResult<Option<i64>> {
+        if let Change::Insert { rowid, .. } = change {
+            self.change_module(table, &Change::Delete(rowid.clone()))?;
+        }
+        self.change_module(table, change)
     }
     /// Returns the values one row of an insert supplies, in statement order.
     ///
@@ -750,4 +855,50 @@ impl crate::ImportedDatabase {
             Moment::Release(level) => connected.table.release(&mut context, level),
         }
     }
+}
+
+/// Reports whether an insert skips a row its module refused.
+///
+/// Only a constraint failure under `OR IGNORE` is skipped, which is the rule
+/// SQLite applies to a module that declares constraint support, as FTS5 does.
+///
+/// @param statement - the bound insert
+/// @param error - what the module answered for the row
+fn module_ignores(
+    statement: &inillucent_sql::dml::BoundInsert,
+    error: &inillucent_base::error::DbError,
+) -> bool {
+    statement.on_conflict == Some(inillucent_sql::ast::ConflictAction::Ignore)
+        && error.code() == inillucent_base::error::PrimaryCode::Constraint
+}
+
+/// Reports whether an insert's failure in a module rolls the transaction back.
+///
+/// @param statement - the bound insert
+/// @param error - what the insert failed with
+fn module_rolls_back(
+    statement: &inillucent_sql::dml::BoundInsert,
+    error: &inillucent_base::error::DbError,
+) -> bool {
+    statement.on_conflict == Some(inillucent_sql::ast::ConflictAction::Rollback)
+        && error.code() == inillucent_base::error::PrimaryCode::Constraint
+}
+
+/// Reports whether an insert replaces the row a module refused it for.
+///
+/// Only under `OR REPLACE`, only for a constraint failure, and only when the
+/// statement named the rowid, because that rowid is the row to remove.
+///
+/// @param statement - the bound insert
+/// @param error - what the module answered for the row
+/// @param change - the insert the module refused
+fn module_replaces(
+    statement: &inillucent_sql::dml::BoundInsert,
+    error: &inillucent_base::error::DbError,
+    change: &Change,
+) -> bool {
+    let named = matches!(change, Change::Insert { rowid, .. } if !matches!(rowid, Value::Null));
+    named
+        && statement.on_conflict == Some(inillucent_sql::ast::ConflictAction::Replace)
+        && error.code() == inillucent_base::error::PrimaryCode::Constraint
 }

@@ -686,12 +686,19 @@ pub struct NestedLoopJoin<'s> {
     /// row is unmatched only once the *whole* outer side has gone past - so the
     /// mark accumulates here and `finish` emits what is left.
     matched: Vec<bool>,
-    /// How wide the outer side is, learned from the first batch.
+    /// How wide the outer side is, from the plan and then from each batch.
     ///
     /// Needed at `finish`, where there is no batch to read it from and the
     /// unmatched inner rows still have to be null-extended to the width every
-    /// other row of this join has.
+    /// other row of this join has. It must not depend on a batch having
+    /// arrived: when the outer side is empty no batch comes, and a width of 0
+    /// put a `RIGHT` join's inner values in the outer table's columns.
     outer_width: usize,
+    /// How wide the inner side is, from the plan.
+    ///
+    /// An empty inner side has no first row to measure, and a `LEFT` join's
+    /// unmatched outer rows still need that many NULLs.
+    inner_width: usize,
     /// The join condition over the concatenated row, or `None` for a cross
     /// product.
     condition: Option<Box<dyn Eval>>,
@@ -722,12 +729,26 @@ impl<'s> NestedLoopJoin<'s> {
                 Vec::new()
             },
             kind,
+            inner_width: inner.first().map(Vec::len).unwrap_or(0),
             inner,
             outer_width: 0,
             condition,
             downstream,
             scratch: Vec::new(),
         }
+    }
+
+    /// Returns the join with the width of each side taken from the plan.
+    ///
+    /// The widths are otherwise measured from the first outer batch and the
+    /// first inner row, and an empty side has neither.
+    ///
+    /// @param outer - how many columns an outer row has
+    /// @param inner - how many columns an inner row has
+    pub fn with_widths(mut self, outer: usize, inner: usize) -> NestedLoopJoin<'s> {
+        self.outer_width = outer;
+        self.inner_width = inner;
+        self
     }
 }
 impl Sink for NestedLoopJoin<'_> {
@@ -742,7 +763,7 @@ impl Sink for NestedLoopJoin<'_> {
         inillucent_base::budget::check()?;
         let width = batch.columns.len();
         self.outer_width = width;
-        let inner_width = self.inner.first().map(Vec::len).unwrap_or(0);
+        let inner_width = self.inner_width;
         let mut produced: Vec<Vec<OwnedDatum>> = Vec::new();
         for nth in 0..batch.live() {
             let outer = materialise(batch, nth, width)?;
@@ -817,7 +838,6 @@ impl Sink for NestedLoopJoin<'_> {
         for mark in &mut self.matched {
             *mark = false;
         }
-        self.outer_width = 0;
         self.downstream.reset()
     }
 }

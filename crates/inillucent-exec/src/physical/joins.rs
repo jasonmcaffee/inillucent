@@ -763,18 +763,17 @@ fn build_materialised_join<'t>(
                     build,
                     probe,
                     downstream,
-                );
+                )
+                .with_widths(stage.offset, stage.width);
                 join.build_materialised(&rows)?;
                 return Ok(Box::new(join));
             }
         }
     }
-    Ok(Box::new(NestedLoopJoin::new(
-        join_kind_of(source_term.join),
-        rows,
-        condition,
-        downstream,
-    )))
+    Ok(Box::new(
+        NestedLoopJoin::new(join_kind_of(source_term.join), rows, condition, downstream)
+            .with_widths(stage.offset, stage.width),
+    ))
 }
 /// Returns the executor's join kind for the one the statement wrote.
 ///

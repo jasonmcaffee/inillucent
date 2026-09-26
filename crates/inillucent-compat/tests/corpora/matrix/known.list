@@ -108,12 +108,9 @@ compound-dcd7d0824e6d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a 
 compound-deb62ff82c19	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
 constraint-f09d1380625f	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
 constraint-f31ab9469767	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-21c060091480	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-34e06397277a	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-91a394494308	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-96d0571e02c2	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-b55455157723	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-ec8dae14560d	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
+constraint-34e06397277a	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
+constraint-91a394494308	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
+constraint-ec8dae14560d	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
 maintenance-03ef7ec52415	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
 maintenance-0f1489d32b44	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
 maintenance-2096611f428f	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
@@ -147,9 +144,6 @@ pragma-e25a44e4aee6	30	The pragma_<name> table valued function of a setting prag
 pragma-f07b02922e18	30	The pragma_<name> table valued function of a setting pragma is "no such table".
 vtab-502dc2c0ee37	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-6d0c72e53a98	33	MATCH in this placement is refused as unsupported and no capability row says so.
-update-4ef2683419b0	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-6fef6d29ac84	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-ecd76ed72594	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
 compound-0364d7c812d7	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-04962724de19	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-0c7d030f2a49	37	A STRICT table's ANY column converts text that looks like a number into a number.
@@ -175,15 +169,7 @@ ddl_view-771de28793d4	40	PRAGMA table_info on a view reports no declared type fo
 ddl_table-390042c209da	41	A generated column is computed from the value before its source column's type converts it.
 maintenance-0c90a3ac751f	42	VACUUM fails on a table with a STORED generated column.
 maintenance-cd55551515df	42	VACUUM fails on a table with a STORED generated column.
-delete-bc5389dc988e	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-insert-474302bef184	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-d9eb0f918417	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-db190017b572	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-update-d5d92b4f8189	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-insert-496da19fbcc3	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
-insert-e2bf17ca55b4	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-insert-926fc723d885	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-fb09024a432d	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
+insert-e2bf17ca55b4	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
 ddl_table-3fc9f2d11670	50	PRAGMA table_info reports notnull 0 for a STRICT table's PRIMARY KEY column, which SQLite reports as NOT NULL.
 
 # The retained corpus: the smallest case for each bug (retained/bugs.slt).
@@ -196,50 +182,22 @@ retained-bug-20-temp-index	20	The smallest case for bug 20.
 retained-bug-21-temp-qualified	21	The smallest case for bug 21.
 retained-bug-22-analyze-schema	22	The smallest case for bug 22.
 retained-bug-23-ctas-with	23	The smallest case for bug 23.
-retained-bug-26-deferred-fk	26	The smallest case for bug 26.
-retained-bug-27-right-join	27	The smallest case for bug 27.
 retained-bug-28-sum-text	28	The smallest case for bug 28.
 retained-bug-29-stat1-empty	29	The smallest case for bug 29.
 retained-bug-30-pragma-function	30	The smallest case for bug 30.
-retained-bug-34-update-from-partial-index	34	The smallest case for bug 34.
 retained-bug-35-unread-column	35	The smallest case for bug 35.
 retained-bug-37-strict-any	37	The smallest case for bug 37.
 retained-bug-38-negative-zero	38	The smallest case for bug 38.
-retained-bug-39-groups-offset	39	The smallest case for bug 39.
 retained-bug-40-view-type	40	The smallest case for bug 40.
 retained-bug-41-generated-before-type	41	The smallest case for bug 41.
 retained-bug-42-vacuum-generated	42	The smallest case for bug 42.
-retained-bug-43-returning-virtual-table	43	The smallest case for bug 43.
-retained-bug-43-upsert-virtual-table	43	The smallest case for bug 43.
-retained-bug-44-insert-ignore-fts	44	The smallest case for bug 44.
-retained-bug-45-or-rollback-virtual-table	45	The smallest case for bug 45.
 retained-bug-46-shadow-tables	46	The smallest case for bug 46.
 retained-bug-47-real-remainder	47	The smallest case for bug 47.
-retained-bug-48-upsert-target	48	The smallest case for bug 48.
 retained-bug-49-range-over-text	49	The smallest case for bug 49.
 retained-bug-50-strict-primary-key	50	The smallest case for bug 50.
 pragma-temp-store-directory	52	PRAGMA temp_store_directory answers no column where SQLite answers a temp_store_directory column with no rows.
 pragma-data-store-directory	52	PRAGMA data_store_directory answers no column where SQLite answers a data_store_directory column with no rows.
-ms-005@batch	54	execute_batch runs a statement with RETURNING without making its change.
-capability-returning@batch	54	execute_batch runs a statement with RETURNING without making its change.
-probe-dml.returning.insert@batch	54	execute_batch runs a statement with RETURNING without making its change.
-probe-dml.returning.updel@batch	54	execute_batch runs a statement with RETURNING without making its change.
-probe-dml.returning.expr@batch	54	execute_batch runs a statement with RETURNING without making its change.
-probe-upsert.returning@batch	54	execute_batch runs a statement with RETURNING without making its change.
-probe-dml.returning.trigger@batch	54	execute_batch runs a statement with RETURNING without making its change.
-ret-001@batch	54	execute_batch runs a statement with RETURNING without making its change.
-ret-002@batch	54	execute_batch runs a statement with RETURNING without making its change.
-ret-003@batch	54	execute_batch runs a statement with RETURNING without making its change.
-ret-004@batch	54	execute_batch runs a statement with RETURNING without making its change.
-ret-005@batch	54	execute_batch runs a statement with RETURNING without making its change.
-ret-006@batch	54	execute_batch runs a statement with RETURNING without making its change.
-ups-008@batch	54	execute_batch runs a statement with RETURNING without making its change.
-syntax-insert-stmt-p6@batch	54	execute_batch runs a statement with RETURNING without making its change.
-syntax-returning-clause-p0@batch	54	execute_batch runs a statement with RETURNING without making its change.
-syntax-update-stmt-p5@batch	54	execute_batch runs a statement with RETURNING without making its change.
-syntax-delete-stmt-p3@batch	54	execute_batch runs a statement with RETURNING without making its change.
 retained-bug-52-store-directory	52	The smallest case for bug 52.
-retained-bug-54-batch-returning@batch	54	The smallest case for bug 54.
 retained-bug-55-unicode-of-nul	55	The smallest case for bug 55.
 retained-bug-56-negating-text	56	The smallest case for bug 56.
 retained-bug-57-division-by-text	57	The smallest case for bug 57.
@@ -499,11 +457,6 @@ window-898b5e1fddea	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a co
 window-150d87725043	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
 window-5a038907a3a6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
 window-ff7e5a636931	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
-join-57fbd592e1f3	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-c4fd26c402a9	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-d657682d8a16	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-064bc1d02aaf	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-ce3e1dd451df	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
 function-bb650048102f	28	sum() over text holding integers returns a real where SQLite returns an integer.
 function-0f628af25f99	28	sum() over text holding integers returns a real where SQLite returns an integer.
 subquery-34b8c0a17073	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
@@ -524,7 +477,7 @@ function-8206eccf8295	37	A STRICT table's ANY column converts text that looks li
 window-effa8af166e8	37	A STRICT table's ANY column converts text that looks like a number into a number.
 window-b71eda42930d	37	A STRICT table's ANY column converts text that looks like a number into a number.
 function-ef3d1ca82e72	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-1750d8e34d0a	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
+window-1750d8e34d0a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 expression-791beddca2fc	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 expression-ba83140e44e5	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 expression-941d0bd96d48	47	The remainder of a real by an integer is an integer where SQLite returns a real.
@@ -4529,60 +4482,10 @@ constraint-b22bfe570627	25	changes() or total_changes() after ROLLBACK or ROLLBA
 constraint-c747cbe49e52	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
 constraint-e6cd859670b9	25	changes() or total_changes() after COMMIT differs from SQLite's.
 constraint-6c9770f3f49e	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-c6d6e11ee5e3	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-412f69f03b8c	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-67dfaaf58987	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-90cae237dd40	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-a5e8964ab711	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-b580d2e17053	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-0f0c44a959dd	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-constraint-6fbe66bebfd1	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
-join-3b6edd18569d	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-a22a1676b17e	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns.
-join-c80ff4d387d5	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-d6cccbde7c1c	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-effc9527a427	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-4a7c59153050	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-8bc0fceb56a9	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-c71c81b05071	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-d5b563c00ae5	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-13c5bf72ca21	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-5068ce56895d	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-84a4663c23c8	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-a408910f8c85	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-b1bfc744eaee	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-b2788f755b54	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-ec41ad017a56	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-22d0acc10c9b	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-52426e7e6033	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-75b1ecbb07fc	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-845b35cb6f44	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-0eca569183b0	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-4a290f614f8b	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns.
-join-587a21d5abcc	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-61f9998ce57b	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-6d245e7628c1	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-a75ecdafc343	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-cd1fbd09b1d0	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-cded525357d0	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-e4ddd23b87aa	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-fbd79e42c10d	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-20a5b6e212e9	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-44dde407e0d7	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-91085a96cf37	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-9478d5297d85	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns.
-join-9fa0c3627293	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-a43c111bb026	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-c768153b5378	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns.
-join-fc6aa31da1b3	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-fd7ab7e1ba15	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-336022ab3f48	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-4a0616baa15d	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-b98347cdf9e8	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-4a4acd987b63	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-9573f87f976f	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-b409918ad80e	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-join-d602563dedd6	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+constraint-0f0c44a959dd	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
+join-b1bfc744eaee	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-52426e7e6033	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-44dde407e0d7	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
 function-7e0242600c65	28	sum() over text returns a real where SQLite returns an integer.
 function-cc0587ac2490	28	sum() over text holding integers returns a real where SQLite returns an integer.
 function-77addb987a79	28	sum() over text holding integers returns a real where SQLite returns an integer.
@@ -4770,50 +4673,8 @@ vtab-88f783eb2300	33	MATCH in this placement is refused as unsupported and no ca
 vtab-c1309df7426e	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-d7ae003224c1	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-dafb1dd635d2	33	MATCH in this placement is refused as unsupported and no capability row says so.
-update-334eb08de37f	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-33df81386132	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-eb9735c419a3	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-06b0fea97340	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-0bd6c2364f9f	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-21f1ead16bbb	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-465d86d5c37f	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-58077989222d	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-9169e6538a7e	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-b6876749348c	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-bf1cb1c9f89c	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-e0b3bcac0079	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-e1cf030a0f62	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-ef2afbae29db	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-22dc19831a5e	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-39736d2f05be	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-5497b3dad951	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-7b3e60917e45	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-91c82c69fed6	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-94a007cb6846	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-9fa42da636c9	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-b11318187de1	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-0e3410230b54	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-1389d6d7ff2c	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-14bb1d10a843	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-457ceb1db54c	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-b1e71c7d7f9a	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-b38259c45ddf	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-ca792bcb8606	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-cb9ace7f7b08	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-f74bd6d044c1	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-040a1fa3bea2	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-2bc70cf7423c	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-2d951cd0307f	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-1ec7d055bcf8	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-832ec41ef628	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-a5193ca4c3b6	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-b4dbe1a8b5d3	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-c8eed2e8e36c	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-de81c6d4d8b4	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-e087e07c7d8e	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-e1d6aff807fc	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-e2b4d6e8733b	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-update-f7cf9afa90d7	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
+update-e1cf030a0f62	37	A STRICT table's ANY column converts text that looks like a number into a number.
+update-b38259c45ddf	38	Negative zero: a REAL column reads -0.0 back as -0.0 where SQLite answers 0.0.
 function-481825770325	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
 function-33120cd51f04	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
 function-429e8b9f9a92	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
@@ -5133,86 +4994,12 @@ window-75cf0bb41f5b	38	Negative zero: round(-0.0) keeps the sign, a REAL column 
 window-9c8173a6a7f9	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 window-3398dc040a8b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 window-c7649676ba57	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-7aa46f61eb04	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-88f436e01976	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-b15e5cfd0656	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-ba1fdedc0cb7	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-cbfbc7902aa7	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-d4a914165086	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-1b9dea16ee75	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-477801ef37c3	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-4dc7e274e1db	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-64e0442df355	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-8d88503d1ea6	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-e1e32332c2d1	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-ef7b1faeef11	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-037149574851	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-42c6e8b14254	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-a3cdf3c76b64	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-c5a7b9ccf291	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-ca397b4af430	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-d778db21e8a3	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-f1ce858044f7	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-ff18df72b187	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-381d77c7809b	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-4f5c337ebba0	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-6bbf706eab20	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-7bf6fd41fb1e	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-80e9a48e0692	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-8db3eab0105d	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-a295139b7749	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-9fe516716b4c	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-a1353216966c	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-cd0468cf2ee4	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-d61dc09145ef	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-da733de54039	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-e1d20c4a329f	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-6692e4e7996e	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-75d3ef2f5c27	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-a358ad3033de	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-b71ab5c286c3	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-cf3cc4399256	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-d7512613bba1	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-e874e2c43c01	39	A GROUPS frame offset is refused as if it were RANGE.
-window-4471df28aedf	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-be81f7fd544f	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-c6599ba628ba	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-d7a7e0ea004e	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-12fd58303a3a	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-26f9904032c4	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-39fca9350826	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-697ba1e3d66b	39	A GROUPS frame offset is refused as if it were RANGE.
-window-6fad253cd3a9	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-94bc84f71bdb	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-9cfe74aa66f7	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-b5ef9309dad9	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-cfbe780c3901	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-4042fb772637	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-47fc2c0b1039	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-719454d378c4	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-e1bfaa33bc74	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-fe67d7ba1edc	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-1ecd2f21c127	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-44f8090212a4	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-483672d89ed8	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-60f4d658ab52	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-6ce0c1c350db	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-73e36f3e30f8	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-892d369298cf	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-8a5843dd81e2	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-b65032b290de	39	A GROUPS frame offset is refused as if it were RANGE.
-window-fa2ecc15343e	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-1971c08395a3	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-4d3eddb29971	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-55bb6c634155	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-82e6c110bb06	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-97d4472dfa25	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-9e875a1e36d8	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-b2c08555dc7b	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-ed1e942a6f23	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-fbe5396867a3	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-043b7b5f363d	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-window-c3d9bf6e8f07	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
+window-381d77c7809b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+window-7bf6fd41fb1e	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-b71ab5c286c3	28	sum() over text holding integers returns a real.
+window-e874e2c43c01	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-697ba1e3d66b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-b65032b290de	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
 ddl_view-051dd698b15c	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
 ddl_view-1152df6cf806	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
 ddl_view-128eceb2f7b3	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
@@ -5301,65 +5088,16 @@ maintenance-b7f695da551d	42	VACUUM fails on a table with a STORED generated colu
 maintenance-bc446d08e582	42	VACUUM fails on a table with a STORED generated column.
 maintenance-5e285a3d5134	42	VACUUM fails on a table with a STORED generated column.
 maintenance-8eefa43d905f	42	VACUUM fails on a table with a STORED generated column.
-delete-06c70352c351	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-delete-cd8cbb7a27ef	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-delete-ce49dab3f20a	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-delete-24fd19835362	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-delete-a5fae3536428	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-delete-445cda297631	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-delete-8199d2b4031b	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-delete-81d248828b5e	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-delete-807fa601a1f5	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-delete-106deb73b5f0	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-insert-6c1de1e0aea4	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-insert-e74635931e20	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-insert-b65a08da1513	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-fd330c7f5983	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-4b5ca080e43b	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-69a4025f5fbe	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-9619c4d39281	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-insert-a54e8c174a6b	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-insert-ac20a5029df2	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-b7de1caede86	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-7e7ae95c8f77	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-a784b94059c6	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-insert-16cf3404c3e6	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-insert-20f106c3178e	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-insert-3cbd668bf2ae	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-5cf16b99aaed	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-insert-befa77fd2ae0	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-fb1eb6666ec4	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-6987af369701	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-bde8bd55a16f	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-00310c61925e	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
-insert-892c05fb8349	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-9713db45bfc9	43	An upsert into a virtual table is accepted where SQLite refuses it.
-insert-b4223135ef57	43	An upsert into a virtual table is accepted where SQLite refuses it.
-update-855e04767994	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-update-437ef3d3b841	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-update-1417c7a79962	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-update-2cc8a4ab6cba	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-update-9679f82e6316	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-update-1446f55c4ee9	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
-insert-dbb64996f449	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
-insert-fae5efc5f9d6	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
-insert-ca81cbddecf5	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
-insert-800df82a2cc1	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
-insert-2429ae723889	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
-insert-53ee9989eedd	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
-insert-7b978ebd9b8f	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
-insert-e3ff8217f995	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
-constraint-774f2f9e32c4	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-constraint-1f91ab9164b2	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-constraint-40df2899becb	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-constraint-5f2dadd04614	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
+constraint-774f2f9e32c4	26	A multi-row INSERT breaking an immediate foreign key: SQLite checks at the end of the statement, so last_insert_rowid() is the last row; inillucent stops at the failing row and reports the first.
+constraint-1f91ab9164b2	7	A DELETE refused by ON DELETE RESTRICT reports extended code 787 where SQLite reports 1811.
+constraint-40df2899becb	26	A multi-row INSERT breaking an immediate foreign key: SQLite checks at the end of the statement, so last_insert_rowid() is the last row; inillucent stops at the failing row and reports the first.
+constraint-5f2dadd04614	26	A multi-row INSERT breaking an immediate foreign key: SQLite checks at the end of the statement, so last_insert_rowid() is the last row; inillucent stops at the failing row and reports the first.
 insert-5aebf7432b2e	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-insert-74feeab48119	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-insert-4199efb9fa26	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
+insert-74feeab48119	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
+insert-4199efb9fa26	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
 insert-70936f4cce9c	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
 insert-c4e7f9f07e60	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-insert-da8178c5039a	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-insert-1af23f67ea60	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
+insert-1af23f67ea60	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
 schema-ba056b0647fe	46	The SQL stored for an FTS5 shadow table quotes its name differently from SQLite.
 expression-5460f7360163	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 expression-d6ea316dc448	47	The remainder of a real by an integer is an integer where SQLite returns a real.
@@ -5393,31 +5131,7 @@ expression-6c9b06181165	47	The remainder of a real by an integer is an integer w
 expression-f71f69749565	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 expression-39f1ba7fb9b5	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 expression-b6647f68e94a	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-insert-201712ea8249	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-86d007b015f9	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-facd5e40dd15	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-f5be817e7d45	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-136a932136bd	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-2f52fac05e9c	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-e974cd3a1c61	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-f78bfa2ca2e6	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-68c1fac66b2b	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-94cf96cc927a	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-b2a975549c9d	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-c1be67d327ea	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-e354e8006a23	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-8a549534c5d5	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-477a875258e6	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-745f5d0b7d90	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-d9e2c16a81c8	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-fd956d676954	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-296795af17af	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-803f187bf16b	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-dfa52b843dd9	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-f3773a516025	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-1235d99ca3ba	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-7fec509eb3ac	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-insert-a28fd0b255df	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
+insert-e974cd3a1c61	38	Negative zero: a REAL column reads -0.0 back as -0.0 where SQLite answers 0.0.
 window-c02e7570f355	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
 window-8d00c7b03874	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
 window-d440d4ceae45	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.

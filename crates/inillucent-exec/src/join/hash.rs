@@ -115,11 +115,18 @@ impl JoinKind {
 /// operator is an ordinary sink and every batch pushed into it is a probe.
 pub struct HashJoin<'s> {
     kind: JoinKind,
-    /// How wide the probe side is, learned from the first batch.
+    /// How wide the probe side is, from the plan and then from each batch.
     ///
     /// Read at `finish`, where a RIGHT or FULL join null-extends the build rows
-    /// nothing matched and there is no batch left to ask.
+    /// nothing matched and there is no batch left to ask. An empty probe side
+    /// sends no batch at all, so the plan's width is what keeps the build
+    /// values out of the probe side's columns.
     probe_width: usize,
+    /// How wide the build side is, from the plan.
+    ///
+    /// An empty build side has no row to measure, and a LEFT join's unmatched
+    /// probe rows still need that many NULLs.
+    build_width: usize,
     /// The build side's key expressions, over the build row's columns.
     build_keys: Vec<Box<dyn Eval>>,
     /// The probe side's key expressions, over the probe batch's columns.
@@ -146,12 +153,26 @@ impl<'s> HashJoin<'s> {
         HashJoin {
             kind,
             probe_width: 0,
+            build_width: 0,
             build_keys,
             probe_keys,
             table: HashTable::new(),
             downstream,
             scratch: Vec::new(),
         }
+    }
+
+    /// Returns the join with the width of each side taken from the plan.
+    ///
+    /// The widths are otherwise measured from the first probe batch and the
+    /// first build row, and an empty side has neither.
+    ///
+    /// @param probe - how many columns a probe row has
+    /// @param build - how many columns a build row has
+    pub fn with_widths(mut self, probe: usize, build: usize) -> HashJoin<'s> {
+        self.probe_width = probe;
+        self.build_width = build;
+        self
     }
 
     /// Adds one batch of build rows to the table.
@@ -238,6 +259,7 @@ impl Sink for HashJoin<'_> {
         let HashJoin {
             kind,
             probe_width,
+            build_width,
             probe_keys,
             table,
             downstream,
@@ -246,7 +268,7 @@ impl Sink for HashJoin<'_> {
         } = self;
         let width = batch.columns.len();
         *probe_width = width;
-        let build_width = table.rows.first().map(Vec::len).unwrap_or(0);
+        let build_width = table.rows.first().map(Vec::len).unwrap_or(*build_width);
         let mut produced: Vec<Vec<OwnedDatum>> = Vec::new();
         for nth in 0..batch.live() {
             scratch.clear();
@@ -335,7 +357,6 @@ impl Sink for HashJoin<'_> {
     fn reset(&mut self) -> DbResult<()> {
         self.table.clear();
         self.scratch.clear();
-        self.probe_width = 0;
         self.downstream.reset()
     }
 }
