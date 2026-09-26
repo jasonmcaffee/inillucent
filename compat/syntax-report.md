@@ -1,6 +1,6 @@
 # inillucent syntax obligations
 
-Measured against sqlite-3.53.4. 60 productions: 60 parsed, 0 omitted, 297 examples.
+Measured against sqlite-3.53.4. 60 productions: 60 parsed, 0 omitted, 298 examples.
 
 A production is `parsed` when the parser accepts every positive example and refuses every negative one. The examples are the evidence; a row with none cannot claim coverage.
 
@@ -35,7 +35,7 @@ A production is `parsed` when the parser accepts every positive example and refu
 | `vacuum-stmt` | parsed | 4 | 1 | [lang_vacuum](https://sqlite.org/lang_vacuum.html) |
 | `explain-stmt` | parsed | 2 | 1 | [lang_explain](https://sqlite.org/lang_explain.html) |
 | `column-def` | parsed | 5 | 0 | [column-def](https://sqlite.org/syntax/column-def.html) |
-| `column-constraint` | parsed | 10 | 1 | [column-constraint](https://sqlite.org/syntax/column-constraint.html) |
+| `column-constraint` | parsed | 11 | 1 | [column-constraint](https://sqlite.org/syntax/column-constraint.html) |
 | `table-constraint` | parsed | 5 | 0 | [table-constraint](https://sqlite.org/syntax/table-constraint.html) |
 | `foreign-key-clause` | parsed | 5 | 0 | [foreign-key-clause](https://sqlite.org/syntax/foreign-key-clause.html) |
 | `conflict-clause` | parsed | 5 | 1 | [conflict-clause](https://sqlite.org/syntax/conflict-clause.html) |

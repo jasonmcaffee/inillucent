@@ -453,8 +453,8 @@ pub static CAPABILITIES: &[Capability] = &[
     },
     Capability {
         name: "computed_limit",
-        support: Support::No,
-        note: "LIMIT and OFFSET take a constant or a parameter: an expression such as `LIMIT 1 + 1`, and a value that is not an integer, are refused.",
+        support: Support::Yes,
+        note: "LIMIT and OFFSET take any expression that reads no row, such as `LIMIT 1 + 1` or `LIMIT (SELECT 2)`. A value that is not an integer after numeric affinity, such as 2.7 or NULL, is refused with SQLite's `datatype mismatch`.",
         probe: Probe::Runs {
             setup: &["CREATE TABLE t (a INTEGER)"],
             sql: "SELECT a FROM t LIMIT 1 + 1",

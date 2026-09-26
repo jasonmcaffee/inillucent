@@ -705,8 +705,8 @@ impl<'a> Binder<'a> {
         let (joined, arguments) = self.bind_update_from(&update.from)?;
         let mut assignments = Vec::new();
         for (names, value) in &update.assignments {
-            let bound = self.bind_expr(*value)?;
-            for name in names {
+            let values = self.assigned_values(names, *value)?;
+            for (name, bound) in names.iter().zip(values) {
                 let folded = self.ast.folded(*name).to_vec();
                 // `rowid`, `oid` and `_rowid_` name the row's key rather than a
                 // declared column, unless the table declares a column by one of
@@ -1854,8 +1854,8 @@ impl<'a> Binder<'a> {
         target.sort_unstable();
         let mut assignments = Vec::new();
         for (names, value) in &upsert.assignments {
-            let bound = self.bind_expr(*value)?;
-            for name in names {
+            let values = self.assigned_values(names, *value)?;
+            for (name, bound) in names.iter().zip(values) {
                 let folded = self.ast.folded(*name).to_vec();
                 let Some(position) = table.column_position(&folded) else {
                     return Err(no_such_column(self.ast.text(*name), Span::default()));
@@ -1863,7 +1863,7 @@ impl<'a> Binder<'a> {
                 assignments.push(BoundAssignment {
                     column: position,
                     rowid: false,
-                    value: bound.clone(),
+                    value: bound,
                 });
             }
         }
@@ -1880,6 +1880,51 @@ impl<'a> Binder<'a> {
         }))
     }
 
+    /// Binds the value of one `SET` assignment, one bound value per column it
+    /// names.
+    ///
+    /// **`SET (a, b) = (1, 2)` and `SET (a, b) = (SELECT x, y ...)` assign
+    /// the parts in order**, which is what SQLite does. Both were refused as
+    /// `unsupported`, and no capability row said so. A list of values is
+    /// bound part by part; a query is bound once and read column by column,
+    /// so both columns take the same row. A count that does not match is
+    /// SQLite's own refusal, "2 columns assigned 3 values".
+    ///
+    /// @param names - the columns the assignment names
+    /// @param value - the expression after `=`
+    fn assigned_values(
+        &mut self,
+        names: &[ast::NameId],
+        value: ast::ExprId,
+    ) -> Result<Vec<BoundExpr>, ParseError> {
+        if names.len() == 1 {
+            return Ok(vec![self.bind_expr(value)?]);
+        }
+        let span = self.ast.expr_span(value);
+        let values = match self.ast.expr(value) {
+            Some(ast::Expr::RowValue(parts)) => {
+                let parts = parts.clone();
+                let mut bound = Vec::with_capacity(parts.len());
+                for part in parts {
+                    bound.push(self.bind_expr(part)?);
+                }
+                bound
+            }
+            Some(ast::Expr::Subquery(select)) => {
+                let select = *select;
+                self.bind_query_columns(select, span)?
+            }
+            _ => vec![self.bind_expr(value)?],
+        };
+        if values.len() != names.len() {
+            return Err(refused(
+                format!("{} columns assigned {} values", names.len(), values.len()),
+                span,
+            ));
+        }
+        Ok(values)
+    }
+
     /// Binds a `RETURNING` list, which is a result-column list over the row
     /// that was written.
     fn bind_returning(
@@ -1888,6 +1933,18 @@ impl<'a> Binder<'a> {
     ) -> Result<Vec<BoundResultColumn>, ParseError> {
         if columns.is_empty() {
             return Ok(Vec::new());
+        }
+        // **`table.*` is refused, as SQLite refuses it.** A `RETURNING` list
+        // may use a bare `*` and may not qualify it; SQLite answers
+        // `RETURNING may not use "TABLE.*" wildcards` with code 1, and binding
+        // it as a select list would have returned the rows.
+        for column in columns {
+            if let Some(ast::Expr::Star { table: Some(_) }) = self.ast.expr(column.expr) {
+                return Err(refused(
+                    "RETURNING may not use \"TABLE.*\" wildcards",
+                    column.span,
+                ));
+            }
         }
         self.bind_result_columns_public(columns)
     }

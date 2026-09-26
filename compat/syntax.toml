@@ -334,8 +334,9 @@ positive = [
   "CREATE TABLE t (a REFERENCES u (b))",
   "CREATE TABLE t (a, b GENERATED ALWAYS AS (a + 1) STORED, c AS (a + 2) VIRTUAL)",
   "CREATE TABLE t (a CONSTRAINT c NOT NULL)",
+  "CREATE TABLE t (a CONSTRAINT c)",
 ]
-negative = ["CREATE TABLE t (a CONSTRAINT c)"]
+negative = ["CREATE TABLE t (a CONSTRAINT)"]
 
 [[production]]
 name = "table-constraint"

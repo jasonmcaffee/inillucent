@@ -354,7 +354,7 @@ DROP TABLE t
 statement ok
 CREATE TABLE t (a CONSTRAINT c NOT NULL)
 
-case syntax-column-constraint-n10
+case syntax-column-constraint-p10
 
 statement ok
 DROP VIEW v
@@ -364,6 +364,17 @@ DROP TABLE t
 
 statement ok
 CREATE TABLE t (a CONSTRAINT c)
+
+case syntax-column-constraint-n11
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement error
+CREATE TABLE t (a CONSTRAINT)
 
 case syntax-table-constraint-p0
 

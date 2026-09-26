@@ -184,9 +184,15 @@ impl Parser<'_> {
         let mut constraints = Vec::new();
         loop {
             let named = self.parse_constraint_name()?;
+            // **A name with no constraint after it is legal.** SQLite's
+            // grammar has `ccons ::= CONSTRAINT nm` as a constraint of its own,
+            // which only names whatever constraint comes next, so
+            // `CREATE TABLE t (a CONSTRAINT c)` is accepted and
+            // `CREATE TABLE t (a CONSTRAINT c foo)` fails at `foo`, which the
+            // caller reports when it finds neither a comma nor a parenthesis.
             let Some(constraint) = self.parse_column_constraint()? else {
                 if named.is_some() {
-                    return Err(self.unexpected(&["a column constraint"])?);
+                    continue;
                 }
                 break;
             };

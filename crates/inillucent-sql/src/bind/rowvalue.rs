@@ -169,6 +169,31 @@ impl Binder<'_> {
         for part in lefts {
             bound_lefts.push(self.bind_expr(*part)?);
         }
+        let bound_rights = self.query_columns(block);
+        compare_bound_rows(op, &bound_lefts, &bound_rights, span)
+    }
+
+    /// Binds a one-row query as one scalar subquery per result column.
+    ///
+    /// The same block for every column, so each part reads the same row.
+    /// Shared by the row comparison above and by `UPDATE ... SET (a, b) =
+    /// (SELECT x, y ...)`, which assigns the parts.
+    ///
+    /// @param select - the query
+    /// @param span - where it was written
+    pub(crate) fn bind_query_columns(
+        &mut self,
+        select: ast::SelectId,
+        span: Span,
+    ) -> Result<Vec<BoundExpr>, ParseError> {
+        let block = self.bind_value_subquery(select, span)?;
+        Ok(self.query_columns(block))
+    }
+
+    /// Splits a bound query into one scalar subquery per result column.
+    ///
+    /// @param block - the bound query
+    fn query_columns(&mut self, block: crate::bind::BoundSelect) -> Vec<BoundExpr> {
         let mut bound_rights = Vec::with_capacity(block.columns.len());
         for at in 0..block.columns.len() {
             let mut one = block.clone();
@@ -191,7 +216,7 @@ impl Binder<'_> {
                 collation,
             });
         }
-        compare_bound_rows(op, &bound_lefts, &bound_rights, span)
+        bound_rights
     }
 
     /// Binds a comparison between two row values.
@@ -241,6 +266,145 @@ impl Binder<'_> {
             )),
         }
     }
+}
+
+impl Binder<'_> {
+    /// Binds a row value compared with whatever is on the other side: another
+    /// row value or a one-row query.
+    ///
+    /// @param op - the operator
+    /// @param lefts - the left row's parts
+    /// @param right - the expression on the right
+    /// @param span - where the comparison was written
+    fn bind_row_versus(
+        &mut self,
+        op: BinaryOp,
+        lefts: &[ExprId],
+        right: ExprId,
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        if let Some(rights) = self.row_value_parts(right) {
+            return self.bind_row_comparison(op, lefts, &rights, span);
+        }
+        if let Some(Expr::Subquery(select)) = self.ast.expr(right) {
+            let select = *select;
+            return self.bind_row_against_query(op, lefts, select, span);
+        }
+        Err(misused(span))
+    }
+
+    /// Binds `(a, b) IS (c, d)` and `(a, b) IS NOT (c, d)`.
+    ///
+    /// `IS` over rows is `IS` over each pair, joined by `AND`; SQLite answers
+    /// it, and it was refused as `unsupported: row values`. `IS` never answers
+    /// NULL, so the negation is the negation of the chain.
+    ///
+    /// @param negated - whether the test is `IS NOT` (or `IS DISTINCT FROM`)
+    /// @param lefts - the left row's parts
+    /// @param rights - the right row's parts
+    /// @param span - where the test was written
+    pub(super) fn bind_row_is(
+        &mut self,
+        negated: bool,
+        lefts: &[ExprId],
+        rights: &[ExprId],
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        if lefts.len() != rights.len() || lefts.is_empty() {
+            return Err(misused(span));
+        }
+        let mut chain: Option<BoundExpr> = None;
+        for (left, right) in lefts.iter().zip(rights.iter()) {
+            let left = self.bind_expr(*left)?;
+            let right = self.bind_expr(*right)?;
+            let (affinity, collation) = comparison_rules(&left, &right);
+            let one = BoundExpr::Is {
+                negated: false,
+                left: Box::new(left),
+                right: Box::new(right),
+                affinity,
+                collation,
+            };
+            chain = Some(match chain {
+                None => one,
+                Some(held) => BoundExpr::And(Box::new(held), Box::new(one)),
+            });
+        }
+        let chain = chain.unwrap_or(BoundExpr::Null);
+        Ok(match negated {
+            true => BoundExpr::Not(Box::new(chain)),
+            false => chain,
+        })
+    }
+
+    /// Binds `(a, b) [NOT] BETWEEN (c, d) AND (e, f)`.
+    ///
+    /// SQLite's meaning, `row >= low AND row <= high` with the lexicographic
+    /// comparisons a row value already has. It was refused as
+    /// `unsupported: row values`.
+    ///
+    /// @param negated - whether `NOT` was written
+    /// @param parts - the tested row's parts
+    /// @param low - the lower bound
+    /// @param high - the upper bound
+    /// @param span - where the test was written
+    pub(super) fn bind_row_between(
+        &mut self,
+        negated: bool,
+        parts: &[ExprId],
+        low: ExprId,
+        high: ExprId,
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        let above = self.bind_row_versus(BinaryOp::GreaterEqual, parts, low, span)?;
+        let below = self.bind_row_versus(BinaryOp::LessEqual, parts, high, span)?;
+        let both = BoundExpr::And(Box::new(above), Box::new(below));
+        Ok(match negated {
+            true => BoundExpr::Not(Box::new(both)),
+            false => both,
+        })
+    }
+
+    /// Binds `CASE (a, b) WHEN (c, d) THEN ... END` as the searched `CASE` it
+    /// means, one row equality per `WHEN`.
+    ///
+    /// @param parts - the operand row's parts
+    /// @param branches - the `WHEN` and `THEN` expressions
+    /// @param otherwise - the `ELSE`, when written
+    /// @param span - where the `CASE` was written
+    pub(super) fn bind_row_case(
+        &mut self,
+        parts: &[ExprId],
+        branches: &[(ExprId, ExprId)],
+        otherwise: Option<ExprId>,
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        let mut bound_branches = Vec::with_capacity(branches.len());
+        for (when, then) in branches {
+            let test = self.bind_row_versus(BinaryOp::Equal, parts, *when, span)?;
+            bound_branches.push((test, self.bind_expr(*then)?));
+        }
+        let otherwise = match otherwise {
+            Some(expr) => Some(Box::new(self.bind_expr(expr)?)),
+            None => None,
+        };
+        Ok(BoundExpr::Case {
+            operand: None,
+            branches: bound_branches,
+            otherwise,
+            comparisons: Vec::new(),
+        })
+    }
+}
+
+/// Returns SQLite's refusal of a row value where a single value belongs.
+///
+/// @param span - where the row value was written
+pub(super) fn misused(span: Span) -> ParseError {
+    ParseError::new(
+        ParseErrorKind::Refused("row value misused".to_string()),
+        span,
+    )
 }
 
 /// Returns the `AND` chain that a row-value equality means.

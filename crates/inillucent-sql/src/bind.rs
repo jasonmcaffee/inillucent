@@ -3065,7 +3065,7 @@ impl<'a> Binder<'a> {
                     let expr = self.bind_expr(column.expr)?;
                     let name = match column.alias {
                         Some(alias) => self.ast.text(alias).to_vec(),
-                        None => self.default_column_name(column.expr, &expr),
+                        None => self.default_column_name(column.expr, &expr, column.span),
                     };
                     let (origin, declared_type) = self.column_origin(&expr);
                     bound.push(BoundResultColumn {
@@ -3309,7 +3309,12 @@ impl<'a> Binder<'a> {
     /// A bare column reference is named after its declared name rather than
     /// the query's text - `rowid`/`oid`/`_rowid_` resolve to the column they
     /// alias and take its name too. Everything else keeps the source text.
-    fn default_column_name(&self, id: ExprId, bound: &BoundExpr) -> Vec<u8> {
+    ///
+    /// @param id - the expression as written
+    /// @param bound - the expression, bound
+    /// @param written - the result column's span, which ends where the next
+    ///   token starts
+    fn default_column_name(&self, id: ExprId, bound: &BoundExpr, written: Span) -> Vec<u8> {
         let name = match bound {
             BoundExpr::Column { source, column, .. } => self
                 .sources
@@ -3341,8 +3346,20 @@ impl<'a> Binder<'a> {
         // exactly as written - `SELECT 1 +  2` has a column called
         // `1 +  2`, spaces and all, because SQLite cuts the span rather
         // than re-rendering the expression.
-        let span = self.ast.expr_span(id);
-        span.slice(self.source).to_vec()
+        //
+        // **The span runs to where the next token starts**, so a comment
+        // between the expression and the comma, the `FROM` or the end of the
+        // statement is part of the name: `SELECT 1 -- trailing` has a column
+        // called `1 -- trailing`. Only the whitespace at the end is trimmed,
+        // which is what SQLite's `sqlite3DbSpanDup` does. The expression's
+        // own span stopped at its last token and left the comment out.
+        let start = self.ast.expr_span(id).start;
+        let text = Span::new(start as usize, written.end as usize).slice(self.source);
+        let kept = text
+            .iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())
+            .map_or(0, |last| last.saturating_add(1));
+        text.get(..kept).unwrap_or(text).to_vec()
     }
 
     /// Returns the origin triple and declared type of a bound column.
@@ -3726,6 +3743,9 @@ impl<'a> Binder<'a> {
                 low,
                 high,
             } => {
+                if let Some(parts) = self.row_value_parts(operand) {
+                    return self.bind_row_between(negated, &parts, low, high, span);
+                }
                 let operand = self.bind_expr(operand)?;
                 let low = self.bind_expr(low)?;
                 let high = self.bind_expr(high)?;
@@ -3796,6 +3816,11 @@ impl<'a> Binder<'a> {
                 left,
                 right,
             } => {
+                if let (Some(lefts), Some(rights)) =
+                    (self.row_value_parts(left), self.row_value_parts(right))
+                {
+                    return self.bind_row_is(negated != distinct_from, &lefts, &rights, span);
+                }
                 let left = self.bind_expr(left)?;
                 let right = self.bind_expr(right)?;
                 let (affinity, collation) = comparison_rules(&left, &right);
@@ -3821,6 +3846,9 @@ impl<'a> Binder<'a> {
                 branches,
                 otherwise,
             } => {
+                if let Some(parts) = operand.and_then(|operand| self.row_value_parts(operand)) {
+                    return self.bind_row_case(&parts, &branches, otherwise, span);
+                }
                 let bound_operand = match operand {
                     Some(expr) => Some(Box::new(self.bind_expr(expr)?)),
                     None => None,
@@ -3896,7 +3924,14 @@ impl<'a> Binder<'a> {
                     collation: Collation::Binary,
                 })
             }
-            Expr::RowValue(_) => Err(unsupported("row values", span)),
+            // **A row value anywhere else is SQLite's "row value misused"**, a
+            // refusal with code 1 about the statement. Every place SQLite
+            // takes a row value - a comparison, `IS`, `BETWEEN`, `IN`, a
+            // `CASE` operand and a `SET` list - is handled before this is
+            // reached, so what is left is a statement SQLite refuses too, and
+            // reporting it as a feature not built yet told a caller to wait
+            // for something that will never come.
+            Expr::RowValue(_) => Err(rowvalue::misused(span)),
             Expr::Raise { action, message } => self.bind_raise(action, message, span),
         }
     }
