@@ -11,7 +11,8 @@ fails the build when any copy of it disagrees.
 ## Unreleased
 
 **The statement matrix's first run found 67 ways inillucent answered differently from SQLite
-3.53.4, and 66 of them are fixed.** The matrix runs every case against the pinned SQLite and
+3.53.4, and 66 of them are fixed.** Fixing them and running the matrix's random layer found seven
+more, and six of those are fixed. The matrix runs every case against the pinned SQLite and
 compares rows, result codes and counters. What changed, by what a caller sees:
 
 - **Result codes.** A refused `BEGIN`, `COMMIT` or `ROLLBACK`, an `ATTACH` past ten, an `ADD COLUMN
@@ -28,22 +29,29 @@ compares rows, result codes and counters. What changed, by what a caller sees:
   row. `UPDATE ... SET (a, b) = (...)` and `= (SELECT ...)`, and row values with `IS`, `BETWEEN`
   and a `CASE` operand, all run. A full text `MATCH` under an `OR`, and a `MATCH` written on one
   FTS5 column, run. An `IN` list on a joined table, a correlated subquery over a nested subquery,
-  and an `UPDATE` of a virtual table computed from the row all run. `CREATE TABLE ... AS WITH ...`,
+  an `UPDATE` of a virtual table computed from the row, and a correlated `EXISTS` in a join's `ON`
+  clause all run. `CREATE TABLE ... AS WITH ...`,
   `CREATE INDEX` on a temporary table, `CREATE TEMP TABLE temp.t` and `ANALYZE` of an attached
   schema run. Every pragma that returns a value has its `pragma_<name>` table function.
 - **Wrong answers.** A `RIGHT` or `FULL JOIN` put the right table's values in the left table's
-  columns; it no longer does. `sum()` over text holding integers is an integer, the remainder of a
+  columns; it no longer does. `UNION`, `EXCEPT` and `INTERSECT` return their rows in key order,
+  and when two rows are equal but not identical, such as `0` and `0.0`, they keep the row SQLite
+  keeps. `sum()` over text holding integers is an integer, the remainder of a
   real is a real, a `STRICT` table's `ANY` column keeps text as text, and negative zero, `unicode()`,
   `substr()`, `replace()`, a unary minus on text and a division by text answer what SQLite answers.
-  A `DROP COLUMN` a view uses is refused, `PRAGMA auto_vacuum` survives a reopen, and VACUUM keeps a
+  An `OR` conflict clause no longer applies to a `STRICT` column's type check. A `DROP COLUMN` a
+  view uses is refused, `PRAGMA auto_vacuum` survives a reopen, and VACUUM keeps a
   table with a stored generated column.
 - **The Rust driver can cancel a statement from another thread.** `Database::cancel_handle()`
   returns a `CancelHandle` that is `Send` and `Sync`, and `inillucent_cancel` in the C library now
   sets the flag and touches nothing else.
 
-The one left is a table whose columns do not fit one page, such as 2,000 columns at a page of 4,096
-bytes. It is refused with exit code 3 and a message that names the column count and says a larger
-page size holds it.
+Two are left. A table whose columns do not fit one page, such as 2,000 columns at a page of 4,096
+bytes, is refused with exit code 3 and a message that names the column count and says a larger
+page size holds it. And when the query of an `INSERT ... SELECT` fails part way, SQLite has already
+written and undone the earlier rows, so `last_insert_rowid()` names the last of them, while
+inillucent evaluates the query before it writes any row and leaves `last_insert_rowid()` where it
+was. The table ends the same in both.
 
 **A new example, `examples/coffee-shop`: a coffee shop's orders, stock and double entry books, as a
 REST API in Rust.** It takes orders with sizes and modifiers, prices them with promotion codes,
