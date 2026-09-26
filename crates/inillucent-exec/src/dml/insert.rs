@@ -51,10 +51,24 @@ pub fn insert(
 ///
 /// @param error - what the statement failed with
 /// @param on_conflict - the statement's own `OR` clause
+///
+/// **Only a constraint the clause resolves takes it.** SQLite applies a
+/// conflict algorithm to `NOT NULL`, `CHECK`, `PRIMARY KEY`, `UNIQUE` and the
+/// rowid, and to nothing else: a `STRICT` column's datatype check, a foreign
+/// key and an error while a value is computed all abort the statement
+/// whatever it says. An `INSERT OR ROLLBACK` of text into a `STRICT INTEGER`
+/// column ended the transaction here where SQLite leaves it open, and an
+/// `INSERT OR FAIL` kept the rows before the failing one where SQLite keeps
+/// none.
 pub(crate) fn outer_unwind(error: DbError, on_conflict: Option<ConflictAction>) -> DbError {
+    use inillucent_sql::dml::codes;
+    let resolved = matches!(
+        error.extended().0,
+        codes::NOT_NULL | codes::CHECK | codes::PRIMARY_KEY | codes::UNIQUE | codes::ROWID
+    );
     match on_conflict {
-        Some(action) => error.with_outer_unwind(unwind_of(Some(action))),
-        None => error,
+        Some(action) if resolved => error.with_outer_unwind(unwind_of(Some(action))),
+        _ => error,
     }
 }
 /// Applies an `INSERT` that is already some triggers deep.
@@ -990,7 +1004,12 @@ mod tests {
     /// abandons the transaction, not just the row.
     #[test]
     fn the_inner_clause_decides_the_outer_unwind() {
-        let refused = || misuse("UNIQUE constraint failed: t.a");
+        let refused = || {
+            DbError::new(inillucent_base::ExtendedCode(
+                inillucent_sql::dml::codes::UNIQUE,
+            ))
+            .with_message("UNIQUE constraint failed: t.a")
+        };
         assert_eq!(
             outer_unwind(refused(), Some(ConflictAction::Rollback)).unwind(),
             Unwind::Transaction
@@ -1002,6 +1021,29 @@ mod tests {
         );
         assert_eq!(
             outer_unwind(refused(), Some(ConflictAction::Abort)).unwind(),
+            Unwind::Statement
+        );
+    }
+
+    /// A failure the clause does not resolve keeps the statement abort.
+    ///
+    /// A `STRICT` column's datatype check aborts the statement in SQLite
+    /// whatever the `OR` clause says, so `OR ROLLBACK` leaves the transaction
+    /// open and `OR FAIL` keeps nothing.
+    #[test]
+    fn a_datatype_failure_ignores_the_clause() {
+        let refused = || {
+            DbError::new(inillucent_base::ExtendedCode(
+                inillucent_sql::dml::codes::DATATYPE,
+            ))
+            .with_message("cannot store TEXT value in INTEGER column t.a")
+        };
+        assert_eq!(
+            outer_unwind(refused(), Some(ConflictAction::Rollback)).unwind(),
+            Unwind::Statement
+        );
+        assert_eq!(
+            outer_unwind(refused(), Some(ConflictAction::Fail)).unwind(),
             Unwind::Statement
         );
     }

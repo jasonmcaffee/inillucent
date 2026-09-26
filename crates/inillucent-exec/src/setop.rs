@@ -239,9 +239,7 @@ impl SetOp {
     /// integer 1; this operator kept whichever arrived first and answered the
     /// integer for both.
     ///
-    /// The row's first position is kept rather than moved to the end, so the
-    /// order rows come out in is the order they came in - which is what this
-    /// operator has always done and what the rest of the suite was graded on.
+    /// The rows come out in key order; see [`SetOp::finish`].
     ///
     /// @param encoded - the row's key
     /// @param row - the row itself
@@ -295,9 +293,29 @@ impl Sink for SetOp {
     /// collector in `physical/run.rs` was already holding: every arm of a
     /// compound is materialised into a `Vec<Vec<OwnedDatum>>` before this
     /// operator sees it, so nothing that used to stream stopped streaming.
+    ///
+    /// **In key order, which is the order SQLite answers in.** SQLite builds a
+    /// distinct set operation in an ephemeral index keyed by the whole row and
+    /// reads the index back, so `SELECT 3 UNION SELECT 1 UNION SELECT 2`
+    /// answers 1, 2, 3, and `EXCEPT` and `INTERSECT` come out sorted the same
+    /// way. This operator answered in the order the rows arrived. No `ORDER
+    /// BY` means SQL promises no order, but applications read it anyway, and
+    /// an `UPDATE ... FROM` over a `UNION` keeps whichever of two matching
+    /// rows comes first - so the order decided which value was stored. The
+    /// encoded key sorts the way the tree does, under each column's collation,
+    /// so sorting by it is sorting the way SQLite's index does.
     fn finish(&mut self) -> DbResult<()> {
-        let kept = std::mem::take(&mut self.kept);
-        emit_rows(&kept, self.downstream.as_mut())?;
+        let mut order: Vec<(Vec<u8>, usize)> = self.seen.drain().collect();
+        order.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let mut kept: Vec<Option<Vec<OwnedDatum>>> = std::mem::take(&mut self.kept)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let sorted: Vec<Vec<OwnedDatum>> = order
+            .into_iter()
+            .filter_map(|(_, at)| kept.get_mut(at).and_then(Option::take))
+            .collect();
+        emit_rows(&sorted, self.downstream.as_mut())?;
         self.downstream.finish()
     }
 
@@ -439,9 +457,11 @@ mod tests {
             .push(&Batch::new(2, vec![Vector::Values(&rows)]))
             .expect("the push succeeds");
         binary.finish().expect("the finish succeeds");
+        // In key order, as SQLite answers `SELECT 'blue' UNION SELECT 'BLUE'`:
+        // under BINARY the capitals sort first.
         assert_eq!(
             text_column(&exact.borrow()),
-            vec![b"blue".to_vec(), b"BLUE".to_vec()]
+            vec![b"BLUE".to_vec(), b"blue".to_vec()]
         );
     }
 
