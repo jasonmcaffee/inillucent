@@ -852,3 +852,12 @@ they are touching do not collide; two that have not, do.
   once reached 66 GB with the machine nearly out of memory, so do not run matrix code outside these.
 - The change tier takes about 57 s and the merge tier about 15 minutes on this machine, measured with
   their times recorded in `tests/timings.toml`. A merge run holds most of the machine for that long.
+- **Two `inillucent-matrix` runs from one worktree share `_agent_output/matrix/run/t0..tN` and corrupt
+  each other.** A single case run beside a full run wiped `t0`'s fixtures, and 1,141 failure lines
+  said `no such table` for tables the cases had just created. Give every side run its own scratch
+  root with `INILLUCENT_MATRIX_ROOT=<folder>`, and copy the binary (`matrix-run.exe`) before a long
+  run so a rebuild does not fail on a locked executable. (task-2136)
+- **A known.list line that is not reported stale still differs; it is not proof the line is
+  right.** Three lanes removed lines whose own cases still disagreed for a different reason. To see
+  what a listed case differs on, run it from a `.slt` under a new case id (`case x-<id>`), which
+  the list does not hide. (task-2136)

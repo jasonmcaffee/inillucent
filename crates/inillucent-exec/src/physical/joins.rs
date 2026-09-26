@@ -539,15 +539,40 @@ pub(crate) fn has_equi_key(
     let Some(source_term) = plan.sources.get(stage.term) else {
         return Ok(false);
     };
-    let Some(expr) = source_term
-        .on
-        .as_ref()
-        .or_else(|| plan.residuals.get(index).and_then(Option::as_ref))
-    else {
+    let Some(expr) = keyable(
+        source_term
+            .on
+            .as_ref()
+            .or_else(|| plan.residuals.get(index).and_then(Option::as_ref)),
+    ) else {
         return Ok(false);
     };
-    let translated = translate_scan(expr, space, params)?;
+    let translated = translate_scan(&expr, space, params)?;
     Ok(crate::autoindex::equi_keys(&translated, stage.offset, stage.width).is_some())
+}
+
+/// Returns the part of a join condition a hash key can be looked for in: its
+/// conjuncts that hold no subquery, joined again, or `None` when none do.
+///
+/// **A correlated subquery is not a key, and it cannot be translated here.**
+/// It is answered beside the joined row, by the correlation operator above
+/// every join, and the join step's space has no column for it - so
+/// translating the whole residual to look for equalities refused the
+/// statement as "a correlated subquery used as a value". `FROM t2 CROSS JOIN
+/// t1 WHERE EXISTS (SELECT 1 FROM t2 AS q WHERE q.a = t1.a)` was refused that
+/// way, and it runs when the key search reads only the other conjuncts: the
+/// residual itself is still applied whole, above the joins.
+///
+/// @param condition - the join step's `ON` or residual, when it has one
+fn keyable(condition: Option<&BoundExpr>) -> Option<BoundExpr> {
+    let condition = condition?;
+    if !inillucent_sql::plan::expression_holds_subquery(condition) {
+        return Some(condition.clone());
+    }
+    inillucent_sql::plan::conjunction(condition)
+        .into_iter()
+        .filter(|term| !inillucent_sql::plan::expression_holds_subquery(term))
+        .reduce(|left, right| BoundExpr::And(Box::new(left), Box::new(right)))
 }
 /// Reports whether an expression reads any column at all.
 ///
@@ -730,12 +755,14 @@ fn build_materialised_join<'t>(
         // change an answer; removing it would mean proving that the key
         // captured the whole predicate, and this operator has no way to prove
         // that about an expression it declined to look inside.
-        let keyed = source_term
-            .on
-            .as_ref()
-            .or_else(|| plan.residuals.get(index).and_then(Option::as_ref));
+        let keyed = keyable(
+            source_term
+                .on
+                .as_ref()
+                .or_else(|| plan.residuals.get(index).and_then(Option::as_ref)),
+        );
         if let Some(expr) = keyed {
-            let translated = translate_scan(expr, space, params)?;
+            let translated = translate_scan(&expr, space, params)?;
             if let Some(keys) = crate::autoindex::equi_keys(&translated, stage.offset, stage.width)
             {
                 let outer_types: Vec<StaticType> = space
