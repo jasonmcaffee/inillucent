@@ -520,22 +520,46 @@ impl crate::ImportedDatabase {
             // is what makes a refused command's `changes()` its own instead
             // of an earlier statement's leftover.
             let built = super::stages::elapsed(row_started);
-            let kept = (!statement.returning.is_empty()).then(|| (rowid.clone(), cells.clone()));
-            let applied = self.change_module(
-                &statement.table.name,
-                &Change::Insert {
-                    rowid,
-                    values: cells,
-                },
-            );
+            let change = Change::Insert {
+                rowid,
+                values: cells,
+            };
+            let applied = match self.change_module(&statement.table.name, &change) {
+                // **`OR REPLACE` removes the row whose rowid is taken and
+                // tries again**, which is what SQLite asks FTS5 to do for it.
+                // Only a constraint failure on a rowid the statement named
+                // can be answered that way.
+                Err(error) if module_replaces(statement, &error, &change) => {
+                    self.replace_in_module(&statement.table.name, &change)
+                }
+                applied => applied,
+            };
             let whole = super::stages::elapsed(row_started);
             super::stages::record(|stages| {
                 stages.rows = stages.rows.saturating_add(1);
                 stages.values = stages.values.saturating_add(built);
                 stages.whole = stages.whole.saturating_add(whole);
             });
-            let assigned = match applied {
-                Ok(assigned) => assigned,
+            // **The `RETURNING` image is kept before the outcome is known.**
+            // SQLite evaluates `RETURNING` for a virtual table from the values
+            // it hands the module, so a row `OR IGNORE` skips is still
+            // returned, and a rowid the module chooses reads as -1: the
+            // statement never learns it.
+            if let (false, Change::Insert { rowid, values }) =
+                (statement.returning.is_empty(), &change)
+            {
+                let mut image: Vec<inillucent_tree::datum::OwnedDatum> = values
+                    .iter()
+                    .map(inillucent_tree::datum::OwnedDatum::from)
+                    .collect();
+                image.push(match rowid {
+                    Value::Null => inillucent_tree::datum::OwnedDatum::Int(-1),
+                    supplied => inillucent_tree::datum::OwnedDatum::from(supplied),
+                });
+                images.push(image);
+            }
+            match applied {
+                Ok(_) => {}
                 // **`OR IGNORE` skips a row the module refused as a
                 // constraint.** SQLite's `OP_VUpdate` turns a module's
                 // constraint failure into success under `IGNORE` and counts no
@@ -544,21 +568,20 @@ impl crate::ImportedDatabase {
                 // rest. Any other failure still fails the statement.
                 Err(error) if module_ignores(statement, &error) => continue,
                 Err(error) => return Err(error),
-            };
-            if let Some((supplied, cells)) = kept {
-                let mut image: Vec<inillucent_tree::datum::OwnedDatum> = cells
-                    .iter()
-                    .map(inillucent_tree::datum::OwnedDatum::from)
-                    .collect();
-                image.push(match assigned {
-                    Some(rowid) => inillucent_tree::datum::OwnedDatum::Int(rowid),
-                    None => inillucent_tree::datum::OwnedDatum::from(&supplied),
-                });
-                images.push(image);
             }
             *changed = changed.saturating_add(1);
         }
         Ok(())
+    }
+    /// Deletes the row a replacing insert collided with, then inserts again.
+    ///
+    /// @param table - the virtual table's name
+    /// @param change - the insert the module refused
+    fn replace_in_module(&mut self, table: &[u8], change: &Change) -> DbResult<Option<i64>> {
+        if let Change::Insert { rowid, .. } = change {
+            self.change_module(table, &Change::Delete(rowid.clone()))?;
+        }
+        self.change_module(table, change)
     }
     /// Returns the values one row of an insert supplies, in statement order.
     ///
@@ -852,5 +875,24 @@ fn module_rolls_back(
     error: &inillucent_base::error::DbError,
 ) -> bool {
     statement.on_conflict == Some(inillucent_sql::ast::ConflictAction::Rollback)
+        && error.code() == inillucent_base::error::PrimaryCode::Constraint
+}
+
+/// Reports whether an insert replaces the row a module refused it for.
+///
+/// Only under `OR REPLACE`, only for a constraint failure, and only when the
+/// statement named the rowid, because that rowid is the row to remove.
+///
+/// @param statement - the bound insert
+/// @param error - what the module answered for the row
+/// @param change - the insert the module refused
+fn module_replaces(
+    statement: &inillucent_sql::dml::BoundInsert,
+    error: &inillucent_base::error::DbError,
+    change: &Change,
+) -> bool {
+    let named = matches!(change, Change::Insert { rowid, .. } if !matches!(rowid, Value::Null));
+    named
+        && statement.on_conflict == Some(inillucent_sql::ast::ConflictAction::Replace)
         && error.code() == inillucent_base::error::PrimaryCode::Constraint
 }

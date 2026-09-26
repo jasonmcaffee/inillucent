@@ -765,7 +765,13 @@ impl<'a> Binder<'a> {
         let schema = self.bind_update_schema(&table);
         self.scopes = saved_scopes;
         let (generated, checks, not_null_defaults, index_exprs) = schema?;
-        let returning = self.bind_returning(&update.returning)?;
+        // `RETURNING` reads the row written and nothing else: SQLite does not
+        // let a `FROM` term take part in it, so an unqualified `k` that both
+        // the target and a `FROM` term have is the target's.
+        let saved_scopes = core::mem::replace(&mut self.scopes, vec![vec![source]]);
+        let returning = self.bind_returning(&update.returning);
+        self.scopes = saved_scopes;
+        let returning = returning?;
         // Bound as expressions, the way an aggregate's own `ORDER BY` is: a
         // write has no result columns, so a bare integer names no ordinal.
         let order_by = self.bind_aggregate_order(&update.order_by)?;
