@@ -140,6 +140,10 @@ pub struct CaseContext<'a> {
     pub counters: bool,
     /// How many setup records run inside the case before its own.
     pub setup_count: usize,
+    /// Whether grading has stopped: set by an allowed gap on a statement that
+    /// writes, after which the two databases no longer hold the same rows and
+    /// nothing later in the case can be compared.
+    pub halted: bool,
     /// Whether a `CREATE VIRTUAL TABLE` has run since the last write, which
     /// leaves SQLite's `changes()` holding what the module did to its shadow
     /// tables (see `observation_differences_counting`).
@@ -305,20 +309,27 @@ fn grade_pair(
     if !expectation_holds(record, reference, asked, index, context) {
         return;
     }
-    if reference.ok && !candidate.ok && asked.unsupported.is_some() {
-        if !context.gap_allowed() {
-            context.fail(
-                kind_of(Kind::Gap),
-                Some(index),
-                sql,
-                format!(
-                    "{label}: inillucent has not built `{}` and SQLite answered; the case names \
-                     no capability row that says `no` or `partial` ({})",
-                    asked.unsupported.as_deref().unwrap_or(""),
-                    candidate.message
-                ),
-            );
+    // A gap the case names is accepted whether SQLite answered or refused for
+    // a reason of its own: the engine did not get as far as asking itself the
+    // question SQLite's refusal answers.
+    if !candidate.ok && asked.unsupported.is_some() && context.gap_allowed() {
+        if !crate::statement_matrix::case::is_read_only(sql) {
+            context.halted = true;
         }
+        return;
+    }
+    if reference.ok && !candidate.ok && asked.unsupported.is_some() {
+        context.fail(
+            kind_of(Kind::Gap),
+            Some(index),
+            sql,
+            format!(
+                "{label}: inillucent has not built `{}` and SQLite answered; the case names \
+                 no capability row that says `no` or `partial` ({})",
+                asked.unsupported.as_deref().unwrap_or(""),
+                candidate.message
+            ),
+        );
         return;
     }
     let differences = observation_differences_counting(
@@ -359,10 +370,11 @@ fn grade_pair(
     if is_explain(sql) {
         return;
     }
-    if candidate.columns != reference.columns {
+    let columns = named_as_bound(record, &candidate.columns);
+    if crate::statement_matrix::case::asks_for_rows(sql) && columns != reference.columns {
         let detail = format!(
             "{label}: column names\n  inillucent: {:?}\n  SQLite:  {:?}",
-            candidate.columns, reference.columns
+            columns, reference.columns
         );
         context.fail(kind_of(Kind::Columns), Some(index), sql, detail);
         return;
@@ -374,6 +386,28 @@ fn grade_pair(
             sql,
             format!("{label}: {detail}"),
         );
+    }
+}
+
+/// inillucent's column names with the first run's bound values written in,
+/// the way the oracle was asked.
+///
+/// The name of a result column that is an expression is the expression's
+/// text. The oracle was sent the statement with its parameters replaced by
+/// literals (see `bind.rs`), so its names hold `2` where this engine's hold
+/// `?1`; the comparison is of what each engine was asked.
+fn named_as_bound(record: &Record, columns: &[String]) -> Vec<String> {
+    match record {
+        Record::Query { binds, .. } if !binds.is_empty() => {
+            // The oracle's names are from its last run, which is the one
+            // whose observation the comparison keeps.
+            let first = binds.last().cloned().unwrap_or_default();
+            columns
+                .iter()
+                .map(|name| crate::statement_matrix::bind::substitute(name, &first))
+                .collect()
+        }
+        _ => columns.to_vec(),
     }
 }
 

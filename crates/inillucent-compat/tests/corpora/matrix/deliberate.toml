@@ -127,3 +127,33 @@ cases = ["rid-004", "rwe-001"]
 detail = "last_insert_rowid()"
 kinds = ["counters", "fixture"]
 reason = "Once a table holds rowid 9223372036854775807, both engines choose the next rowid at random, as SQLite documents. The two draws are not meant to agree; the rows that follow are compared."
+
+[[rule]]
+name = "settings-this-engine-refuses"
+detail = "cannot be set to"
+kinds = ["outcome", "reopen"]
+reason = "inillucent refuses to change a setting it does not implement, such as legacy_alter_table or cell_size_check, instead of accepting the PRAGMA and ignoring it. The refusal names the setting and its fixed value; the pragma family grades the reads."
+
+[[rule]]
+name = "temp-store-is-memory"
+detail = "temp_store file is not available here"
+kinds = ["outcome"]
+reason = "inillucent keeps temporary tables in memory and refuses PRAGMA temp_store = FILE rather than accepting it and ignoring it."
+
+[[rule]]
+name = "reading-a-setting-this-engine-refused"
+contains = ["legacy_alter_table"]
+kinds = ["rows", "reopen"]
+reason = "After a PRAGMA legacy_alter_table = ON that inillucent refuses (settings-this-engine-refuses), reading the setting back answers the value inillucent keeps."
+
+[[rule]]
+name = "reading-cell-size-check-this-engine-refused"
+contains = ["cell_size_check"]
+kinds = ["rows", "reopen"]
+reason = "After a PRAGMA cell_size_check = ON that inillucent refuses, reading the setting back answers the value inillucent keeps."
+
+[[rule]]
+name = "reading-temp-store-this-engine-refused"
+contains = ["temp_store"]
+kinds = ["rows", "reopen"]
+reason = "After a PRAGMA temp_store = FILE that inillucent refuses, reading the setting back answers MEMORY."

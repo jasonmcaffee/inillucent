@@ -52,6 +52,15 @@ pub enum Property {
         /// The statement run between the two answers.
         between: String,
     },
+    /// A query answers the same stored with `CREATE TABLE ... AS` and read
+    /// through a view as it does on its own. Both objects are `TEMP` and are
+    /// rolled back with the check's savepoint.
+    Stored {
+        /// What the check is called in a failure.
+        name: String,
+        /// The query.
+        query: String,
+    },
     /// Query, update and delete with one predicate touch one set of rows.
     Dqe {
         /// What the check is called in a failure.
@@ -77,6 +86,7 @@ impl Property {
             Property::Same { name, .. }
             | Property::Partition { name, .. }
             | Property::Stable { name, .. }
+            | Property::Stored { name, .. }
             | Property::Dqe { name, .. } => name,
         }
     }
@@ -136,6 +146,7 @@ fn check_one(connection: &Connection<'_>, property: &Property) -> Option<Violati
         Property::Same { queries, .. } => same(connection, queries),
         Property::Partition { whole, parts, .. } => partition(connection, whole, parts),
         Property::Stable { query, between, .. } => stable(connection, query, between),
+        Property::Stored { query, .. } => stored(connection, query),
         Property::Dqe {
             table,
             key,
@@ -255,6 +266,54 @@ fn stable(connection: &Connection<'_>, query: &str, between: &str) -> Result<(),
                 preview(&before),
                 after.len(),
                 preview(&after)
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// A query stored in a table and read through a view answers what it answers
+/// on its own.
+///
+/// The stored copy is compared as a multiset of values only where every
+/// column keeps the storage class it had: `CREATE TABLE ... AS` gives each
+/// column the affinity of its expression, which may convert a value, and that
+/// conversion is SQLite's rule rather than a defect. So the stored rows are
+/// compared by count, and the view's rows exactly.
+fn stored(connection: &Connection<'_>, query: &str) -> Result<(), Refusal> {
+    let reference = match rows_of(connection, query) {
+        Ok(rows) => rows,
+        Err(_) => return Ok(()),
+    };
+    execute(
+        connection,
+        &format!("CREATE TEMP VIEW matrix_viewed AS {query}"),
+    )?;
+    let viewed = rows_of(connection, "SELECT * FROM matrix_viewed")?;
+    if !same_rows(&viewed, &reference) {
+        return Err((
+            format!(
+                "through a view the query answered {} row(s) {:?}, and on its own {} {:?}",
+                viewed.len(),
+                preview(&viewed),
+                reference.len(),
+                preview(&reference)
+            ),
+            None,
+        ));
+    }
+    execute(
+        connection,
+        &format!("CREATE TEMP TABLE matrix_stored AS {query}"),
+    )?;
+    let stored = rows_of(connection, "SELECT * FROM matrix_stored")?;
+    if stored.len() != reference.len() {
+        return Err((
+            format!(
+                "CREATE TABLE AS stored {} row(s) of a query that answers {}",
+                stored.len(),
+                reference.len()
             ),
             None,
         ));

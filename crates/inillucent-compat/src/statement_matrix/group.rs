@@ -16,7 +16,7 @@
 //!
 //! | cadence | layer 1 | layer 2, every pair | layer 2, every triple | retained |
 //! |---|---|---|---|---|
-//! | change | default arm | default arm, with layer 3 | no | every arm |
+//! | change | default arm | default arm, with layer 3, over the values not in `templates::MERGE_ONLY` | no | every arm |
 //! | merge | every arm | every arm | default and `small_pool` | every arm |
 //! | nightly | no | no | every arm | every arm |
 
@@ -115,7 +115,7 @@ pub fn work(family: &str, cadence: Cadence) -> Result<Work, String> {
             for case in hand_written {
                 runs.push((case, arms.clone()));
             }
-            for case in templates::generate(family, 2)? {
+            for case in templates::generate_change(family)? {
                 runs.push((case, default.clone()));
             }
         }

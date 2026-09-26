@@ -22,6 +22,8 @@
 //! statement ok                  the statement must succeed on both engines
 //! statement error [status]      it must fail on both, with the same codes
 //! query <types> <sort> [label]  graded against the oracle, or the result block below it
+//! bind 5 ; 'x' ; NULL            after a query header: run it with these values bound,
+//!                                once per bind line, on one prepared statement
 //! reopen                        close both databases and open them again
 //! ```
 
@@ -39,6 +41,13 @@ pub enum Sort {
     RowSort,
     /// As a sorted list of single values.
     ValueSort,
+}
+
+impl Default for Sort {
+    /// Row sort, the safe default for a generated query.
+    fn default() -> Sort {
+        Sort::RowSort
+    }
 }
 
 impl Sort {
@@ -93,6 +102,9 @@ pub enum Record {
         sort: Sort,
         /// The recorded answer, one value per line, for a case with no oracle.
         expected: Option<Vec<String>>,
+        /// Values to bind, as SQL literals, one list per run of one prepared
+        /// statement; empty runs the statement as written. See `bind.rs`.
+        binds: Vec<Vec<String>>,
         /// The SQL, one statement.
         sql: String,
     },
@@ -128,6 +140,7 @@ impl Record {
             types: "T".to_string(),
             sort,
             expected: None,
+            binds: Vec::new(),
             sql: sql.into(),
         }
     }
@@ -259,9 +272,13 @@ pub fn render_record(out: &mut String, record: &Record) {
             types,
             sort,
             expected,
+            binds,
             sql,
         } => {
             let _ = writeln!(out, "query {types} {}", sort.word());
+            for run in binds {
+                let _ = writeln!(out, "bind {}", run.join(" ; "));
+            }
             out.push_str(&one_paragraph(sql));
             out.push('\n');
             if let Some(values) = expected {
@@ -308,6 +325,22 @@ pub fn is_read_only(sql: &str) -> bool {
         inillucent_sql::classify_statement(sql.as_bytes()),
         StatementClass::ReadOnly
     )
+}
+
+/// Whether a statement is one whose rows the case compares: a query, a
+/// `PRAGMA`, an `EXPLAIN`, or a write with `RETURNING`.
+///
+/// SQLite reports result columns for some statements that are not asking a
+/// question: an `ALTER TABLE ... ADD COLUMN ... NOT NULL` compiles a check that
+/// has one. Filing that as a query compared the check's column name, which is
+/// an artifact of how SQLite implements the statement.
+///
+/// @param sql - one statement
+pub fn asks_for_rows(sql: &str) -> bool {
+    let upper = sql.trim_start().to_ascii_uppercase();
+    let first = upper.split_whitespace().next().unwrap_or("");
+    matches!(first, "SELECT" | "VALUES" | "WITH" | "PRAGMA" | "EXPLAIN")
+        || !top_level_spans(sql, "RETURNING").is_empty()
 }
 
 /// A parsed case file.
@@ -382,6 +415,14 @@ pub fn parse(text: &str, family: &str, origin: &str) -> Result<CaseFile, String>
                 }
                 let sort = Sort::parse(rest.get(1).copied().unwrap_or("nosort"))
                     .ok_or_else(|| format!("{at}: unknown sort mode"))?;
+                let mut binds = Vec::new();
+                while let Some(values) = lines
+                    .get(index)
+                    .and_then(|line| line.trim_end().strip_prefix("bind "))
+                {
+                    binds.push(crate::statement_matrix::bind::split_values(values));
+                    index = index.saturating_add(1);
+                }
                 let (sql, next) = take_sql(&lines, index);
                 index = next;
                 let mut expected = None;
@@ -408,6 +449,7 @@ pub fn parse(text: &str, family: &str, origin: &str) -> Result<CaseFile, String>
                     types,
                     sort,
                     expected,
+                    binds,
                     sql,
                 });
             }
@@ -844,7 +886,26 @@ pub fn split_statements(script: &str) -> Vec<String> {
 
 /// Adds a statement if it holds anything but whitespace and comments.
 fn push_statement(statements: &mut Vec<String>, text: &str) {
-    let trimmed = text.trim();
+    // A comment in front of a statement belongs to the gap between two
+    // statements, not to the one that follows it.
+    let mut trimmed = text.trim();
+    loop {
+        if let Some(rest) = trimmed.strip_prefix("--") {
+            trimmed = rest
+                .split_once('\n')
+                .map(|(_, after)| after)
+                .unwrap_or("")
+                .trim();
+        } else if let Some(rest) = trimmed.strip_prefix("/*") {
+            trimmed = rest
+                .split_once("*/")
+                .map(|(_, after)| after)
+                .unwrap_or("")
+                .trim();
+        } else {
+            break;
+        }
+    }
     let meaningful = trimmed
         .lines()
         .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with("--"));

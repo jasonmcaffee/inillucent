@@ -32,7 +32,7 @@
 //! its own copy, for the cost of the statements alone. A case that writes
 //! still gets a copy of its own, its reopen and its integrity check.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -185,7 +185,7 @@ impl Runner {
     /// @param cases - the cases
     pub fn run_all(&mut self, cases: &[&Case]) -> Vec<Verdict> {
         let mut verdicts: Vec<Option<Verdict>> = cases.iter().map(|_| None).collect();
-        let mut batches: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut batchable: Vec<usize> = Vec::new();
         for (index, case) in cases.iter().enumerate() {
             if !self.runs_here(case) {
                 if let Some(slot) = verdicts.get_mut(index) {
@@ -195,19 +195,16 @@ impl Runner {
                     )));
                 }
             } else if self.use_fixtures && !case.setup.is_empty() && !case.writes() {
-                batches.entry(fixture_key(case)).or_default().push(index);
+                // Only a case that reads shares a merged fixture. A case that
+                // writes starts from a copy of its own setup's fixture: a copy
+                // of a merged one holds every member's tables, and its reopen
+                // and integrity check then read all of them, which measured
+                // slower than building the case's own fixture.
+                batchable.push(index);
             }
         }
-        for members in batches.values() {
-            let batch: Vec<&Case> = members
-                .iter()
-                .filter_map(|at| cases.get(*at).copied())
-                .collect();
-            for (at, verdict) in members.iter().zip(self.run_batch(&batch)) {
-                if let Some(slot) = verdicts.get_mut(*at) {
-                    *slot = Some(verdict);
-                }
-            }
+        for union in crate::statement_matrix::union::group(cases, &batchable) {
+            self.run_union(cases, &union, &mut verdicts);
         }
         cases
             .iter()
@@ -216,17 +213,76 @@ impl Runner {
             .collect()
     }
 
+    /// Runs the members of one merged fixture: the members that only read as
+    /// one batch on one copy of it, and each member that writes on a copy of
+    /// its own.
+    ///
+    /// If the merged setup itself disagrees, each member runs again from a
+    /// fixture of its own setup, so one member's broken setup is reported as
+    /// that member's failure and not as every member's.
+    fn run_union(
+        &mut self,
+        cases: &[&Case],
+        union: &crate::statement_matrix::union::Union,
+        verdicts: &mut [Option<Verdict>],
+    ) {
+        let shared = Setup {
+            records: &union.setup,
+            oracle: union.oracle,
+            capabilities: &union.capabilities,
+        };
+        let (readers, writers): (Vec<usize>, Vec<usize>) = union
+            .members
+            .iter()
+            .copied()
+            .partition(|at| cases.get(*at).is_some_and(|case| !case.writes()));
+        let reading: Vec<&Case> = readers
+            .iter()
+            .filter_map(|at| cases.get(*at).copied())
+            .collect();
+        let mut results: Vec<(usize, Verdict)> = readers
+            .iter()
+            .copied()
+            .zip(self.run_batch(&reading, &shared))
+            .collect();
+        for at in &writers {
+            if let Some(case) = cases.get(*at) {
+                results.push((*at, self.run_on(case, Some(&shared))));
+            }
+        }
+        let shared_failed =
+            union.members.len() > 1 && results.iter().all(|(_, verdict)| broken_setup(verdict));
+        for (at, verdict) in results {
+            let verdict = match (shared_failed, cases.get(at)) {
+                (true, Some(case)) => self.run(case),
+                _ => verdict,
+            };
+            if let Some(slot) = verdicts.get_mut(at) {
+                *slot = Some(verdict);
+            }
+        }
+    }
+
     /// Runs one case on a directory of its own and grades it.
     ///
     /// @param case - the case
     pub fn run(&mut self, case: &Case) -> Verdict {
+        self.run_on(case, None)
+    }
+
+    /// Runs one case on a directory of its own, from a copy of the given
+    /// setup's fixture, or of its own setup's when none is given.
+    ///
+    /// @param case - the case
+    /// @param setup - a merged setup the case's own is part of
+    fn run_on(&mut self, case: &Case, setup: Option<&Setup<'_>>) -> Verdict {
         if !self.runs_here(case) {
             return Verdict::Skipped(format!("not run at the {} arm", self.arm.name));
         }
         let started = Instant::now();
         self.stats.cases = self.stats.cases.saturating_add(1);
         let directory = self.root.join(&case.id);
-        let verdict = self.with_replay(case, &directory, |runner| runner.attempt(case));
+        let verdict = self.with_replay(case, &directory, |runner| runner.attempt(case, setup));
         self.stats.record_case(&case.id, started.elapsed());
         if matches!(verdict, Verdict::Passed) {
             let _ = std::fs::remove_dir_all(&directory);
@@ -281,13 +337,21 @@ impl Runner {
     }
 
     /// One attempt at a case on a directory of its own.
-    fn attempt(&mut self, case: &Case) -> Result<Vec<Failure>, OracleLost> {
+    fn attempt(
+        &mut self,
+        case: &Case,
+        setup: Option<&Setup<'_>>,
+    ) -> Result<Vec<Failure>, OracleLost> {
         let directory = self.root.join(&case.id);
         let _ = std::fs::remove_dir_all(&directory);
         let _ = std::fs::create_dir_all(&directory);
         let mut setup_in_case: &[Record] = &case.setup;
         if !case.setup.is_empty() && self.use_fixtures {
-            match self.fixture(case)? {
+            let fixture = match setup {
+                Some(shared) => self.fixture_for(shared, case)?,
+                None => self.fixture(case)?,
+            };
+            match fixture {
                 Ok(fixture) => {
                     self.copy_fixture(&fixture, &directory);
                     setup_in_case = &[];
@@ -310,10 +374,11 @@ impl Runner {
             counters: !mentions_a_module(case),
             setup_count: setup_in_case.len(),
             module_pending: false,
+            halted: false,
             failures: &mut failures,
         };
         self.run_script(&script, &mut context)?;
-        if case.writes() || context.setup_count > 0 {
+        if (case.writes() || context.setup_count > 0) && !context.halted {
             self.after_reopen(&script, &mut context)?;
         }
         if context.graded {
@@ -375,7 +440,7 @@ impl Runner {
     /// A panic in one case is that case's failure; both engines are then
     /// opened again for the rest, so a case after it does not run on a
     /// connection the panic left in an unknown state.
-    fn run_batch(&mut self, cases: &[&Case]) -> Vec<Verdict> {
+    fn run_batch(&mut self, cases: &[&Case], setup: &Setup<'_>) -> Vec<Verdict> {
         let Some(first) = cases.first() else {
             return Vec::new();
         };
@@ -383,7 +448,7 @@ impl Runner {
         let directory = self.root.join(format!("batch-{}", self.batches));
         let _ = std::fs::remove_dir_all(&directory);
         let _ = std::fs::create_dir_all(&directory);
-        let fixture = match self.fixture(first) {
+        let fixture = match self.fixture_for(setup, first) {
             Ok(Ok(fixture)) => fixture,
             Ok(Err(failure)) => return fixture_failures(cases, &failure),
             Err(OracleLost(reason)) => {
@@ -440,6 +505,7 @@ impl Runner {
         };
         let connection = database.session();
         let mut oracle_open = false;
+        let first = verdicts.len();
         while let Some(case) = cases.get(verdicts.len()).copied() {
             let started = Instant::now();
             self.stats.cases = self.stats.cases.saturating_add(1);
@@ -457,6 +523,64 @@ impl Runner {
         }
         if oracle_open {
             let _ = self.close_oracle();
+        }
+        self.batch_properties(&connection, cases, directory, first, verdicts);
+    }
+
+    /// Checks the properties of every case a batch session ran, after all of
+    /// its comparisons.
+    ///
+    /// **After, and not case by case, because this engine counts `changes()`
+    /// per database rather than per session.** A property's writes are rolled
+    /// back, but they move the counter, and on this engine they move it for
+    /// every session of the database, so the next case in the batch compared a
+    /// counter the check had set. The rows are the same before and after a
+    /// rolled back check, so checking at the end asks the same questions.
+    fn batch_properties(
+        &mut self,
+        connection: &Connection<'_>,
+        cases: &[&Case],
+        directory: &Path,
+        first: usize,
+        verdicts: &mut [Verdict],
+    ) {
+        for (at, case) in cases.iter().enumerate().skip(first) {
+            let mut failures = Vec::new();
+            let mut context = CaseContext {
+                case,
+                directory,
+                graded: false,
+                counters: false,
+                setup_count: 0,
+                module_pending: false,
+                halted: false,
+                failures: &mut failures,
+            };
+            let checked = catch_unwind(AssertUnwindSafe(|| {
+                check_properties(connection, &mut context)
+            }));
+            if checked.is_err() {
+                failures.push(Failure {
+                    case: case.id.clone(),
+                    kind: Kind::Panic,
+                    statement: None,
+                    sql: String::new(),
+                    detail: "inillucent panicked checking a property".to_string(),
+                    directory: directory.to_path_buf(),
+                });
+            }
+            if failures.is_empty() {
+                continue;
+            }
+            if let Some(verdict) = verdicts.get_mut(at) {
+                *verdict = match std::mem::replace(verdict, Verdict::Passed) {
+                    Verdict::Failed(mut earlier) => {
+                        earlier.extend(failures);
+                        Verdict::Failed(earlier)
+                    }
+                    _ => Verdict::Failed(failures),
+                };
+            }
         }
     }
 
@@ -481,12 +605,14 @@ impl Runner {
             counters: !mentions_a_module(case),
             setup_count: 0,
             module_pending: false,
+            halted: false,
             failures: &mut failures,
         };
         for (index, record) in case.records.iter().enumerate() {
             self.step(connection, record, index, &mut context)?;
         }
-        check_properties(connection, &mut context);
+        // The properties are checked by `batch_properties`, after every case
+        // in the session has been compared.
         Ok(failures)
     }
 
@@ -498,12 +624,84 @@ impl Runner {
         index: usize,
         context: &mut CaseContext<'_>,
     ) -> Result<(), OracleLost> {
-        let Some(sql) = record.sql() else {
+        if record.sql().is_none() || context.halted {
             return Ok(());
-        };
-        let asked = self.ask_both(connection, sql, context)?;
+        }
+        let asked = self.ask_record(connection, record, context)?;
         grade(record, &asked, index, context, false);
         Ok(())
+    }
+
+    /// Asks both engines one record: with its bound values when it has
+    /// them (see `bind.rs`), and as written otherwise.
+    fn ask_record(
+        &mut self,
+        connection: &Connection<'_>,
+        record: &Record,
+        context: &CaseContext<'_>,
+    ) -> Result<Asked, OracleLost> {
+        let sql = record.sql().unwrap_or("");
+        match record {
+            Record::Query { binds, .. } if !binds.is_empty() => {
+                self.ask_bound(connection, sql, binds, context)
+            }
+            _ => self.ask_both(connection, sql, context),
+        }
+    }
+
+    /// Runs a statement with bound values on inillucent, one prepared
+    /// statement for every run, and on the oracle with the values written in
+    /// as literals, one statement per run. The rows of every run are kept in
+    /// run order; the counters are the last run's.
+    fn ask_bound(
+        &mut self,
+        connection: &Connection<'_>,
+        sql: &str,
+        runs: &[Vec<String>],
+        context: &CaseContext<'_>,
+    ) -> Result<Asked, OracleLost> {
+        self.stats.statements = self.stats.statements.saturating_add(runs.len());
+        let ours = localize(sql, context.directory, "inillucent");
+        let (candidate, error) =
+            crate::statement_matrix::bind::observe_bound(connection, &ours, runs);
+        let unsupported = error
+            .as_ref()
+            .and_then(|error| error.unsupported().map(str::to_string));
+        let status = error.as_ref().map(status_name);
+        let reference = if context.graded {
+            let theirs = localize(sql, context.directory, "sqlite");
+            let mut merged: Option<Observation> = None;
+            for run in runs {
+                let literal = crate::statement_matrix::bind::substitute(&theirs, run);
+                let literal =
+                    crate::statement_matrix::limited::rewrite(&literal).unwrap_or(literal);
+                let answer = self.oracle_send(&Op::Query(literal))?;
+                merged = Some(match merged {
+                    None => answer,
+                    Some(mut earlier) if earlier.ok && answer.ok => {
+                        earlier.rows.extend(answer.rows);
+                        Observation {
+                            rows: earlier.rows,
+                            ..answer
+                        }
+                    }
+                    Some(earlier) if !earlier.ok => earlier,
+                    Some(_) => answer,
+                });
+                if merged.as_ref().is_some_and(|answer| !answer.ok) {
+                    break;
+                }
+            }
+            merged
+        } else {
+            None
+        };
+        Ok(Asked {
+            candidate,
+            unsupported,
+            status,
+            reference,
+        })
     }
 
     /// Runs one record's SQL on inillucent and, when the case is graded, on
@@ -579,7 +777,7 @@ impl Runner {
                     continue;
                 };
                 if is_read_only(sql) {
-                    let asked = self.ask_both(&connection, sql, context)?;
+                    let asked = self.ask_record(&connection, record, context)?;
                     grade(record, &asked, index, context, true);
                 }
             }
@@ -624,7 +822,25 @@ impl Runner {
     /// `PRAGMA integrity_check` once, when it is built, because the cases that
     /// share it read it without writing and so are not checked themselves.
     fn fixture(&mut self, case: &Case) -> Result<Result<PathBuf, Failure>, OracleLost> {
-        let key = fixture_key(case);
+        let setup = Setup {
+            records: &case.setup,
+            oracle: case.oracle,
+            capabilities: &case.capabilities,
+        };
+        self.fixture_for(&setup, case)
+    }
+
+    /// Returns the fixture directory for a setup, building it once.
+    ///
+    /// @param setup - the setup, with its oracle flag and capability rows
+    /// @param case - the case the fixture is first built for, named in a
+    ///   failure and in the slow list
+    fn fixture_for(
+        &mut self,
+        setup: &Setup<'_>,
+        case: &Case,
+    ) -> Result<Result<PathBuf, Failure>, OracleLost> {
+        let key = setup_key(setup.records, setup.oracle);
         if let Some(found) = self.fixtures.get(&key) {
             return Ok(found.clone());
         }
@@ -634,18 +850,19 @@ impl Runner {
         let _ = std::fs::create_dir_all(&directory);
         let mut setup_case = Case::new(&case.family, &case.origin);
         setup_case.id = format!("fixture {key}");
-        setup_case.oracle = case.oracle;
-        setup_case.capabilities = case.capabilities.clone();
-        setup_case.records = in_one_transaction(&case.setup);
+        setup_case.oracle = setup.oracle;
+        setup_case.capabilities = setup.capabilities.to_vec();
+        setup_case.records = in_one_transaction(setup.records);
         let script: Vec<&Record> = setup_case.records.iter().collect();
         let mut failures = Vec::new();
         let mut context = CaseContext {
             case: &setup_case,
             directory: &directory,
-            graded: case.oracle && self.program.is_some(),
+            graded: setup.oracle && self.program.is_some(),
             counters: !mentions_a_module(&setup_case),
             setup_count: script.len(),
             module_pending: false,
+            halted: false,
             failures: &mut failures,
         };
         self.run_script(&script, &mut context)?;
@@ -741,6 +958,9 @@ impl Runner {
 
 /// Checks a case's properties on inillucent and records each violation.
 fn check_properties(connection: &Connection<'_>, context: &mut CaseContext<'_>) {
+    if context.halted {
+        return;
+    }
     let case = context.case;
     for violation in properties::check(connection, &case.properties) {
         if violation.unsupported.is_some() && context.gap_allowed() {
@@ -751,20 +971,39 @@ fn check_properties(connection: &Connection<'_>, context: &mut CaseContext<'_>) 
     }
 }
 
+/// A setup to build a fixture from: its records, whether the oracle builds
+/// it too, and the capability rows the cases it serves name.
+pub struct Setup<'a> {
+    /// The setup statements.
+    pub records: &'a [Record],
+    /// Whether the oracle builds it too.
+    pub oracle: bool,
+    /// The capability rows the cases it serves name.
+    pub capabilities: &'a [String],
+}
+
 /// The key a case's fixture is stored under: its setup and whether the oracle
 /// builds it too.
 ///
 /// @param case - the case
 pub fn fixture_key(case: &Case) -> String {
+    setup_key(&case.setup, case.oracle)
+}
+
+/// The key a setup's fixture is stored under.
+///
+/// @param records - the setup
+/// @param oracle - whether the oracle builds it too
+pub fn setup_key(records: &[Record], oracle: bool) -> String {
     let mut text = String::new();
-    for record in &case.setup {
+    for record in records {
         match record.sql() {
             Some(sql) => text.push_str(sql),
             None => text.push_str("\u{2}reopen"),
         }
         text.push('\u{1}');
     }
-    text.push_str(if case.oracle { "oracle" } else { "alone" });
+    text.push_str(if oracle { "oracle" } else { "alone" });
     let key = crate::hash::sha3_256_hex(text.as_bytes());
     key.get(..16).unwrap_or(&key).to_string()
 }
@@ -806,9 +1045,11 @@ fn creates_or_inserts(sql: &str) -> bool {
     let words: Vec<&str> = upper.split_whitespace().take(3).collect();
     match words.as_slice() {
         ["INSERT", "INTO", ..] => true,
-        ["CREATE", second, ..] => {
-            matches!(*second, "TABLE" | "INDEX" | "UNIQUE" | "VIEW" | "TRIGGER")
-        }
+        ["CREATE", second, ..] => matches!(
+            *second,
+            "TABLE" | "INDEX" | "UNIQUE" | "VIEW" | "TRIGGER" | "VIRTUAL"
+        ),
+        ["ANALYZE", ..] | ["ALTER", "TABLE", ..] => true,
         _ => false,
     }
 }
@@ -829,6 +1070,12 @@ pub fn placement_key(case: &Case) -> String {
     } else {
         fixture_key(case)
     }
+}
+
+/// Whether a verdict is a failure of the setup the case was run from.
+fn broken_setup(verdict: &Verdict) -> bool {
+    matches!(verdict, Verdict::Failed(failures)
+        if failures.iter().any(|failure| failure.kind == Kind::Fixture))
 }
 
 /// The same fixture failure for every case of a batch.

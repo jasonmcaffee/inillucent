@@ -39,6 +39,9 @@ fn main() -> ExitCode {
         Some("run") => run(&arguments[1..]),
         Some("inventory") => inventory(),
         Some("counts") => counts(),
+        Some("probe-sessions") => probe_sessions(),
+        Some("shrink") => shrink(&arguments[1..]),
+        Some("show") => show(arguments.get(1).map(String::as_str).unwrap_or("")),
         _ => Err(
             "usage: inillucent-matrix convert-part8 | convert-probe <json> | convert-syntax | \
                   run <family> [--limit N] [--arm NAME] [--threads N] [--cadence C] | inventory \
@@ -404,6 +407,125 @@ fn inventory() -> Result<(), String> {
     let path = workspace_root().join("_agent_output/matrix/inventory.md");
     write(&path, &report.markdown)?;
     println!("{}", report.summary);
+    Ok(())
+}
+
+/// Asks whether one session's `changes()` moves when another session of the
+/// same database writes, which decides whether the property checks may share
+/// a database with the case they check.
+fn probe_sessions() -> Result<(), String> {
+    let directory = workspace_root().join("_agent_output/matrix/probe-sessions");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let database = inillucent_engine::connect::Database::open(directory.join("p.rdb"))
+        .map_err(|error| error.to_string())?;
+    let first = database.session();
+    let second = database.session();
+    first
+        .execute("CREATE TABLE t(a)")
+        .map_err(|error| error.to_string())?;
+    first
+        .execute("INSERT INTO t VALUES (1), (2), (3)")
+        .map_err(|error| error.to_string())?;
+    println!("first after its insert: changes {:?}", first.changes());
+    second
+        .execute("INSERT INTO t VALUES (4)")
+        .map_err(|error| error.to_string())?;
+    println!(
+        "first after the second session's insert: changes {:?}, total {:?}",
+        first.changes(),
+        first.total_changes()
+    );
+    println!("second: changes {:?}", second.changes());
+    second
+        .execute("SAVEPOINT p")
+        .map_err(|error| error.to_string())?;
+    second
+        .execute("CREATE TEMP TABLE x AS SELECT a FROM t")
+        .map_err(|error| error.to_string())?;
+    second
+        .execute("ROLLBACK TO p")
+        .map_err(|error| error.to_string())?;
+    second
+        .execute("RELEASE p")
+        .map_err(|error| error.to_string())?;
+    println!(
+        "first after the second session's CREATE TABLE AS: changes {:?}",
+        first.changes()
+    );
+    Ok(())
+}
+
+/// Finds a case by id at any cadence.
+///
+/// @param id - the case id
+fn find(id: &str) -> Result<Case, String> {
+    for family in inillucent_compat::statement_matrix::inventory::FAMILIES {
+        for cadence in [Cadence::Change, Cadence::Merge, Cadence::Nightly] {
+            for (case, _) in group::work(family, cadence)?.runs {
+                if case.id == id {
+                    return Ok(case);
+                }
+            }
+        }
+    }
+    Err(format!("no case has the id {id}"))
+}
+
+/// Prints one case, found by id at any cadence, in the file format.
+///
+/// @param id - the case id
+fn show(id: &str) -> Result<(), String> {
+    println!("{}", find(id)?.render());
+    Ok(())
+}
+
+/// Shrinks a failing case and prints the smallest case that fails the same
+/// way; with `--save`, writes it into the retained corpus.
+///
+/// @param arguments - the case id, then `--arm NAME` and `--save`
+fn shrink(arguments: &[String]) -> Result<(), String> {
+    let id = arguments.first().ok_or("shrink needs a case id")?;
+    let arm_name = arguments
+        .iter()
+        .position(|argument| argument == "--arm")
+        .and_then(|at| arguments.get(at + 1))
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
+    let arm = group::every_arm()
+        .into_iter()
+        .find(|arm| arm.name == arm_name)
+        .ok_or_else(|| format!("no arm named {arm_name}"))?;
+    let case = find(id)?;
+    let root = workspace_root().join("_agent_output/matrix/shrink");
+    let mut runner = Runner::new(arm, &root);
+    let Some((small, runs)) =
+        inillucent_compat::statement_matrix::shrink::shrink(&mut runner, &case)
+    else {
+        return Err(format!("{id} does not fail at the {arm_name} arm"));
+    };
+    runner.finish();
+    let mut small = small;
+    let saving = arguments.iter().any(|argument| argument == "--save");
+    if saving {
+        // The retained copy is a case of its own, run at every arm on every
+        // change, so it has an id of its own beside the case it came from.
+        small.id = format!("retained-{}", small.id);
+    }
+    let mut text = small.render();
+    text = text.replacen(
+        &format!("# {} from {}", small.id, small.origin),
+        &format!("# {} shrunk in {runs} runs from {}", small.id, small.origin),
+        1,
+    );
+    println!("{text}");
+    if saving {
+        let path = corpus_root()
+            .join("retained")
+            .join(format!("{}.slt", small.id));
+        write(&path, &text)?;
+        println!("saved {}", path.display());
+    }
     Ok(())
 }
 

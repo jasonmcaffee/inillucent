@@ -443,6 +443,46 @@ Those per case costs are estimates. **The first step of the implementation measu
 cadence runs strength two over a subset of axes, and the full strength two moves to merge. The
 budget is never met by dropping families.
 
+#### Measured in phase 0
+
+Measured on 2026-09-25 with `inillucent-matrix run`, which drives the same `Runner` the suites use,
+in the debug build the tests run in, on the 24 core development machine, with the scratch files on
+the D: drive where the target directory is. Processor time is this process plus the oracle process,
+read from the oracle's own accounting.
+
+| What | Processor time per case | Wall clock per case |
+|---|---|---|
+| the first 200 part 8 cases, each building its own tables, one thread | 23.2 ms (20.2 inillucent, 3.0 oracle) | 67 ms |
+| a case that only reads, on a database of its own (`SELECT 1`), one thread | 9.8 ms | 25 ms |
+| the same at the `sqlite_page` arm (4,096 byte pages) | 5.6 ms | 21 ms |
+| a case that writes once, then reopens and runs `integrity_check`, one thread | 25 ms | 94 ms |
+| the same, 480 cases on 24 threads | 31.6 ms | 7.5 ms |
+| a read only case run inside a shared copy of its fixture, one thread | 0.47 ms | 0.2 ms |
+| the same, 2,400 cases on 24 threads | 0.62 ms | 0.2 ms |
+| copying a fixture directory | | 1.5 to 2.4 ms alone, about 6 ms on 24 threads |
+| all 1,532 Layer 1 cases at the `default` arm, 24 threads | 24.5 ms | 9.4 ms (14.4 s in all) |
+
+Three things follow, and each changed the implementation:
+
+1. **Opening and closing a database is most of the cost of a small case.** About 10 ms of the
+   engine's processor time at the default arm goes to the open and the close, and about 5 ms at
+   4,096 byte pages. So a read only case that shares its fixture with others runs inside one opened
+   copy of that fixture, which costs 0.5 ms instead of 10 to 25 ms. It asks exactly the questions it
+   would have asked of its own copy: a read cannot change the file or the connection's counters. A
+   case that writes still gets its own copy, its reopen and its integrity check.
+2. **A commit waits on the disk, and 24 threads committing at once wait on each other.** A four
+   statement fixture took about 110 ms alone and about 4 s with every thread committing. A fixture
+   whose setup only creates schema and inserts rows is now built in one transaction, which made it one
+   commit, and a case is placed on a test thread by its fixture's key when it only reads, so the
+   fixture is built once per thread that needs it.
+3. **The estimate of 2 to 5 ms of processor time per interaction case holds only for the cases that
+   read.** A case that writes costs about 25 ms of processor time and about 7.5 ms of wall clock at
+   full load. The Layer 2 templates therefore put most of their questions in read only cases over a
+   shared fixture, and keep a write in the cases whose subject is a write.
+
+After these changes the `matrix` tier, holding only Layer 1, took 21.3 s of wall clock through
+`inillucent-testrun --tier matrix`.
+
 ### 8.2 Tiers and selection
 
 Two new tiers in `tests/selection.toml`:

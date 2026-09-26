@@ -64,7 +64,7 @@ pub fn convert(oracle: &mut Driver, scratch: &Path, source: &Source) -> Result<C
             });
             break;
         }
-        if observed.columns.is_empty() || !asks_for_rows(&sql) {
+        if observed.columns.is_empty() || !crate::statement_matrix::case::asks_for_rows(&sql) {
             case.records.push(Record::ok(sql));
             continue;
         }
@@ -77,6 +77,7 @@ pub fn convert(oracle: &mut Driver, scratch: &Path, source: &Source) -> Result<C
             types: type_letters(&observed.columns, &observed.rows),
             sort,
             expected: None,
+            binds: Vec::new(),
             sql,
         });
     }
@@ -86,22 +87,6 @@ pub fn convert(oracle: &mut Driver, scratch: &Path, source: &Source) -> Result<C
     }
     inillucent_base::testing::remove_database(&path);
     Ok(case)
-}
-
-/// Whether a statement is one whose rows the case compares: a query, a
-/// `PRAGMA`, an `EXPLAIN`, or a write with `RETURNING`.
-///
-/// SQLite reports result columns for some statements that are not asking a
-/// question: an `ALTER TABLE ... ADD COLUMN ... NOT NULL` compiles a check that
-/// has one. Filing that as a query compared the check's column name, which is
-/// an artifact of how SQLite implements the statement.
-///
-/// @param sql - one statement
-fn asks_for_rows(sql: &str) -> bool {
-    let upper = sql.trim_start().to_ascii_uppercase();
-    let first = upper.split_whitespace().next().unwrap_or("");
-    matches!(first, "SELECT" | "VALUES" | "WITH" | "PRAGMA" | "EXPLAIN")
-        || !crate::statement_matrix::case::top_level_spans(sql, "RETURNING").is_empty()
 }
 
 /// The sqllogictest type letters for a result: `I` for an integer, `R` for a
@@ -600,7 +585,10 @@ fn syntax_case(
             expect: Expect::Error(None),
             sql,
         }
-    } else if single && !observed.columns.is_empty() && asks_for_rows(&sql) {
+    } else if single
+        && !observed.columns.is_empty()
+        && crate::statement_matrix::case::asks_for_rows(&sql)
+    {
         Record::Query {
             types: type_letters(&observed.columns, &observed.rows),
             sort: if total_order(&sql) {
@@ -609,6 +597,7 @@ fn syntax_case(
                 Sort::RowSort
             },
             expected: None,
+            binds: Vec::new(),
             sql,
         }
     } else {

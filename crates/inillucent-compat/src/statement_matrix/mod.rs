@@ -24,6 +24,7 @@
 //! reaches the engine; [`inventory`] proves every AST variant, function,
 //! pragma, module, collation, syntax production and capability row has a case.
 
+pub mod bind;
 pub mod case;
 pub mod convert;
 pub mod cover;
@@ -38,3 +39,4 @@ pub mod run;
 pub mod shrink;
 pub mod surfaces;
 pub mod templates;
+pub mod union;
