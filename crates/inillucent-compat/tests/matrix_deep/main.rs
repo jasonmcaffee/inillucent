@@ -24,6 +24,7 @@ mod retained;
 mod schema;
 mod select;
 mod subquery;
+mod surfaces;
 mod transaction;
 mod trigger;
 mod update;

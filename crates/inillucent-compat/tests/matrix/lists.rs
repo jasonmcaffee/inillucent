@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use inillucent_compat::statement_matrix::group::{work, Cadence};
 use inillucent_compat::statement_matrix::inventory::FAMILIES;
 use inillucent_compat::statement_matrix::known::{corpus_root, read_deliberate, read_known};
+use inillucent_compat::statement_matrix::surfaces;
 
 /// Every case id at every cadence, with the family it came from.
 fn every_case_id() -> BTreeMap<String, Vec<String>> {
@@ -36,7 +37,12 @@ fn the_known_list_names_only_cases_that_exist() {
     let known =
         read_known(&corpus_root().join("known.list")).unwrap_or_else(|problem| panic!("{problem}"));
     let ids = every_case_id();
-    let orphans: Vec<&String> = known.keys().filter(|id| !ids.contains_key(*id)).collect();
+    // A surface's line is `<case id>@<surface>`; an API case is named alone.
+    let exists = |id: &String| match id.split_once('@') {
+        Some((base, surface)) => ids.contains_key(base) && surfaces::SURFACES.contains(&surface),
+        None => ids.contains_key(id) || surfaces::CASES.contains(&id.as_str()),
+    };
+    let orphans: Vec<&String> = known.keys().filter(|id| !exists(id)).collect();
     assert!(
         orphans.is_empty(),
         "these ids are in known.list and no cadence runs a case with that id. A renamed or \

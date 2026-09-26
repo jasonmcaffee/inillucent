@@ -1,0 +1,63 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-derived-table
+capability derived_table
+
+statement ok
+CREATE TABLE cap_derived (a INTEGER PRIMARY KEY)
+
+query T rowsort
+SELECT x FROM (SELECT a AS x FROM cap_derived)
+
+case capability-row-value-in-subquery
+capability row_value_in_subquery
+
+statement ok
+CREATE TABLE t (a INTEGER, b INTEGER)
+
+statement ok
+CREATE TABLE s (x INTEGER, y INTEGER)
+
+query T rowsort
+SELECT 1 FROM t WHERE (a, b) IN (SELECT x, y FROM s)
+
+case capability-subquery-value-in-a-virtual-table
+capability subquery_value_in_a_virtual_table
+
+statement ok
+CREATE TABLE cap_shelf (title TEXT)
+
+statement ok
+INSERT INTO cap_shelf VALUES ('dune')
+
+statement ok
+CREATE VIRTUAL TABLE cap_docs USING fts5(title)
+
+statement ok
+INSERT INTO cap_docs(title) VALUES ((SELECT title FROM cap_shelf LIMIT 1))
+
+case capability-subquery-in-a-trigger-body
+capability subquery_in_a_trigger_body
+
+statement ok
+CREATE TABLE cap_running (id INTEGER PRIMARY KEY, v INTEGER, total INTEGER)
+
+statement ok
+CREATE TRIGGER cap_running_total AFTER INSERT ON cap_running BEGIN UPDATE cap_running SET total = (SELECT sum(v) FROM cap_running) WHERE id = new.id; END
+
+statement ok
+INSERT INTO cap_running (id, v) VALUES (1, (SELECT 10))
+
+case capability-correlated-in-over-a-grouped-block
+capability correlated_in_over_a_grouped_block
+
+statement ok
+CREATE TABLE t (a INTEGER, b INTEGER)
+
+statement ok
+CREATE TABLE s (x INTEGER, y INTEGER)
+
+query T rowsort
+SELECT a FROM t WHERE a IN (SELECT x FROM s WHERE s.y = t.b GROUP BY x)
+

@@ -1,0 +1,24 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-aggregate-in-compound-arm
+capability aggregate_in_compound_arm
+
+statement ok
+CREATE TABLE cap_compound_agg (a INTEGER)
+
+statement ok
+INSERT INTO cap_compound_agg VALUES (1), (2), (3)
+
+query I rowsort
+SELECT sum(v) FROM                   (SELECT 9 AS v UNION ALL SELECT count(*) FROM cap_compound_agg GROUP BY a)
+
+case capability-compound-ordered-by-expression
+capability compound_ordered_by_expression
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+statement error
+SELECT a FROM t UNION SELECT a FROM t ORDER BY a + 1
+

@@ -1,0 +1,25 @@
+# Hand written subquery cases the templates leave out.
+
+case subquery-in-table
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES (1), (2), (NULL)
+
+query T rowsort
+SELECT 2 IN t, 5 IN t, 5 NOT IN t, NULL IN t
+
+case subquery-in-table-function
+query T rowsort
+SELECT 2 IN json_each('[1,2,3]'), 7 IN json_each('[1,2,3]')
+
+case subquery-in-schema-table
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES (4)
+
+query T rowsort
+SELECT 4 IN main.t

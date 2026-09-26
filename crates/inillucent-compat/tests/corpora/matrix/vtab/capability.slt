@@ -1,0 +1,21 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-fts5-unavailable-tokenizer
+capability fts5_unavailable_tokenizer
+
+statement ok
+CREATE VIRTUAL TABLE d USING fts5(body, tokenize='trigram')
+
+case capability-fts5-detail-option
+capability fts5_detail_option
+
+statement ok
+CREATE VIRTUAL TABLE d USING fts5(body, detail='none')
+
+case capability-fts5-columnsize-option
+capability fts5_columnsize_option
+
+statement ok
+CREATE VIRTUAL TABLE d USING fts5(body, columnsize=0)
+

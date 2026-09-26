@@ -137,8 +137,8 @@ revision selects nothing and exits 0. Pass `--changed origin/main`.
 
 | Cadence | Tiers | Where it runs |
 |---|---|---|
-| `change` | smoke, unit, engine, differential, e2e, retrieval, tooling | `--changed`, by the dependency closure of what you edited |
-| `merge` | durability, perf | `--changed` only when a crate you edited is in the target's `covers`; every push in CI |
+| `change` | smoke, unit, engine, differential, e2e, retrieval, tooling, matrix | `--changed`, by the dependency closure of what you edited |
+| `merge` | durability, perf, matrix_deep | `--changed` only when a crate you edited is in the target's `covers`; every push in CI |
 | `nightly` | nightly | never on a change; the nightly job, or `--tier nightly` by name |
 
 So a parser change does not run the crash suites or the nightly stories, and a change to the write

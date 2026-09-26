@@ -1,0 +1,93 @@
+# One case for each built in function the templates and the converted corpora
+# do not call. tooling::matrix_inventory reads PRAGMA function_list from a live
+# engine and fails for a function no case calls.
+
+case function-fts5-source-id
+query T rowsort
+SELECT typeof(fts5_source_id())
+
+case function-if
+query T rowsort
+SELECT if(1 > 2, 'yes', 'no'), if(0, 'a'), if(NULL, 1, 2)
+
+case function-json-array-insert
+query T rowsort
+SELECT json_array_insert('[1,2,3]', '$[1]', 9), json_array_insert('[1,2,3]', '$[#]', 4)
+
+case function-jsonb-array
+query T rowsort
+SELECT json(jsonb_array(1, 'two', NULL)), typeof(jsonb_array(1))
+
+case function-jsonb-array-insert
+query T rowsort
+SELECT json(jsonb_array_insert('[1,2,3]', '$[1]', 9))
+
+case function-jsonb-group-object
+query T rowsort
+SELECT json(jsonb_group_object(k, v)) FROM (SELECT 'a' AS k, 1 AS v UNION ALL SELECT 'b', 2)
+
+case function-jsonb-insert
+query T rowsort
+SELECT json(jsonb_insert('{"a":1}', '$.b', 2, '$.a', 9))
+
+case function-jsonb-object
+query T rowsort
+SELECT json(jsonb_object('a', 1, 'b', 'x'))
+
+case function-jsonb-patch
+query T rowsort
+SELECT json(jsonb_patch('{"a":1,"b":2}', '{"b":null,"c":3}'))
+
+case function-jsonb-remove
+query T rowsort
+SELECT json(jsonb_remove('[1,2,3]', '$[0]')), json(jsonb_remove('{"a":1,"b":2}', '$.a'))
+
+case function-jsonb-replace
+query T rowsort
+SELECT json(jsonb_replace('{"a":1}', '$.a', 5, '$.b', 6))
+
+case function-jsonb-set
+query T rowsort
+SELECT json(jsonb_set('{"a":1}', '$.a', 5, '$.b', 6))
+
+case function-optimize
+query T rowsort
+SELECT typeof(optimize())
+
+case function-compileoption-get
+query T rowsort
+SELECT typeof(sqlite_compileoption_get(0)), sqlite_compileoption_get(100000)
+
+case function-compileoption-used
+query T rowsort
+SELECT sqlite_compileoption_used('NO_SUCH_OPTION_AT_ALL')
+
+case function-sqlite-log
+query T rowsort
+SELECT sqlite_log(1, 'matrix')
+
+case function-source-id
+query T rowsort
+SELECT typeof(sqlite_source_id())
+
+case function-subtype
+query T rowsort
+SELECT subtype(1), subtype('x'), subtype(NULL)
+
+case function-unistr
+query T rowsort
+SELECT unistr('AB\U00000043\'), unistr('plain')
+
+case function-unistr-quote
+query T rowsort
+SELECT unistr_quote('a''b' || char(10)), unistr_quote(12)
+
+case function-rtree
+statement ok
+CREATE VIRTUAL TABLE r USING rtree(id, x0, x1)
+
+statement ok
+INSERT INTO r VALUES (1, 0, 10), (2, 5, 15)
+
+query T rowsort
+SELECT rtreecheck('r'), rtreedepth(data), typeof(rtreenode(2, data)) FROM r_node WHERE nodeno = 1

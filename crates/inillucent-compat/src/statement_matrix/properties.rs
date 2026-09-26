@@ -495,10 +495,3 @@ fn value_order(left: &TaggedValue, right: &TaggedValue) -> std::cmp::Ordering {
 fn preview(rows: &[Vec<TaggedValue>]) -> Vec<Vec<TaggedValue>> {
     rows.iter().take(6).cloned().collect()
 }
-
-/// Converts an engine row to tagged values, for callers outside this module.
-///
-/// @param row - the engine's values
-pub fn tagged_row(row: &[inillucent_tree::datum::OwnedDatum]) -> Vec<TaggedValue> {
-    row.iter().map(tagged).collect()
-}

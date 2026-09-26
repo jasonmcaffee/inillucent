@@ -26,6 +26,7 @@ mod documentation;
 mod escapes;
 mod gates_fail_closed;
 mod harness;
+mod matrix_inventory;
 mod policy;
 mod scenarios;
 mod selection;

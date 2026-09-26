@@ -1,0 +1,78 @@
+# The vector functions and operators the vector template does not call. The
+# pinned SQLite has no vectors, so each answer below was worked out by hand
+# from the inputs: a vector is stored as little endian 32 bit floats, so
+# [4, 6] is 00008040 0000c040, and binary_quantize sets one bit per positive
+# component, first component in the high bit.
+
+oracle none
+
+case vector-l1-operator
+query T rowsort
+SELECT '[1,2,3]' <+> '[4,0,3]', l1_distance('[1,2]', '[4,0]')
+----
+5.000
+5.000
+
+case vector-binary-distances
+query T rowsort
+SELECT hamming_distance(binary_quantize('[1,-1,1,1]'), binary_quantize('[1,1,-1,1]')), binary_quantize('[1,-1,1,1]') <~> binary_quantize('[1,1,-1,1]'), jaccard_distance(binary_quantize('[1,-1,1,1]'), binary_quantize('[1,1,-1,1]')), binary_quantize('[1,-1,1,1]') <%> binary_quantize('[1,1,-1,1]')
+----
+2.000
+2.000
+0.500
+0.500
+
+case vector-binary-quantize
+query T rowsort
+SELECT typeof(binary_quantize('[1,-1]')), hex(binary_quantize('[1,-1,1,1]'))
+----
+blob
+B0
+
+case vector-arithmetic
+query T rowsort
+SELECT hex(vector_add('[1,2]', '[3,4]')), hex(vector_sub('[1,2]', '[3,4]')), hex(vector_mul('[1,2]', '[3,4]'))
+----
+000080400000C040
+000000C0000000C0
+0000404000000041
+
+case vector-concat-subvector
+query T rowsort
+SELECT hex(vector_concat('[1,2]', '[3]')), hex(subvector('[1,2,3,4]', 2, 2))
+----
+0000803F0000004000004040
+0000004000004040
+
+case vector-named-distances
+query T rowsort
+SELECT cosine_distance('[1,0]', '[0,1]'), l2_distance('[0,0]', '[3,4]'), inner_product('[1,2]', '[3,4]'), hex(l2_normalize('[3,4]'))
+----
+1.000
+5.000
+11.000
+9A99193FCDCC4C3F
+
+case vector-ivfflat-index
+statement ok
+CREATE TABLE p(id INTEGER PRIMARY KEY, v VECTOR(2))
+
+statement ok
+INSERT INTO p VALUES (1, '[1,0]'), (2, '[0,1]'), (3, '[5,5]'), (4, '[1,1]')
+
+statement ok
+CREATE INDEX pv ON p USING ivfflat (v) WITH (lists = 2, probes = 2)
+
+query T nosort
+SELECT id FROM p ORDER BY v <-> '[1,0.1]', id LIMIT 2
+----
+1
+4
+
+reopen
+
+query T nosort
+SELECT id FROM p ORDER BY v <-> '[1,0.1]', id LIMIT 2
+----
+1
+4

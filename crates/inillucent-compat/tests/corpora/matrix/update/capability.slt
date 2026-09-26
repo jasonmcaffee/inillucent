@@ -1,0 +1,12 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-changing-a-schema-row
+capability changing_a_schema_row
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+statement error
+UPDATE sqlite_schema SET sql = 'x' WHERE name = 't'
+

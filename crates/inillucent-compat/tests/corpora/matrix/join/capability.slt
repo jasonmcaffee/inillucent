@@ -1,0 +1,27 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-inner-join
+capability inner_join
+
+statement ok
+CREATE TABLE cap_l (a INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE cap_r (a INTEGER PRIMARY KEY)
+
+query T rowsort
+SELECT cap_l.a FROM cap_l JOIN cap_r ON cap_l.a = cap_r.a
+
+case capability-outer-join
+capability outer_join
+
+statement ok
+CREATE TABLE cap_ol (a INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE cap_or (a INTEGER PRIMARY KEY)
+
+query T rowsort
+SELECT cap_ol.a FROM cap_ol LEFT JOIN cap_or ON cap_ol.a = cap_or.a
+

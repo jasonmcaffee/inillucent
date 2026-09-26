@@ -1,0 +1,82 @@
+# Virtual tables the sqlite3 shell compiles in and the oracle library does not
+# have: fts3 and fts4 with matchinfo and offsets, bytecode, tables_used,
+# completion and sqlite_stmt. The answers were recorded from the pinned 3.53.4
+# shell by running each case in a fresh in memory database.
+
+oracle none
+
+case shell-fts3
+
+statement ok
+CREATE VIRTUAL TABLE g USING fts3(a, b)
+
+statement ok
+INSERT INTO g VALUES ('red fox', 'x'), ('blue fox', 'y'), ('green owl', 'z')
+
+query T rowsort
+SELECT rowid, a FROM g WHERE g MATCH 'fox'
+----
+1
+red fox
+2
+blue fox
+
+case shell-fts4-matchinfo
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts4(a)
+
+statement ok
+INSERT INTO f VALUES ('one two'), ('two three')
+
+query T rowsort
+SELECT rowid, hex(matchinfo(f)), offsets(f) FROM f WHERE f MATCH 'two'
+----
+1
+0100000001000000010000000200000002000000
+0 0 4 3
+2
+0100000001000000010000000200000002000000
+0 0 0 3
+
+case shell-bytecode
+
+query T rowsort
+SELECT count(*) > 0, min(addr) FROM bytecode('SELECT 1')
+----
+1
+0
+
+case shell-tables-used
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE TABLE u(b)
+
+query T rowsort
+SELECT type, schema, name, wr FROM tables_used('SELECT a FROM t, u WHERE a > b')
+----
+table
+main
+t
+0
+table
+main
+u
+0
+
+case shell-completion
+
+query T rowsort
+SELECT candidate FROM completion('SELE') WHERE candidate = 'SELECT'
+----
+SELECT
+
+case shell-sqlite-stmt
+
+query T rowsort
+SELECT typeof(count(*)) FROM sqlite_stmt
+----
+integer

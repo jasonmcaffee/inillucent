@@ -166,7 +166,9 @@ check a run against.
 | `e2e` | 36 | 432 | `change` | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 8 | `merge` | the cost guards — **runs alone**, see §5 |
 | `retrieval` | 7 | 570 | `change` | the embedding and retrieval engine, and its graded harness |
-| `tooling` | 16 | 147 | `change` | the checks that keep the repository's own rules true |
+| `tooling` | 17 | 150 | `change` | the checks that keep the repository's own rules true |
+| `matrix` | 24 | 187 | `change` | the SQL statement matrix: every statement form with every pair of contexts, graded against the pinned SQLite |
+| `matrix_deep` | 24 | 192 | `merge` | the statement matrix at every configuration arm, every triple of contexts, and the driver's other surfaces |
 | `nightly` | 3 | 6 | `nightly` | the long forms, run on a schedule rather than on a change |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than
@@ -351,8 +353,8 @@ is in decides *when* it runs, through the tier's cadence:
 
 | cadence | tiers | selected by `--changed` when |
 |---|---|---|
-| `change` | smoke, unit, engine, differential, e2e, retrieval, tooling | the closure reaches anything the target covers |
-| `merge` | durability, perf | a crate that actually changed is in the target's `covers`, or its own crate or file changed |
+| `change` | smoke, unit, engine, differential, e2e, retrieval, tooling, matrix | the closure reaches anything the target covers |
+| `merge` | durability, perf, matrix_deep | a crate that actually changed is in the target's `covers`, or its own crate or file changed |
 | `nightly` | nightly | never; it runs in the nightly job, or by name |
 
 A run with no `--changed` runs `change` and `merge`. `--cadence merge` with

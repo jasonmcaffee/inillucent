@@ -192,13 +192,28 @@ pub fn owns(id: &str, group: usize, groups: usize) -> bool {
 /// @param group - this test function's index
 /// @param groups - how many test functions the family has
 /// @param scratch - the directory scratch files go under
-pub fn run_group(family: &str, cadence: Cadence, group: usize, groups: usize, scratch: &Path) {
+/// @param skipped - called when the oracle is missing; the test binary announces the skip
+pub fn run_group(
+    family: &str,
+    cadence: Cadence,
+    group: usize,
+    groups: usize,
+    scratch: &Path,
+    skipped: fn(),
+) {
     let report = run_group_report(family, cadence, group, groups, scratch);
+    if report.oracle_missing {
+        skipped();
+    }
     println!("{}", report.summary);
     assert!(
         report.problems.is_empty(),
         "{}",
-        report.problems.join("\n\n")
+        report.problems.join(
+            "
+
+"
+        )
     );
 }
 
@@ -213,6 +228,8 @@ pub struct GroupReport {
     pub failing: Vec<String>,
     /// What the runners did, added across arms.
     pub stats: Stats,
+    /// Whether the pinned SQLite oracle was missing, so nothing was graded.
+    pub oracle_missing: bool,
 }
 
 /// Runs one group and returns its report instead of asserting.
@@ -303,7 +320,10 @@ fn run_cases(
             .join(format!("{family}-{group}-{}", arm.name));
         let mut runner = Runner::new(arm, &directory);
         if !runner.has_oracle() && !announced {
-            crate::differential::announce_skip();
+            // The test binary says so, not the library: `tooling::selection`
+            // reads every file that announces a skip as belonging to a suite
+            // that can skip, and the library is not one.
+            report.oracle_missing = true;
             announced = true;
         }
         let verdicts = runner.run_all(&for_arm);
@@ -351,7 +371,9 @@ fn judge_all(
 }
 
 /// Declares a family's test module: `groups` test functions, each running its
-/// share of the family's cases at a cadence.
+/// share of the family's cases at a cadence. The module that calls it defines
+/// `fn oracle_missing()`, which announces the skip, so the file that can skip
+/// is the file `tooling::selection` reads for its row.
 ///
 /// ```ignore
 /// inillucent_compat::matrix_family!(select, Change, [g0, g1, g2, g3]);
@@ -374,6 +396,7 @@ macro_rules! matrix_family {
                     index,
                     GROUP_NAMES.len(),
                     &std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("matrix"),
+                    oracle_missing,
                 );
             }
         )+

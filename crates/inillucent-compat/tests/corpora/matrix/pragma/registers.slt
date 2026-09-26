@@ -1,0 +1,48 @@
+# One case for each pragma the converted corpora and the templates do not
+# read. tooling::matrix_inventory reads PRAGMA pragma_list from a live engine
+# and fails for a pragma no case names.
+
+case pragma-cache-spill
+query T rowsort
+PRAGMA cache_spill
+
+case pragma-checkpoint-fullfsync
+query T rowsort
+PRAGMA checkpoint_fullfsync
+
+case pragma-default-cache-size
+query T rowsort
+PRAGMA default_cache_size
+
+case pragma-fullfsync
+statement ok
+PRAGMA fullfsync = 1
+
+query T rowsort
+PRAGMA fullfsync
+
+case pragma-journal-size-limit
+statement ok
+PRAGMA journal_size_limit = 65536
+
+query T rowsort
+PRAGMA journal_size_limit
+
+case pragma-read-uncommitted
+statement ok
+PRAGMA read_uncommitted = 1
+
+query T rowsort
+PRAGMA read_uncommitted
+
+case pragma-wal-autocheckpoint
+query T rowsort
+PRAGMA wal_autocheckpoint
+
+case pragma-temp-store-directory
+query T rowsort
+PRAGMA temp_store_directory
+
+case pragma-data-store-directory
+query T rowsort
+PRAGMA data_store_directory

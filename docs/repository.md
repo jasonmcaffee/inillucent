@@ -200,7 +200,7 @@ prerequisite in `tests/selection.toml` is missing from this table or has a diffe
 
 | prerequisite | rows | what provides it |
 |---|---:|---|
-| `oracle` | 31 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1` or `bash tools/sqlite-reference.sh` |
+| `oracle` | 77 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1` or `bash tools/sqlite-reference.sh` |
 | `shell` | 9 | the pinned `sqlite3` 3.53.4 shell, built by the same two scripts |
 | `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are committed. A new clone has them. The row is for a checkout that has lost them |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |

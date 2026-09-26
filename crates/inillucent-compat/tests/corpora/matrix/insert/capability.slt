@@ -1,0 +1,48 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-returning
+capability returning
+
+statement ok
+CREATE TABLE cap_ret (a INTEGER PRIMARY KEY, b TEXT)
+
+query I rowsort
+INSERT INTO cap_ret VALUES (1, 'one') RETURNING a
+
+case capability-update-delete-limit
+capability update_delete_limit
+
+statement ok
+CREATE TABLE cap_limited (a INTEGER)
+
+statement ok
+INSERT INTO cap_limited VALUES (1), (2), (3), (4), (5)
+
+statement error
+DELETE FROM cap_limited RETURNING a ORDER BY a DESC LIMIT 1
+
+case capability-on-conflict-partial-index
+capability on_conflict_partial_index
+
+statement ok
+CREATE TABLE t (a INTEGER, b INTEGER)
+
+statement ok
+CREATE UNIQUE INDEX t_a ON t(a) WHERE b > 0
+
+statement ok
+INSERT INTO t(a,b) VALUES (1,1) ON CONFLICT(a) WHERE b > 0 DO NOTHING
+
+case capability-on-conflict-expression-index
+capability on_conflict_expression_index
+
+statement ok
+CREATE TABLE t (a TEXT)
+
+statement ok
+CREATE UNIQUE INDEX t_l ON t(lower(a))
+
+statement ok
+INSERT INTO t(a) VALUES ('x') ON CONFLICT(lower(a)) DO NOTHING
+

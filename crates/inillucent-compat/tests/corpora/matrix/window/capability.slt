@@ -1,0 +1,21 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-window-in-derived-table
+capability window_in_derived_table
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+query T rowsort
+SELECT * FROM (SELECT row_number() OVER () AS n FROM t)
+
+case capability-window-in-compound-arm
+capability window_in_compound_arm
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+query T rowsort
+SELECT a FROM t UNION ALL SELECT row_number() OVER () FROM t
+

@@ -1,0 +1,24 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-triggers
+capability triggers
+
+statement ok
+CREATE TABLE cap_trig (a INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TRIGGER cap_t AFTER INSERT ON cap_trig BEGIN UPDATE cap_trig SET a = a; END
+
+case capability-returning-inside-a-trigger
+capability returning_inside_a_trigger
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+statement ok
+CREATE TABLE u (a INTEGER)
+
+statement error
+CREATE TRIGGER g AFTER INSERT ON t BEGIN INSERT INTO u(a) VALUES (1) RETURNING a; END
+

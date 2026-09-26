@@ -528,6 +528,135 @@ pub fn syntax_cases(
     Ok(files)
 }
 
+/// Runs one statement on the oracle and writes the record that expects what
+/// it did: an error, rows, or success.
+///
+/// @param oracle - a running oracle process with the case's database open
+/// @param asked - the statement as the oracle runs it, with scratch paths filled in
+/// @param sql - the statement as the case file holds it
+fn observed_record(oracle: &mut Driver, asked: &str, sql: String) -> Result<Record, String> {
+    let single = split_statements(&sql).len() == 1;
+    let observed = if single {
+        oracle.send(&Op::Query(
+            crate::statement_matrix::limited::rewrite(asked).unwrap_or_else(|| asked.to_string()),
+        ))?
+    } else {
+        oracle.send(&Op::Exec(asked.to_string()))?
+    };
+    Ok(if !observed.ok {
+        Record::Statement {
+            expect: Expect::Error(None),
+            sql,
+        }
+    } else if single
+        && !observed.columns.is_empty()
+        && crate::statement_matrix::case::asks_for_rows(&sql)
+    {
+        Record::Query {
+            types: type_letters(&observed.columns, &observed.rows),
+            sort: if total_order(&sql) {
+                Sort::NoSort
+            } else {
+                Sort::RowSort
+            },
+            expected: None,
+            binds: Vec::new(),
+            sql,
+        }
+    } else {
+        Record::ok(sql)
+    })
+}
+
+/// Converts every probe of the driver's `CAPABILITIES` table into a case that
+/// names its row, so each row the table claims is graded against SQLite on
+/// every change and not only by the capability suite's own yes or no.
+///
+/// A row whose probe needs the driver's API rather than SQL (a registered
+/// function or collation, `cancel`, a read only open) has no case here; the
+/// surface cases cover those, and `corpora/matrix/capabilities.toml` names
+/// them. Returns one file per family, with the number of cases in each.
+///
+/// @param oracle - a running oracle process
+/// @param scratch - a directory for the throwaway databases
+pub fn capability_cases(
+    oracle: &mut Driver,
+    scratch: &Path,
+) -> Result<Vec<(String, String, usize)>, String> {
+    use inillucent_driver::capability::{Probe, CAPABILITIES};
+    let mut by_family: std::collections::BTreeMap<&'static str, Vec<Case>> =
+        std::collections::BTreeMap::new();
+    for capability in CAPABILITIES {
+        let (setup, sql) = match capability.probe {
+            Probe::Runs { setup, sql } | Probe::Refuses { setup, sql } => (setup, sql),
+            Probe::Answers { setup, sql, .. } => (setup, sql),
+            Probe::Registers { .. } | Probe::Nothing => continue,
+        };
+        let family = family_by_content(&sql);
+        let case = capability_case(oracle, scratch, capability.name, family, setup, &sql)?;
+        by_family.entry(family).or_default().push(case);
+    }
+    let header = [
+        "The probe of every row of the driver's CAPABILITIES table, run on both engines",
+        "and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.",
+    ];
+    Ok(by_family
+        .into_iter()
+        .map(|(family, cases)| {
+            let count = cases.len();
+            (family.to_string(), render_file(&header, &cases), count)
+        })
+        .collect())
+}
+
+/// Converts one capability probe into a case, asking the oracle what each
+/// statement does.
+///
+/// @param oracle - a running oracle process
+/// @param scratch - a directory for the throwaway database
+/// @param row - the capability row
+/// @param family - the family the case goes in
+/// @param setup - the probe's setup statements
+/// @param sql - the probe's statement
+fn capability_case(
+    oracle: &mut Driver,
+    scratch: &Path,
+    row: &str,
+    family: &str,
+    setup: &[&str],
+    sql: &str,
+) -> Result<Case, String> {
+    let path = scratch.join("capability.db");
+    inillucent_base::testing::remove_database(&path);
+    let opened = oracle.send(&Op::Open(path.display().to_string()))?;
+    if !opened.ok {
+        return Err(format!("the oracle could not open {}", path.display()));
+    }
+    let mut case = Case::new(family, "drivers/inillucent-driver/src/capability.rs");
+    case.id = format!("capability-{}", row.replace('_', "-"));
+    case.capabilities.push(row.to_string());
+    for statement in setup.iter().copied().chain(std::iter::once(sql)) {
+        let statement = file_names_in_scratch(statement);
+        let place = scratch.display().to_string().replace('\\', "/");
+        // The oracle's `query` binds nothing, so a probe that takes a
+        // parameter is asked with the value pasted in, and the case binds it.
+        let asked = statement.replace("%SCRATCH%", &place).replace("?1", "1");
+        let mut record = observed_record(oracle, &asked, statement.clone())?;
+        if let Record::Query { binds, .. } = &mut record {
+            if statement.contains("?1") {
+                binds.push(vec!["1".to_string()]);
+            }
+        }
+        case.records.push(record);
+    }
+    let closed = oracle.send(&Op::Close)?;
+    if !closed.ok {
+        return Err("the oracle would not close".to_string());
+    }
+    inillucent_base::testing::remove_database(&path);
+    Ok(case)
+}
+
 /// Converts one syntax example into a case, asking the oracle what it does.
 fn syntax_case(
     oracle: &mut Driver,
@@ -571,38 +700,7 @@ fn syntax_case(
         });
     }
     let sql = scratch_paths(example);
-    let single = split_statements(&sql).len() == 1;
-    let observed = if single {
-        let asked = local(&sql);
-        oracle.send(&Op::Query(
-            crate::statement_matrix::limited::rewrite(&asked).unwrap_or(asked),
-        ))?
-    } else {
-        oracle.send(&Op::Exec(local(&sql)))?
-    };
-    let record = if !observed.ok {
-        Record::Statement {
-            expect: Expect::Error(None),
-            sql,
-        }
-    } else if single
-        && !observed.columns.is_empty()
-        && crate::statement_matrix::case::asks_for_rows(&sql)
-    {
-        Record::Query {
-            types: type_letters(&observed.columns, &observed.rows),
-            sort: if total_order(&sql) {
-                Sort::NoSort
-            } else {
-                Sort::RowSort
-            },
-            expected: None,
-            binds: Vec::new(),
-            sql,
-        }
-    } else {
-        Record::ok(sql)
-    };
+    let record = observed_record(oracle, &local(&sql), sql)?;
     case.records.push(record);
     let closed = oracle.send(&Op::Close)?;
     if !closed.ok {

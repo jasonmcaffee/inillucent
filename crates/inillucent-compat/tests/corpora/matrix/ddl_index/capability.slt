@@ -1,0 +1,12 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-multi-column-vector-index
+capability multi_column_vector_index
+
+statement ok
+CREATE TABLE t (a VECTOR(4), b VECTOR(4))
+
+statement error
+CREATE INDEX t_v ON t USING inillucent_hnsw (a, b)
+

@@ -1,0 +1,202 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-ddl
+capability ddl
+
+statement ok
+CREATE TABLE cap_ddl (a INTEGER PRIMARY KEY, b TEXT)
+
+case capability-dml
+capability dml
+
+statement ok
+CREATE TABLE cap_dml (a INTEGER PRIMARY KEY, b TEXT)
+
+statement ok
+INSERT INTO cap_dml VALUES (1, 'one')
+
+case capability-parameters
+capability parameters
+
+statement ok
+CREATE TABLE cap_param (a INTEGER PRIMARY KEY)
+
+query T rowsort
+bind 1
+SELECT a FROM cap_param WHERE a = ?1
+
+case capability-transactions
+capability transactions
+
+statement ok
+CREATE TABLE cap_txn (a INTEGER PRIMARY KEY)
+
+statement ok
+BEGIN
+
+case capability-savepoints
+capability savepoints
+
+statement ok
+CREATE TABLE cap_save (a INTEGER PRIMARY KEY)
+
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT one
+
+case capability-aggregates
+capability aggregates
+
+statement ok
+CREATE TABLE cap_agg (a INTEGER PRIMARY KEY, b TEXT)
+
+query TT rowsort
+SELECT b, count(*) FROM cap_agg GROUP BY b
+
+case capability-explain-query-plan
+capability explain_query_plan
+
+statement ok
+CREATE TABLE cap_plan (a INTEGER PRIMARY KEY)
+
+query IIIT rowsort
+EXPLAIN QUERY PLAN SELECT a FROM cap_plan
+
+case capability-schema-introspection
+capability schema_introspection
+
+statement ok
+CREATE TABLE cap_schema (a INTEGER PRIMARY KEY)
+
+query TT rowsort
+SELECT type, name FROM sqlite_schema
+
+case capability-foreign-keys
+capability foreign_keys
+
+statement ok
+CREATE TABLE cap_parent (a INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE cap_child (a INTEGER PRIMARY KEY, p INTEGER REFERENCES cap_parent(a))
+
+statement ok
+PRAGMA foreign_keys = ON
+
+statement error
+INSERT INTO cap_child VALUES (1, 999)
+
+case capability-attach
+capability attach
+
+statement ok
+ATTACH DATABASE ':memory:' AS other
+
+case capability-temp-tables
+capability temp_tables
+
+statement ok
+CREATE TEMP TABLE cap_temp (a INTEGER)
+
+case capability-strict-tables
+capability strict_tables
+
+statement ok
+CREATE TABLE cap_strict (a INTEGER) STRICT
+
+statement error
+INSERT INTO cap_strict VALUES ('not a number')
+
+case capability-add-column-default
+capability add_column_default
+
+statement ok
+CREATE TABLE cap_add (a INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO cap_add VALUES (1)
+
+statement ok
+ALTER TABLE cap_add ADD COLUMN b TEXT DEFAULT 'filled'
+
+query T rowsort
+SELECT b FROM cap_add WHERE a = 1
+
+case capability-large-values
+capability large_values
+
+statement ok
+CREATE TABLE cap_large (a)
+
+statement ok
+INSERT INTO cap_large VALUES (replace(hex(zeroblob(40000)), '0', 'p'))
+
+query T rowsort
+SELECT typeof(a) || ':' || length(a) FROM cap_large
+
+case capability-distinct-in-a-scalar-function
+capability distinct_in_a_scalar_function
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+query T rowsort
+SELECT abs(DISTINCT a) FROM t
+
+case capability-attach-with-key
+capability attach_with_key
+
+statement ok
+ATTACH DATABASE '%SCRATCH%/other.rdb' AS o KEY 'k'
+
+case capability-computed-limit
+capability computed_limit
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+query T rowsort
+SELECT a FROM t LIMIT 1 + 1
+
+case capability-load-extension
+capability load_extension
+
+statement error
+SELECT load_extension('cap_missing_extension')
+
+case capability-writing-to-a-view
+capability writing_to_a_view
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+statement ok
+CREATE VIEW v AS SELECT a FROM t
+
+statement error
+INSERT INTO v(a) VALUES (1)
+
+case capability-nested-explain
+capability nested_explain
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+statement error
+EXPLAIN EXPLAIN SELECT a FROM t
+
+case capability-insert-select-into-virtual-table
+capability insert_select_into_virtual_table
+
+statement ok
+CREATE VIRTUAL TABLE d USING fts5(body)
+
+statement ok
+CREATE TABLE t (body TEXT)
+
+statement ok
+INSERT INTO d(body) SELECT body FROM t
+

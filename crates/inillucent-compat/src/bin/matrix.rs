@@ -10,6 +10,8 @@
 //! inillucent-matrix convert-part8                  the differential part 8 corpus
 //! inillucent-matrix convert-probe <cases.json>     the feature probe's cases
 //! inillucent-matrix convert-syntax                 compat/syntax.toml
+//! inillucent-matrix convert-capabilities           the driver's CAPABILITIES probes
+//! inillucent-matrix surfaces [family]              Layer 1 through SharedDatabase, prepared reuse, execute_batch
 //! inillucent-matrix run <family> [--limit N] [--arm NAME] [--threads N] [--cadence C]
 //! inillucent-matrix inventory                      writes _agent_output/matrix/inventory.md
 //! inillucent-matrix counts                         prints the counts.toml numbers
@@ -36,6 +38,8 @@ fn main() -> ExitCode {
         Some("convert-part8") => convert_part8(),
         Some("convert-probe") => convert_probe(arguments.get(1).map(PathBuf::from)),
         Some("convert-syntax") => convert_syntax(),
+        Some("convert-capabilities") => convert_capabilities(),
+        Some("surfaces") => surfaces(arguments.get(1).map(String::as_str).unwrap_or("all")),
         Some("run") => run(&arguments[1..]),
         Some("inventory") => inventory(),
         Some("counts") => counts(),
@@ -43,7 +47,7 @@ fn main() -> ExitCode {
         Some("shrink") => shrink(&arguments[1..]),
         Some("show") => show(arguments.get(1).map(String::as_str).unwrap_or("")),
         _ => Err(
-            "usage: inillucent-matrix convert-part8 | convert-probe <json> | convert-syntax | \
+            "usage: inillucent-matrix convert-part8 | convert-probe <json> | convert-syntax | convert-capabilities | surfaces [family] | \
                   run <family> [--limit N] [--arm NAME] [--threads N] [--cadence C] | inventory \
                   | counts"
                 .to_string(),
@@ -191,6 +195,74 @@ fn convert_syntax() -> Result<(), String> {
         write(&corpus_root().join(&family).join("syntax.slt"), &text)?;
     }
     println!("converted {total} syntax register examples");
+    Ok(())
+}
+
+/// Converts the driver's capability probes into cases that name their rows.
+fn convert_capabilities() -> Result<(), String> {
+    let mut driver = oracle()?;
+    let directory = scratch()?;
+    let files = convert::capability_cases(&mut driver, &directory)?;
+    let mut total = 0usize;
+    for (family, text, count) in files {
+        total += count;
+        write(&corpus_root().join(&family).join("capability.slt"), &text)?;
+    }
+    println!("converted {total} capability probes");
+    Ok(())
+}
+
+/// Runs the Layer 1 cases of one family, or of every family, through the
+/// surfaces of section 5.5, and the API cases, and prints every difference.
+///
+/// @param family - a family name, a `.slt` file, or `all`
+fn surfaces(family: &str) -> Result<(), String> {
+    use inillucent_compat::statement_matrix::{group, inventory, surfaces};
+    let started = std::time::Instant::now();
+    let root = scratch()?.join("surfaces");
+    let families: Vec<&str> = if family == "all" {
+        inventory::FAMILIES.to_vec()
+    } else {
+        vec![family]
+    };
+    let (mut cases, mut differences) = (0usize, 0usize);
+    for name in families {
+        let listed = if name.ends_with(".slt") {
+            let text = std::fs::read_to_string(name).map_err(|error| format!("{name}: {error}"))?;
+            inillucent_compat::statement_matrix::case::parse(&text, "file", name)?.cases
+        } else {
+            group::layer_one(name)?
+        };
+        for case in listed.into_iter().filter(surfaces::repeatable) {
+            cases += 1;
+            let directory = root.join(format!("{:x}", group::id_hash(&case.id)));
+            for difference in surfaces::run_case(&case, &directory)? {
+                differences += 1;
+                println!(
+                    "DIFF {}
+      {}",
+                    difference.id, difference.detail
+                );
+            }
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+    if family == "all" {
+        for id in surfaces::CASES {
+            cases += 1;
+            if let Some(problem) = surfaces::run_api_case(id, &root.join(id))? {
+                differences += 1;
+                println!(
+                    "FAIL {id}
+      {problem}"
+                );
+            }
+        }
+    }
+    println!(
+        "{cases} case(s), {differences} difference(s), {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -406,10 +478,16 @@ fn process_cpu_seconds() -> f64 {
 
 /// Writes the coverage report of section 9.1.
 fn inventory() -> Result<(), String> {
-    let report = inillucent_compat::statement_matrix::inventory::report()?;
+    let report = inillucent_compat::statement_matrix::inventory::report(
+        &scratch()?,
+        inillucent_compat::statement_matrix::surfaces::CASES,
+    )?;
     let path = workspace_root().join("_agent_output/matrix/inventory.md");
     write(&path, &report.markdown)?;
     println!("{}", report.summary);
+    for gap in &report.missing {
+        println!("missing: {gap}");
+    }
     Ok(())
 }
 

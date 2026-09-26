@@ -157,3 +157,33 @@ name = "reading-temp-store-this-engine-refused"
 contains = ["temp_store"]
 kinds = ["rows", "reopen"]
 reason = "After a PRAGMA temp_store = FILE that inillucent refuses, reading the setting back answers MEMORY."
+
+[[rule]]
+name = "reading-fullfsync-this-engine-refused"
+contains = ["fullfsync"]
+kinds = ["rows", "reopen"]
+reason = "After a PRAGMA fullfsync = 1 that inillucent refuses (settings-this-engine-refuses), reading the setting back answers the value inillucent keeps, 0."
+
+[[rule]]
+name = "reading-journal-size-limit-this-engine-refused"
+contains = ["journal_size_limit"]
+kinds = ["rows", "reopen"]
+reason = "inillucent rolls its log at a checkpoint rather than trimming it to a size, so journal_size_limit is always -1 and setting it to anything else is refused."
+
+[[rule]]
+name = "reading-read-uncommitted-this-engine-refused"
+contains = ["read_uncommitted"]
+kinds = ["rows", "reopen"]
+reason = "inillucent has one writer and no shared cache to read uncommitted rows from, so read_uncommitted is always 0 and setting it to 1 is refused."
+
+[[rule]]
+name = "cache-spill-is-zero"
+contains = ["cache_spill"]
+kinds = ["rows", "reopen"]
+reason = "inillucent's buffer pool evicts by clock rather than spilling at a threshold, so it reports cache_spill as 0 against SQLite's page count. The comment on reported_value in crates/inillucent-engine/src/pragma.rs gives the reason."
+
+[[rule]]
+name = "wal-autocheckpoint-is-zero"
+contains = ["wal_autocheckpoint"]
+kinds = ["rows", "reopen"]
+reason = "inillucent folds its log in at an explicit checkpoint rather than every thousand frames, so it reports wal_autocheckpoint as 0. The comment on reported_value in crates/inillucent-engine/src/pragma.rs gives the reason."

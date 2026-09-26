@@ -423,3 +423,21 @@ CREATE TABLE t(k INTEGER, a REAL PRIMARY KEY, b TEXT) STRICT
 
 query T rowsort
 PRAGMA table_info(t)
+
+case retained-bug-51-schema-update-code
+statement ok
+CREATE TABLE t(a INTEGER)
+
+statement error
+UPDATE sqlite_schema SET sql = 'x' WHERE name = 't'
+
+case retained-bug-52-store-directory
+query T rowsort
+PRAGMA temp_store_directory
+
+case retained-bug-54-batch-returning
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+query T rowsort
+INSERT INTO t VALUES (1, 'x') RETURNING a

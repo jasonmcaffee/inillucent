@@ -1,0 +1,9 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-integrity-check
+capability integrity_check
+
+query T rowsort
+PRAGMA integrity_check
+

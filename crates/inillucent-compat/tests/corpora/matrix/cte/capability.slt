@@ -1,0 +1,9 @@
+# The probe of every row of the driver's CAPABILITIES table, run on both engines
+# and graded against SQLite. Written by `inillucent-matrix convert-capabilities`.
+
+case capability-recursive-cte
+capability recursive_cte
+
+query I rowsort
+WITH RECURSIVE counter(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counter WHERE n < 3) SELECT n FROM counter
+

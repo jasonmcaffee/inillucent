@@ -1,0 +1,602 @@
+# How many cases each statement matrix family generates, and how many axis
+# combinations its constraints remove, at each strength.
+#
+# Written by `inillucent-matrix counts` and checked by
+# `tooling::matrix_inventory`. The matrix's time budget is kept by these
+# numbers rather than by a clock: a change that grows a family has to change
+# this file, which is where somebody decides whether the time is worth it.
+# (tasks/task-2135-sql-statement-matrix-tdd.md, sections 8.3 and 9.2)
+
+[[count]]
+family = "select"
+cadence = "change"
+strength = 2
+rows = 134
+cases = 134
+required = 1641
+removed = 302
+
+[[count]]
+family = "select"
+cadence = "merge"
+strength = 2
+rows = 161
+cases = 161
+required = 1911
+removed = 32
+
+[[count]]
+family = "select"
+cadence = "merge"
+strength = 3
+rows = 1540
+cases = 1540
+required = 30357
+removed = 1476
+
+[[count]]
+family = "join"
+cadence = "change"
+strength = 2
+rows = 104
+cases = 104
+required = 1547
+removed = 300
+
+[[count]]
+family = "join"
+cadence = "merge"
+strength = 2
+rows = 136
+cases = 136
+required = 1807
+removed = 40
+
+[[count]]
+family = "join"
+cadence = "merge"
+strength = 3
+rows = 1318
+cases = 1318
+required = 28327
+removed = 1780
+
+[[count]]
+family = "compound"
+cadence = "change"
+strength = 2
+rows = 103
+cases = 103
+required = 1287
+removed = 269
+
+[[count]]
+family = "compound"
+cadence = "merge"
+strength = 2
+rows = 129
+cases = 129
+required = 1522
+removed = 34
+
+[[count]]
+family = "compound"
+cadence = "merge"
+strength = 3
+rows = 1244
+cases = 1244
+required = 21498
+removed = 1360
+
+[[count]]
+family = "cte"
+cadence = "change"
+strength = 2
+rows = 125
+cases = 125
+required = 1531
+removed = 292
+
+[[count]]
+family = "cte"
+cadence = "merge"
+strength = 2
+rows = 150
+cases = 150
+required = 1791
+removed = 32
+
+[[count]]
+family = "cte"
+cadence = "merge"
+strength = 3
+rows = 1491
+cases = 1491
+required = 27375
+removed = 1412
+
+[[count]]
+family = "subquery"
+cadence = "change"
+strength = 2
+rows = 104
+cases = 104
+required = 1121
+removed = 252
+
+[[count]]
+family = "subquery"
+cadence = "merge"
+strength = 2
+rows = 131
+cases = 131
+required = 1341
+removed = 32
+
+[[count]]
+family = "subquery"
+cadence = "merge"
+strength = 3
+rows = 1242
+cases = 1242
+required = 16947
+removed = 1156
+
+[[count]]
+family = "expression"
+cadence = "change"
+strength = 2
+rows = 420
+cases = 420
+required = 2514
+removed = 409
+
+[[count]]
+family = "expression"
+cadence = "merge"
+strength = 2
+rows = 466
+cases = 466
+required = 2889
+removed = 34
+
+[[count]]
+family = "expression"
+cadence = "merge"
+strength = 3
+rows = 4879
+cases = 4879
+required = 47588
+removed = 2228
+
+[[count]]
+family = "function"
+cadence = "change"
+strength = 2
+rows = 344
+cases = 344
+required = 2611
+removed = 484
+
+[[count]]
+family = "function"
+cadence = "merge"
+strength = 2
+rows = 372
+cases = 372
+required = 2981
+removed = 114
+
+[[count]]
+family = "function"
+cadence = "merge"
+strength = 3
+rows = 3930
+cases = 3930
+required = 53831
+removed = 6422
+
+[[count]]
+family = "window"
+cadence = "change"
+strength = 2
+rows = 204
+cases = 204
+required = 3104
+removed = 428
+
+[[count]]
+family = "window"
+cadence = "merge"
+strength = 2
+rows = 227
+cases = 227
+required = 3484
+removed = 48
+
+[[count]]
+family = "window"
+cadence = "merge"
+strength = 3
+rows = 2573
+cases = 2573
+required = 79536
+removed = 3330
+
+[[count]]
+family = "insert"
+cadence = "change"
+strength = 2
+rows = 97
+cases = 97
+required = 1298
+removed = 22
+
+[[count]]
+family = "insert"
+cadence = "merge"
+strength = 2
+rows = 97
+cases = 97
+required = 1298
+removed = 22
+
+[[count]]
+family = "insert"
+cadence = "merge"
+strength = 3
+rows = 783
+cases = 783
+required = 17262
+removed = 858
+
+[[count]]
+family = "update"
+cadence = "change"
+strength = 2
+rows = 87
+cases = 87
+required = 1219
+removed = 11
+
+[[count]]
+family = "update"
+cadence = "merge"
+strength = 2
+rows = 87
+cases = 87
+required = 1219
+removed = 11
+
+[[count]]
+family = "update"
+cadence = "merge"
+strength = 3
+rows = 659
+cases = 659
+required = 15994
+removed = 386
+
+[[count]]
+family = "delete"
+cadence = "change"
+strength = 2
+rows = 72
+cases = 72
+required = 823
+removed = 8
+
+[[count]]
+family = "delete"
+cadence = "merge"
+strength = 2
+rows = 72
+cases = 72
+required = 823
+removed = 8
+
+[[count]]
+family = "delete"
+cadence = "merge"
+strength = 3
+rows = 514
+cases = 514
+required = 8557
+removed = 227
+
+[[count]]
+family = "ddl_table"
+cadence = "change"
+strength = 2
+rows = 97
+cases = 97
+required = 530
+removed = 12
+
+[[count]]
+family = "ddl_table"
+cadence = "merge"
+strength = 2
+rows = 97
+cases = 97
+required = 530
+removed = 12
+
+[[count]]
+family = "ddl_table"
+cadence = "merge"
+strength = 3
+rows = 675
+cases = 674
+required = 3682
+removed = 250
+
+[[count]]
+family = "ddl_index"
+cadence = "change"
+strength = 2
+rows = 83
+cases = 83
+required = 583
+removed = 0
+
+[[count]]
+family = "ddl_index"
+cadence = "merge"
+strength = 2
+rows = 83
+cases = 83
+required = 583
+removed = 0
+
+[[count]]
+family = "ddl_index"
+cadence = "merge"
+strength = 3
+rows = 620
+cases = 620
+required = 4598
+removed = 0
+
+[[count]]
+family = "ddl_view"
+cadence = "change"
+strength = 2
+rows = 65
+cases = 65
+required = 439
+removed = 0
+
+[[count]]
+family = "ddl_view"
+cadence = "merge"
+strength = 2
+rows = 65
+cases = 65
+required = 439
+removed = 0
+
+[[count]]
+family = "ddl_view"
+cadence = "merge"
+strength = 3
+rows = 445
+cases = 445
+required = 2991
+removed = 0
+
+[[count]]
+family = "trigger"
+cadence = "change"
+strength = 2
+rows = 90
+cases = 90
+required = 336
+removed = 7
+
+[[count]]
+family = "trigger"
+cadence = "merge"
+strength = 2
+rows = 90
+cases = 90
+required = 336
+removed = 7
+
+[[count]]
+family = "trigger"
+cadence = "merge"
+strength = 3
+rows = 373
+cases = 373
+required = 1783
+removed = 119
+
+[[count]]
+family = "constraint"
+cadence = "change"
+strength = 2
+rows = 60
+cases = 60
+required = 268
+removed = 8
+
+[[count]]
+family = "constraint"
+cadence = "merge"
+strength = 2
+rows = 60
+cases = 60
+required = 268
+removed = 8
+
+[[count]]
+family = "constraint"
+cadence = "merge"
+strength = 3
+rows = 266
+cases = 260
+required = 1244
+removed = 104
+
+[[count]]
+family = "transaction"
+cadence = "change"
+strength = 2
+rows = 40
+cases = 40
+required = 237
+removed = 11
+
+[[count]]
+family = "transaction"
+cadence = "merge"
+strength = 2
+rows = 40
+cases = 40
+required = 237
+removed = 11
+
+[[count]]
+family = "transaction"
+cadence = "merge"
+strength = 3
+rows = 210
+cases = 208
+required = 1056
+removed = 164
+
+[[count]]
+family = "vtab"
+cadence = "change"
+strength = 2
+rows = 98
+cases = 98
+required = 229
+removed = 43
+
+[[count]]
+family = "vtab"
+cadence = "merge"
+strength = 2
+rows = 126
+cases = 126
+required = 269
+removed = 3
+
+[[count]]
+family = "vtab"
+cadence = "merge"
+strength = 3
+rows = 476
+cases = 476
+required = 892
+removed = 48
+
+[[count]]
+family = "schema"
+cadence = "change"
+strength = 2
+rows = 22
+cases = 22
+required = 77
+removed = 0
+
+[[count]]
+family = "schema"
+cadence = "merge"
+strength = 2
+rows = 22
+cases = 22
+required = 77
+removed = 0
+
+[[count]]
+family = "schema"
+cadence = "merge"
+strength = 3
+rows = 64
+cases = 60
+required = 164
+removed = 1
+
+[[count]]
+family = "maintenance"
+cadence = "change"
+strength = 2
+rows = 72
+cases = 72
+required = 276
+removed = 11
+
+[[count]]
+family = "maintenance"
+cadence = "merge"
+strength = 2
+rows = 72
+cases = 72
+required = 276
+removed = 11
+
+[[count]]
+family = "maintenance"
+cadence = "merge"
+strength = 3
+rows = 395
+cases = 395
+required = 1146
+removed = 134
+
+[[count]]
+family = "pragma"
+cadence = "change"
+strength = 2
+rows = 73
+cases = 73
+required = 188
+removed = 0
+
+[[count]]
+family = "pragma"
+cadence = "merge"
+strength = 2
+rows = 73
+cases = 73
+required = 188
+removed = 0
+
+[[count]]
+family = "pragma"
+cadence = "merge"
+strength = 3
+rows = 217
+cases = 217
+required = 492
+removed = 0
+
+[[count]]
+family = "vector"
+cadence = "change"
+strength = 2
+rows = 28
+cases = 28
+required = 118
+removed = 3
+
+[[count]]
+family = "vector"
+cadence = "merge"
+strength = 2
+rows = 28
+cases = 28
+required = 118
+removed = 3
+
+[[count]]
+family = "vector"
+cadence = "merge"
+strength = 3
+rows = 77
+cases = 72
+required = 360
+removed = 24

@@ -623,3 +623,27 @@ retained-bug-47-real-remainder	47	The smallest case for bug 47.
 retained-bug-48-upsert-target	48	The smallest case for bug 48.
 retained-bug-49-range-over-text	49	The smallest case for bug 49.
 retained-bug-50-strict-primary-key	50	The smallest case for bug 50.
+capability-changing-a-schema-row	51	UPDATE sqlite_schema without writable_schema fails with code 21 where SQLite fails with code 1.
+pragma-temp-store-directory	52	PRAGMA temp_store_directory answers no column where SQLite answers a temp_store_directory column with no rows.
+pragma-data-store-directory	52	PRAGMA data_store_directory answers no column where SQLite answers a data_store_directory column with no rows.
+ms-005@batch	54	execute_batch runs a statement with RETURNING without making its change.
+capability-returning@batch	54	execute_batch runs a statement with RETURNING without making its change.
+probe-dml.returning.insert@batch	54	execute_batch runs a statement with RETURNING without making its change.
+probe-dml.returning.updel@batch	54	execute_batch runs a statement with RETURNING without making its change.
+probe-dml.returning.expr@batch	54	execute_batch runs a statement with RETURNING without making its change.
+probe-upsert.returning@batch	54	execute_batch runs a statement with RETURNING without making its change.
+probe-dml.returning.trigger@batch	54	execute_batch runs a statement with RETURNING without making its change.
+ret-001@batch	54	execute_batch runs a statement with RETURNING without making its change.
+ret-002@batch	54	execute_batch runs a statement with RETURNING without making its change.
+ret-003@batch	54	execute_batch runs a statement with RETURNING without making its change.
+ret-004@batch	54	execute_batch runs a statement with RETURNING without making its change.
+ret-005@batch	54	execute_batch runs a statement with RETURNING without making its change.
+ret-006@batch	54	execute_batch runs a statement with RETURNING without making its change.
+ups-008@batch	54	execute_batch runs a statement with RETURNING without making its change.
+syntax-insert-stmt-p6@batch	54	execute_batch runs a statement with RETURNING without making its change.
+syntax-returning-clause-p0@batch	54	execute_batch runs a statement with RETURNING without making its change.
+syntax-update-stmt-p5@batch	54	execute_batch runs a statement with RETURNING without making its change.
+syntax-delete-stmt-p3@batch	54	execute_batch runs a statement with RETURNING without making its change.
+retained-bug-51-schema-update-code	51	The smallest case for bug 51.
+retained-bug-52-store-directory	52	The smallest case for bug 52.
+retained-bug-54-batch-returning@batch	54	The smallest case for bug 54.

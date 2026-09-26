@@ -1,0 +1,11 @@
+# Which matrix cases exercise each capability row the driver's CAPABILITIES
+# table lists, beyond the cases that name the row in a `capability` directive.
+# tooling::matrix_inventory fails for a row no case exercises and for an id
+# here that names no case.
+
+# These four rows are about the driver's API rather than a statement, so the
+# surface cases in statement_matrix/surfaces.rs exercise them.
+user_functions = ["surface-user-function"]
+user_collations = ["surface-user-collation"]
+cancel = ["surface-cancel"]
+readonly_open = ["surface-readonly-open"]

@@ -1,0 +1,22 @@
+# Hand written trigger cases the templates leave out.
+
+case trigger-no-time
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE TABLE log(a)
+
+statement ok
+CREATE TRIGGER tr INSERT ON t BEGIN INSERT INTO log VALUES (NEW.a * 10); END
+
+statement ok
+INSERT INTO t VALUES (1), (2)
+
+query T rowsort
+SELECT a FROM log
+
+reopen
+
+query T rowsort
+SELECT a FROM log

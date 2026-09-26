@@ -720,6 +720,17 @@ covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-
 requires = ["oracle"]
 
 [[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "surfaces"
+tier = "matrix_deep"
+# The surfaces compare the driver with itself, so no oracle is needed. Eight
+# shards, because one process runs its groups one after another: 313 s alone.
+shards = 8
+covers = ["inillucent-driver", "inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+
+[[target]]
 package = "inillucent"
 kind = "test"
 name = "smoke"
@@ -2774,6 +2785,16 @@ tier = "tooling"
 # downloaded reference.
 requires = ["baseline", "shell"]
 covers = ["inillucent-compat"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "tooling"
+module = "matrix_inventory"
+tier = "tooling"
+# Walks every statement matrix case with the parser and reads the registers of
+# a live engine, so a change to either can leave a form without a case.
+covers = ["inillucent-compat", "inillucent-sql", "inillucent-engine", "inillucent-driver"]
 
 [[target]]
 package = "inillucent-compat"
