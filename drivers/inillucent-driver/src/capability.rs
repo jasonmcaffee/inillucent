@@ -452,6 +452,18 @@ pub static CAPABILITIES: &[Capability] = &[
         },
     },
     Capability {
+        name: "match_in_an_or_reading_a_row",
+        support: Support::No,
+        note: "A full text MATCH under an OR takes a constant pattern: `f MATCH 'word' OR rowid = 3` runs, and `f MATCH q.w OR rowid = 3`, whose pattern reads another table's row, is refused. A MATCH that is a plain AND term takes any pattern.",
+        probe: Probe::Runs {
+            setup: &[
+                "CREATE VIRTUAL TABLE f USING fts5(body)",
+                "CREATE TABLE q (w TEXT)",
+            ],
+            sql: "SELECT (SELECT count(*) FROM f WHERE f MATCH q.w OR rowid = 3) FROM q",
+        },
+    },
+    Capability {
         name: "computed_limit",
         support: Support::Yes,
         note: "LIMIT and OFFSET take any expression that reads no row, such as `LIMIT 1 + 1` or `LIMIT (SELECT 2)`. A value that is not an integer after numeric affinity, such as 2.7 or NULL, is refused with SQLite's `datatype mismatch`.",

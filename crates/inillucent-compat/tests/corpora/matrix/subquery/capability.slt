@@ -22,6 +22,18 @@ CREATE TABLE s (x INTEGER, y INTEGER)
 query T rowsort
 SELECT 1 FROM t WHERE (a, b) IN (SELECT x, y FROM s)
 
+case capability-match-in-an-or-reading-a-row
+capability match_in_an_or_reading_a_row
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+CREATE TABLE q (w TEXT)
+
+query T rowsort
+SELECT (SELECT count(*) FROM f WHERE f MATCH q.w OR rowid = 3) FROM q
+
 case capability-subquery-value-in-a-virtual-table
 capability subquery_value_in_a_virtual_table
 

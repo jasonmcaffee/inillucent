@@ -434,6 +434,22 @@ fn forget_parameterised(block: &mut BoundSelect, owned: &[usize]) {
 fn owned_sources(block: &BoundSelect) -> Vec<usize> {
     let mut owned = Vec::new();
     collect_sources(block, &mut owned);
+    // **A subquery inside one of the block's expressions owns its sources
+    // too.** The rewrite in `prepare_blocks` walks into every nested block -
+    // a scalar subquery in a table function's argument, in a derived table's
+    // `WHERE`, in a result column - and a column of a table that only such a
+    // subquery reads was taken for an outer reference. It could not be fed,
+    // so `(SELECT count(*) FROM json_each((SELECT json_group_array(a) FROM
+    // t0)) AS s WHERE s.value = u.k)` was refused as "a correlated subquery
+    // reading a column the joined row does not carry", and SQLite answers it.
+    // The walk is over a copy because `rewrite_select` is the one walker that
+    // reaches every expression, and it takes the block mutably.
+    let mut copy = block.clone();
+    inillucent_sql::rewrite::rewrite_select(&mut copy, &mut |expr: &mut BoundExpr| {
+        if let Some(inner) = expr.block_mut() {
+            collect_sources(inner, &mut owned);
+        }
+    });
     owned
 }
 

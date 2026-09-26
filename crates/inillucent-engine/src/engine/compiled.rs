@@ -163,18 +163,19 @@ impl crate::ImportedDatabase {
                     )?;
                 }
                 inillucent_exec::dml::ModuleWrite::Update { statement, params } => {
+                    let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
+                        .assignments
+                        .iter()
+                        .map(|assignment| &assignment.value)
+                        .collect();
                     let keys = self.module_keys(
                         &statement.table,
                         statement.source,
                         statement.filter.as_ref(),
                         KeptRows::of(&statement.order_by, &statement.limit, &statement.offset),
                         &params,
+                        &assigned,
                     )?;
-                    let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
-                        .assignments
-                        .iter()
-                        .map(|assignment| &assignment.value)
-                        .collect();
                     let folded =
                         inillucent_exec::subquery::fold_expressions(&assigned, &*self, &params)?;
                     changed =
@@ -187,6 +188,7 @@ impl crate::ImportedDatabase {
                         statement.filter.as_ref(),
                         KeptRows::of(&statement.order_by, &statement.limit, &statement.offset),
                         &params,
+                        &[],
                     )?;
                     self.delete_rows_from_module(&statement.table.name, &keys, &mut changed)?;
                 }
@@ -213,9 +215,22 @@ impl crate::ImportedDatabase {
         filter: Option<&inillucent_sql::bind::BoundExpr>,
         kept: KeptRows<'_>,
         params: &Params,
+        values: &[&inillucent_sql::bind::BoundExpr],
     ) -> DbResult<Vec<Vec<OwnedDatum>>> {
         let mut select = dml::module_keys_query(table, source, filter, kept.limit, kept.offset);
         select.order_by = kept.order_by.to_vec();
+        // An `UPDATE`'s new values, read after the rowid by the same query;
+        // see the `Cached::VirtualUpdate` arm of `compile` for why.
+        for (at, value) in values.iter().enumerate() {
+            select
+                .columns
+                .push(inillucent_sql::bind::BoundResultColumn {
+                    expr: (*value).clone(),
+                    name: format!("value{at}").into_bytes(),
+                    origin: None,
+                    declared_type: Vec::new(),
+                });
+        }
         let plan = plan_select_with(select, self.pragmas.levers());
         let prepared = physical::prepare_any(&plan, self)?;
         Ok(physical::run_any_prepared(&plan, self, &prepared, params)?.0)
@@ -661,6 +676,23 @@ impl crate::ImportedDatabase {
                     statement.offset.as_ref(),
                 );
                 select.order_by = statement.order_by.clone();
+                // **The new values are read by the query that finds the rows**,
+                // one result column per assignment after the rowid. A value
+                // computed from the row - `SET body = body || '!'`, or a
+                // subquery correlated to it - is then evaluated against that
+                // row by the ordinary query path. `update_module` used to fold
+                // each value as a constant and refused anything that read the
+                // row, which SQLite answers.
+                for (at, assignment) in statement.assignments.iter().enumerate() {
+                    select
+                        .columns
+                        .push(inillucent_sql::bind::BoundResultColumn {
+                            expr: assignment.value.clone(),
+                            name: format!("value{at}").into_bytes(),
+                            origin: None,
+                            declared_type: Vec::new(),
+                        });
+                }
                 let plan = plan_select_with(select, self.pragmas.levers());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualUpdate(

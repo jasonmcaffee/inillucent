@@ -277,23 +277,29 @@ impl crate::ImportedDatabase {
                     }
                 }
             }
-            for assignment in &statement.assignments {
-                // **A constant, because a module's row is not in scope here.**
-                // `SET body = body || '!'` reads the row being replaced, which
-                // the ordinary write path evaluates against the row image it
-                // holds; this path has no such image, and answering with the
-                // wrong value would be worse than saying so.
-                let value = inillucent_exec::physical::literal_value_in(
-                    &assignment.value,
-                    params,
-                    Some(&*self),
-                )
-                .map_err(|_| {
-                    refusal(
-                        "an UPDATE of a virtual table assigns a constant; \
-                             an expression over the row being replaced is not supported",
+            for (at, assignment) in statement.assignments.iter().enumerate() {
+                // **The new value comes with the key**, evaluated against the
+                // row by the query that found it: the key row is the rowid and
+                // then one value per assignment. `SET body = body || '!'` and
+                // a subquery correlated to the row both read the row being
+                // replaced, which a value folded here as a constant could not,
+                // and those were refused. A key row with no values is from a
+                // caller that asked only for rowids, and its assignments are
+                // folded as constants as before.
+                let value = match key.get(at.saturating_add(1)) {
+                    Some(value) => value.clone(),
+                    None => inillucent_exec::physical::literal_value_in(
+                        &assignment.value,
+                        params,
+                        Some(&*self),
                     )
-                })?;
+                    .map_err(|_| {
+                        refusal(
+                            "an UPDATE of a virtual table assigns a constant; \
+                             an expression over the row being replaced is not supported",
+                        )
+                    })?,
+                };
                 if let Some(slot) = values.get_mut(usize::from(assignment.column)) {
                     *slot = Value::from(&value.borrow()).into_owned()?;
                 }

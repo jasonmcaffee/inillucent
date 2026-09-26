@@ -39,6 +39,16 @@ pub(super) fn rowid_in_list_path(
     terms: &[BoundExpr],
     consumed: &mut [bool],
 ) -> Option<AccessPath> {
+    // **An outermost-term path only.** The physical pass drives an inner
+    // term by probing it once per outer row, and it has no join operator that
+    // drives a union of probes there: a union chosen for an inner term was
+    // refused as "a seek union as an inner join term", so `SELECT 1 FROM t0
+    // CROSS JOIN t1 WHERE t1.a IN (...)` failed where SQLite answers. Not
+    // choosing it leaves the `IN` unconsumed, and it is tested as a residual
+    // over the pair, which is the same rule the rowid range follows.
+    if position != 0 {
+        return None;
+    }
     for (index, term) in terms.iter().enumerate() {
         if consumed.get(index).copied().unwrap_or(false) {
             continue;
@@ -108,6 +118,12 @@ pub(super) fn in_list_union_path(
         levers,
         ..
     } = *context;
+    // **An outermost-term path only**, for the reason `rowid_in_list_path`
+    // gives: the physical pass has no join operator that drives a union from
+    // an inner loop, and choosing one there refused the statement.
+    if position != 0 {
+        return None;
+    }
     // Every leading key column pinned by an equality, in key order. The `IN`
     // is looked for on the column after them.
     let mut prefix: Vec<BoundExpr> = Vec::new();

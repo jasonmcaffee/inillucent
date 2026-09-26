@@ -627,6 +627,18 @@ fn translate_pattern(
                 // an application-defined function or a module, and a query that
                 // uses one without registering it is an error rather than a
                 // false.
+                //
+                // **A `MATCH` that reaches here is one SQLite refuses too.** The
+                // planner offers a plain conjunct to the module, and the binder
+                // turns one under an `OR` into a rowid search; what is left is
+                // under a `NOT`, a `CASE` or a function, where SQLite answers
+                // "unable to use function MATCH in the requested context" with
+                // code 1. It was reported as a feature not built yet.
+                PatternOp::Match => {
+                    return Err(inillucent_base::error::statement_refusal(
+                        "unable to use function MATCH in the requested context",
+                    ))
+                }
                 other => return unsupported(&format!("the {other:?} operator")),
             };
             Expr::Pattern {

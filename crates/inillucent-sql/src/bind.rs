@@ -26,6 +26,7 @@ mod collation;
 mod having;
 mod json_subtype;
 mod literal;
+mod matching;
 mod order_alias;
 mod raise;
 mod rowvalue;
@@ -2151,6 +2152,10 @@ impl<'a> Binder<'a> {
                 Some(existing) => BoundExpr::And(Box::new(existing), Box::new(constraint)),
                 None => constraint,
             });
+        }
+        // See `matching`: a `MATCH` the planner cannot offer to its module.
+        if let Some(filter) = bound_filter.as_mut() {
+            self.match_by_rowid(filter)?;
         }
         self.allow_aggregates = true;
         let bound_columns = self.bind_result_columns(columns)?;
