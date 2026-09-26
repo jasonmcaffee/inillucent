@@ -4978,11 +4978,6 @@ join-4a4acd987b63	27	A RIGHT or FULL JOIN puts the right table's values in the l
 join-9573f87f976f	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
 join-b409918ad80e	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
 join-d602563dedd6	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-function-fefc73e9fa8b	28	sum() over text holding integers returns a real where SQLite returns an integer.
-window-9bfa31d81cdf	28	sum() over text holding integers returns a real where SQLite returns an integer.
-window-dd215f77e3e4	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-bccd8d523f3d	28	sum() over text returns a real where SQLite returns an integer.
-window-bc00ae78b9d5	28	A window sum over text holding integers returns a real where SQLite returns an integer.
 maintenance-036d6427bbbb	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
 maintenance-09d29ace35c2	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
 maintenance-141f0a37a29e	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
@@ -5707,8 +5702,6 @@ ddl_view-381216d42ac0	37	A STRICT table's ANY column converts text that looks li
 ddl_view-7c28152f8261	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-7d6da3196be1	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-a74eebe10c06	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-c2fa3da25150	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-fbd71952543c	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-0c4c81205827	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-5f5a253d606d	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-b6482c920041	37	A STRICT table's ANY column converts text that looks like a number into a number.
@@ -5732,11 +5725,7 @@ maintenance-2e5a8bbcf91b	37	A STRICT table's ANY column converts text that looks
 maintenance-954227be2cf5	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-a97a878cf55b	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-dd16775d0b1b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-cte-0ff572d15c5d	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 ddl_view-e2caf186d48a	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-c9c3e80a2a5b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-562e9db7ab96	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-9c8173a6a7f9	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 window-7aa46f61eb04	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
 window-88f436e01976	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
 window-b15e5cfd0656	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
@@ -5997,3 +5986,17 @@ constraint-bab07571f5db	66	changes() after an UPDATE ... FROM or INSERT ... SELE
 constraint-05ad544170ba	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 function-ddb471ea2153	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 function-1dafb9cd4199	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
+join-206653222ae6	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+join-3a29e1a18fb5	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+join-285949b1514f	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+join-6fb5ac04ee39	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+compound-5b700642f645	37	UNION emits its rows in arm order where SQLite emits them in key order, so UPDATE ... FROM keeps a different one of two matching rows.
+cte-296598539dc1	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-37065638322b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-413f4ec208f6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-67a79e7a3a16	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-a6a6a75f6dce	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-d92b9d6acd26	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-eebe2416ebbc	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-f08f17cf6b1c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-ef3d1ca82e72	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
