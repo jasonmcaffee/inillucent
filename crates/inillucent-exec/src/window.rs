@@ -228,12 +228,17 @@ pub fn compute(rows: &[Vec<OwnedDatum>], plan: &WindowPlan) -> DbResult<Vec<Vec<
 /// RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)` over the texts `'0x10'` and
 /// `'10'` is 10.0 on the second row there, although its frame holds only
 /// `'10'`. A frame that starts at `UNBOUNDED PRECEDING` only grows, so the
-/// frame itself already holds every value the accumulator saw.
+/// frame itself already holds every value the accumulator saw. A frame with
+/// an `EXCLUDE` clause is summed afresh for every row in SQLite, so there the
+/// frame's own values decide: `sum(a) OVER (... ROWS BETWEEN CURRENT ROW AND
+/// CURRENT ROW EXCLUDE TIES)` is the integer 5 on a row holding 5 after a row
+/// holding a real.
 ///
 /// @param call - the window call
 fn slides_a_sum(call: &WindowCall) -> bool {
     matches!(call.func, WindowSlot::Aggregate(AggregateKind::Sum))
         && !matches!(call.frame.start, FrameEnd::UnboundedPreceding)
+        && call.frame.exclude == FrameExclude::NoOthers
 }
 
 /// Reports whether one row's frame holds a value `sum()` adds as a real.
