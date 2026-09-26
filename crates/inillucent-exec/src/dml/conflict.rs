@@ -9,7 +9,7 @@ use index::{distinct_prefix, index_entry, key_of, maintained, unique_indexes};
 use inillucent_base::error::{misuse, Unwind};
 use inillucent_base::{DbError, DbResult, ExtendedCode};
 use inillucent_sql::ast::ConflictAction;
-use inillucent_sql::catalog_view::{IndexOrigin, TableInfo};
+use inillucent_sql::catalog_view::{IndexInfo, IndexOrigin, TableInfo};
 use inillucent_sql::dml::{codes, rowid_message, unique_message, BoundInsert};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 
@@ -207,6 +207,20 @@ pub(crate) fn rowid_conflict(table: &TableInfo) -> Option<ConflictAction> {
 /// @param row - the row about to be written
 /// @param replacing - the row's own image before an `UPDATE`, or `None` for an
 ///   `INSERT`, which has no row of its own to be confused with
+///
+/// **The order is SQLite's, because the order decides which constraint is
+/// named.** A row that collides on two constraints reports the first one
+/// asked. SQLite asks a rowid table's rowid first and then the unique indexes
+/// newest first. A `WITHOUT ROWID` table's primary key is an index like the
+/// others and the oldest of them, so it is asked **last**: a `UNIQUE` index
+/// over the key column reports `SQLITE_CONSTRAINT_UNIQUE` (2067), where asking
+/// the key first reported `SQLITE_CONSTRAINT_PRIMARYKEY` (1555). And an
+/// upsert's own target is asked before everything else, which is SQLite's rule
+/// too: otherwise `ON CONFLICT (k) DO NOTHING` would meet another constraint
+/// first and fail where SQLite does nothing.
+///
+/// @param targets - the columns each upsert arm names, sorted; empty for a
+///   statement with no upsert
 pub(crate) fn conflicting_row(
     table: &TableInfo,
     layout: &SourceLayout,
@@ -214,42 +228,170 @@ pub(crate) fn conflicting_row(
     row: &[OwnedDatum],
     replacing: Option<&[OwnedDatum]>,
     indexes: IndexExprs<'_>,
+    targets: &[&[u16]],
 ) -> DbResult<Option<Conflict>> {
-    let moved = replacing.is_none_or(|before| !same_key(layout, before, row));
-    if moved {
-        let key = key_of(layout, row);
-        if !key.is_empty() && row_exists(table, target, &key)? {
-            let (code, message) = rowid_message(table);
-            return Ok(Some(Conflict {
-                key,
-                error: DbError::new(ExtendedCode(code)).with_message(message),
-                conflict: rowid_conflict(table),
-                // **The table's own key, whichever shape it has.** For a rowid
-                // table that is the `INTEGER PRIMARY KEY` when one was declared
-                // by name and nothing otherwise - an implicit rowid has no
-                // column an `ON CONFLICT` can name. For a `WITHOUT ROWID` table
-                // it is the whole primary key, which is what `ON CONFLICT(k)`
-                // names there.
-                columns: {
-                    let mut held = if table.without_rowid {
-                        table.primary_key()
-                    } else {
-                        table.rowid_alias.into_iter().collect()
-                    };
-                    held.sort_unstable();
-                    held
-                },
-            }));
+    let probe = Probe {
+        table,
+        layout,
+        row,
+        replacing,
+        indexes,
+    };
+    if targets.is_empty() {
+        for check in checks(table) {
+            if let Some(found) = probe.ask(check, target)? {
+                return Ok(Some(found));
+            }
+        }
+        return Ok(None);
+    }
+    for named in [true, false] {
+        for check in checks(table) {
+            let columns = check_columns(table, check);
+            if targets.contains(&columns.as_slice()) != named {
+                continue;
+            }
+            if let Some(found) = probe.ask(check, target)? {
+                return Ok(Some(found));
+            }
         }
     }
-    for (position, index) in unique_indexes(table) {
+    Ok(None)
+}
+
+/// One constraint the conflict search asks.
+#[derive(Clone, Copy)]
+enum Check<'t> {
+    /// The table's own key: the rowid, or a `WITHOUT ROWID` primary key.
+    OwnKey,
+    /// A unique index, with its position in `table.indexes`.
+    Index(usize, &'t IndexInfo),
+}
+
+/// Returns the constraints a row is checked against, in SQLite's order.
+///
+/// @param table - the table being written
+fn checks(table: &TableInfo) -> impl Iterator<Item = Check<'_>> {
+    let key_first = !table.without_rowid;
+    key_first
+        .then_some(Check::OwnKey)
+        .into_iter()
+        .chain(unique_indexes(table).map(|(position, index)| Check::Index(position, index)))
+        .chain((!key_first).then_some(Check::OwnKey))
+}
+
+/// Returns the sorted columns a constraint covers, as an upsert target names
+/// them.
+///
+/// @param table - the table being written
+/// @param check - the constraint
+fn check_columns(table: &TableInfo, check: Check<'_>) -> Vec<u16> {
+    let mut columns: Vec<u16> = match check {
+        Check::OwnKey => own_key_columns(table),
+        Check::Index(_, index) => index
+            .columns
+            .iter()
+            .filter_map(|column| column.column)
+            .collect(),
+    };
+    columns.sort_unstable();
+    columns
+}
+
+/// Returns the columns of the table's own key.
+///
+/// **The table's own key, whichever shape it has.** For a rowid table that is
+/// the `INTEGER PRIMARY KEY` when one was declared by name and nothing
+/// otherwise - an implicit rowid has no column an `ON CONFLICT` can name. For
+/// a `WITHOUT ROWID` table it is the whole primary key, which is what `ON
+/// CONFLICT(k)` names there.
+///
+/// @param table - the table being written
+fn own_key_columns(table: &TableInfo) -> Vec<u16> {
+    if table.without_rowid {
+        table.primary_key()
+    } else {
+        table.rowid_alias.into_iter().collect()
+    }
+}
+
+/// The row being checked, and everything a single check needs to read it.
+struct Probe<'p> {
+    /// The table being written.
+    table: &'p TableInfo,
+    /// The table tree's layout.
+    layout: &'p SourceLayout,
+    /// The row about to be written.
+    row: &'p [OwnedDatum],
+    /// The row's own image before an `UPDATE`.
+    replacing: Option<&'p [OwnedDatum]>,
+    /// The indexes' expressions and partial predicates.
+    indexes: IndexExprs<'p>,
+}
+
+impl Probe<'_> {
+    /// Asks one constraint whether the row collides with it.
+    ///
+    /// @param check - the constraint
+    /// @param target - the file and its trees
+    fn ask(&self, check: Check<'_>, target: &mut dyn WriteTarget) -> DbResult<Option<Conflict>> {
+        match check {
+            Check::OwnKey => self.own_key(target),
+            Check::Index(position, index) => self.unique_index(position, index, target),
+        }
+    }
+
+    /// Returns the row the table's own key collides with.
+    ///
+    /// @param target - the file and its trees
+    fn own_key(&self, target: &mut dyn WriteTarget) -> DbResult<Option<Conflict>> {
+        let (table, layout, row) = (self.table, self.layout, self.row);
+        let moved = self
+            .replacing
+            .is_none_or(|before| !same_key(layout, before, row));
+        if !moved {
+            return Ok(None);
+        }
+        let key = key_of(layout, row);
+        if key.is_empty() || !row_exists(table, target, &key)? {
+            return Ok(None);
+        }
+        let (code, message) = rowid_message(table);
+        let mut columns = own_key_columns(table);
+        columns.sort_unstable();
+        Ok(Some(Conflict {
+            key,
+            error: DbError::new(ExtendedCode(code)).with_message(message),
+            conflict: rowid_conflict(table),
+            columns,
+        }))
+    }
+
+    /// Returns the row a unique index says the row collides with.
+    ///
+    /// @param position - the index's position in `table.indexes`
+    /// @param index - the index
+    /// @param target - the file and its trees
+    fn unique_index(
+        &self,
+        position: usize,
+        index: &IndexInfo,
+        target: &mut dyn WriteTarget,
+    ) -> DbResult<Option<Conflict>> {
+        let (table, layout, row, replacing, indexes) = (
+            self.table,
+            self.layout,
+            self.row,
+            self.replacing,
+            self.indexes,
+        );
         // **A partial unique index constrains only the rows it holds**, so a
         // row its predicate rejects can never clash with anything in it - and
         // this is asked of `row`, the image being probed with, never of
         // `before`: a row *leaving* the index must not be refused by a
         // constraint that no longer holds it.
         if !indexes.holds(position, row)? {
-            continue;
+            return Ok(None);
         }
         let entry = index_entry(position, index, layout, row, indexes)?;
         // **The entry did not move, so neither did the row's claim on it.**
@@ -274,14 +416,14 @@ pub(crate) fn conflicting_row(
         if let Some(before) = replacing {
             let held = indexes.holds(position, before)?;
             if held && index_entry(position, index, layout, before, indexes)? == entry {
-                continue;
+                return Ok(None);
             }
         }
         // A NULL is distinct from every other NULL in a UNIQUE index, which is
         // SQL's rule and the reason a nullable unique column may hold any
         // number of NULLs.
         let Some(prefix) = distinct_prefix(index, &entry) else {
-            continue;
+            return Ok(None);
         };
         let found = {
             let (database, trees, _) = target.parts_for(index.root)?;
@@ -305,7 +447,7 @@ pub(crate) fn conflicting_row(
             // clones every key value, and the ordinary `UPDATE` never reaches
             // this line: it is paid once per collision, not once per row.
             if replacing.is_some_and(|before| key_of(layout, before) == key) {
-                continue;
+                return Ok(None);
             }
             let code = if index.origin == IndexOrigin::PrimaryKey {
                 codes::PRIMARY_KEY
@@ -325,8 +467,8 @@ pub(crate) fn conflicting_row(
                 columns,
             }));
         }
+        Ok(None)
     }
-    Ok(None)
 }
 /// Applies an `ON CONFLICT ... DO UPDATE` to the row already there.
 ///
@@ -413,7 +555,9 @@ pub(crate) fn upsert_row(
     // the statement's own `OR` algorithm says, because SQLite's `DO UPDATE` arm
     // resolves ABORT: `INSERT OR IGNORE` and `INSERT OR REPLACE` both report
     // the constraint here rather than skipping or replacing.
-    if let Some(clash) = conflicting_row(table, layout, target, &after, Some(&before), indexes)? {
+    if let Some(clash) =
+        conflicting_row(table, layout, target, &after, Some(&before), indexes, &[])?
+    {
         let unwind = unwind_of(statement.on_conflict.or(clash.conflict));
         return Err(clash.error.or_unwind(unwind));
     }

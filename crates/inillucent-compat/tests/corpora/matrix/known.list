@@ -15,23 +15,7 @@
 # at one of those arms, so a cadence that runs the case only at the default arm
 # does not call it fixed.
 
-txn-007	1	BEGIN inside a transaction fails with result code 21 where SQLite gives 1.
-txn-008	1	COMMIT with no transaction fails with result code 21 where SQLite gives 1.
-probe-txn.begin.nested	1	BEGIN inside a transaction fails with result code 21 where SQLite gives 1.
-probe-txn.commit.none	1	COMMIT with no transaction fails with result code 21 where SQLite gives 1.
-probe-alter.add.notnull.nodefault	2	ALTER TABLE ADD COLUMN NOT NULL with no default fails with code 21 where SQLite gives 1.
-probe-lim.attach	3	An ATTACH past the limit of ten fails with code 21 where SQLite gives 1.
-t2066-012	4	LIKE with an empty ESCAPE fails with code 21 where SQLite gives 1.
-t2066-014	4	LIKE with a two character ESCAPE fails with code 21 where SQLite gives 1.
-lim-006	5	LIMIT 2.7 fails with code 21 and a not built message where SQLite gives 20, datatype mismatch.
-lim-007	5	LIMIT NULL fails with code 21 and a not built message where SQLite gives 20, datatype mismatch.
-t2134-vgi-004	6	CREATE UNIQUE INDEX over duplicate values fails with code 21 where SQLite gives 19, a constraint.
-fk-004	7	A DELETE refused by ON DELETE RESTRICT reports extended code 787 where SQLite reports 1811.
-probe-ddl.table.as.select	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
 probe-temp.as.select	8	changes() after CREATE TEMP TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
-syntax-create-table-stmt-p5	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
-trg-010	9	After an INSERT undone by RAISE(ROLLBACK), last_insert_rowid() is 0 where SQLite gives the undone row's rowid.
-trg-005	10	After a multi row INSERT whose trigger skips a row with RAISE(IGNORE), last_insert_rowid() differs from SQLite's.
 syntax-returning-clause-p2	11	UPDATE ... RETURNING t.* is accepted where SQLite refuses a table wildcard in RETURNING.
 syntax-alter-table-stmt-p5	12	ALTER TABLE DROP COLUMN succeeds while a view uses the column; SQLite refuses it.
 syntax-alter-table-stmt-p6	12	ALTER TABLE DROP (without COLUMN) succeeds while a view uses the column; SQLite refuses it.
@@ -48,53 +32,9 @@ syntax-update-stmt-p2	19	UPDATE t SET (a, b) = (SELECT 1, 2) is refused as unsup
 
 # Generated cases, grouped by bug. Written from the triage of an inillucent-matrix run;
 # each line's case fails in the way its bug's section on task-2136 describes.
-constraint-03d461ce4b6d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-06376903ab5d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-07098ec5b8da	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-0ff32eb7c953	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-14b1790408d3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-1d269e2d9513	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-2a9222127d07	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-3332f0645e39	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-3f0b85337977	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-4b0a367af6cc	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-4c334063c5c0	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-52d5d80c8377	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-5b172c28191b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-5f9d45ce4f9c	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-618ef3bdd6f7	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-76c3206e97aa	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-9f6128abdff6	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-a3f2c8de74df	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-a60143039ed9	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-b893830377a2	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-c1442ad09ce1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-c2270a72d2aa	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-d2e8e154e10b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-d510da4317d1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-de974b2d4a92	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-e1237684f59c	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-e6c88362d3da	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-f0bce35f61c3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 constraint-f18eefd57be9	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-constraint-fe4126418837	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-ddl_index-ce507454a64f	6	CREATE UNIQUE INDEX over duplicate values fails with code 21 where SQLite gives 19.
-constraint-059de34f5d89	7	A DELETE refused by ON DELETE RESTRICT reports extended code 787 where SQLite reports 1811.
-ddl_table-3b1cd34321bb	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-7918d7e9a8f5	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-8dfc4d960bc5	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-9270a8853fb9	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-a46b2e208ffe	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-d59c687a3127	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-f5afc181d0e3	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 schema-013cdbdd2c4d	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 schema-910bf633dd3e	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-constraint-bbb2b0d74da4	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-24be60b2e95c	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-43ad4abb702b	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-586fb02b2ea9	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-951a3e990496	10	last_insert_rowid() counts a row the INSERT skipped.
-insert-7fe928818489	10	last_insert_rowid() counts a row the INSERT skipped.
 schema-002b38e41f46	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
 schema-59ef9d1ae8ab	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
 schema-63fb6e4dc569	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
@@ -219,7 +159,6 @@ pragma-bab242742e1e	30	The pragma_<name> table valued function of a setting prag
 pragma-ddb1537a5dd6	30	The pragma_<name> table valued function of a setting pragma is "no such table".
 pragma-e25a44e4aee6	30	The pragma_<name> table valued function of a setting pragma is "no such table".
 pragma-f07b02922e18	30	The pragma_<name> table valued function of a setting pragma is "no such table".
-insert-ffc72e9894b2	31	A UNIQUE index violation on a table whose key is not the column reports extended code 1555 where SQLite reports 2067.
 compound-696594bec9af	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 compound-afc0b98586d4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 vtab-498e056e0267	33	MATCH in this placement is refused as unsupported and no capability row says so.
@@ -270,15 +209,6 @@ insert-fb09024a432d	48	An upsert whose conflict target matches no PRIMARY KEY or
 ddl_table-3fc9f2d11670	50	PRAGMA table_info reports notnull 0 for a STRICT table's PRIMARY KEY column, which SQLite reports as NOT NULL.
 
 # The retained corpus: the smallest case for each bug (retained/bugs.slt).
-retained-bug-01-commit	1	The smallest case for bug 1.
-retained-bug-01-begin	1	The smallest case for bug 1.
-retained-bug-02-not-null-column	2	The smallest case for bug 2.
-retained-bug-04-escape	4	The smallest case for bug 4.
-retained-bug-05-limit-real	5	The smallest case for bug 5.
-retained-bug-06-unique-index	6	The smallest case for bug 6.
-retained-bug-08-ctas-changes	8	The smallest case for bug 8.
-retained-bug-09-raise-rollback	9	The smallest case for bug 9.
-retained-bug-10-raise-ignore	10	The smallest case for bug 10.
 retained-bug-11-returning-wildcard	11	The smallest case for bug 11.
 retained-bug-12-drop-column-view	12	The smallest case for bug 12.
 retained-bug-16-temp-schema	16	The smallest case for bug 16.
@@ -295,7 +225,6 @@ retained-bug-27-right-join	27	The smallest case for bug 27.
 retained-bug-28-sum-text	28	The smallest case for bug 28.
 retained-bug-29-stat1-empty	29	The smallest case for bug 29.
 retained-bug-30-pragma-function	30	The smallest case for bug 30.
-retained-bug-31-unique-without-rowid	31	The smallest case for bug 31.
 retained-bug-33-match-derived	33	The smallest case for bug 33.
 retained-bug-34-update-from-partial-index	34	The smallest case for bug 34.
 retained-bug-35-unread-column	35	The smallest case for bug 35.
@@ -314,7 +243,6 @@ retained-bug-47-real-remainder	47	The smallest case for bug 47.
 retained-bug-48-upsert-target	48	The smallest case for bug 48.
 retained-bug-49-range-over-text	49	The smallest case for bug 49.
 retained-bug-50-strict-primary-key	50	The smallest case for bug 50.
-capability-changing-a-schema-row	51	UPDATE sqlite_schema without writable_schema fails with code 21 where SQLite fails with code 1.
 pragma-temp-store-directory	52	PRAGMA temp_store_directory answers no column where SQLite answers a temp_store_directory column with no rows.
 pragma-data-store-directory	52	PRAGMA data_store_directory answers no column where SQLite answers a data_store_directory column with no rows.
 ms-005@batch	54	execute_batch runs a statement with RETURNING without making its change.
@@ -335,7 +263,6 @@ syntax-insert-stmt-p6@batch	54	execute_batch runs a statement with RETURNING wit
 syntax-returning-clause-p0@batch	54	execute_batch runs a statement with RETURNING without making its change.
 syntax-update-stmt-p5@batch	54	execute_batch runs a statement with RETURNING without making its change.
 syntax-delete-stmt-p3@batch	54	execute_batch runs a statement with RETURNING without making its change.
-retained-bug-51-schema-update-code	51	The smallest case for bug 51.
 retained-bug-52-store-directory	52	The smallest case for bug 52.
 retained-bug-54-batch-returning@batch	54	The smallest case for bug 54.
 retained-bug-55-unicode-of-nul	55	The smallest case for bug 55.
@@ -349,7 +276,6 @@ retained-bug-62-virtual-table-update-from-row	62	The smallest case for bug 62.
 retained-bug-63-json-quote-blob	63	The smallest case for bug 63.
 retained-bug-64-collate-on-json-each	64	The smallest case for bug 64.
 retained-bug-65-wide-table-small-page	65@small-pool,sqlite-page	The smallest case for bug 65.
-retained-bug-66-changes-after-failed-from	66	The smallest case for bug 66.
 window-74449de1b5ba	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
 window-719f4ff45681	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
 function-2698bb329630	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.

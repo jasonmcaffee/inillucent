@@ -5,7 +5,7 @@
 //! already there, so the cheap path - change the catalog and leave the tree -
 //! is only taken where the stored bytes genuinely do not move.
 
-use inillucent_base::error::refusal;
+use inillucent_base::error::{refusal, statement_refusal};
 use inillucent_base::DbResult;
 use inillucent_catalog::ddl::canonical_sql;
 use inillucent_catalog::paged::{tables_from_entries, ObjectKind, SchemaEntry};
@@ -376,8 +376,9 @@ impl crate::ImportedDatabase {
         if let AlterKind::AddColumn { risk, .. } = action {
             self.refuse_a_column_past_the_limit(at, &folded)?;
             if let Some(message) = risk.refusal() {
+                // All three of SQLite's refusals here are `SQLITE_ERROR` (1).
                 if self.table_has_a_row(at, &folded)? {
-                    return Err(refusal(message));
+                    return Err(statement_refusal(message));
                 }
             }
         }

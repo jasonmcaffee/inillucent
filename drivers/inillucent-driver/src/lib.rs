@@ -1025,7 +1025,9 @@ impl Connection<'_> {
         }
     }
 
-    /// Returns the rowid the last `INSERT` on this database assigned.
+    /// Returns the rowid the last `INSERT` on this connection assigned.
+    ///
+    /// Another connection's inserts do not move it, which is SQLite's rule.
     ///
     /// **It answers a `Result` because the engine can be busy (task-1962,
     /// A11).** A function registered on this connection that asks while the
@@ -1037,7 +1039,7 @@ impl Connection<'_> {
             .map_err(|error| self.database.classify(&error))
     }
 
-    /// Returns how many rows every statement so far has changed.
+    /// Returns how many rows every statement on this connection has changed.
     pub fn total_changes(&self) -> Result<i64> {
         self.engine
             .total_changes()
@@ -1062,7 +1064,7 @@ impl Connection<'_> {
             .map_err(|error| self.database.classify(&error))
     }
 
-    /// Returns how many rows the last statement on this database changed.
+    /// Returns how many rows the last statement on this connection changed.
     ///
     /// `sqlite3_changes`. The statement's own rows: a trigger body's go into
     /// [`Connection::total_changes`] and not into this, which is SQLite's rule.

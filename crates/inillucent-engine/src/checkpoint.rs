@@ -259,12 +259,14 @@ impl ImportedDatabase {
             self.counters.last_rowid.get(),
             self.counters.last_changes.get(),
             self.counters.changed_ever.get(),
+            self.counters.total_changes.get(),
         );
         let outcome = self.checkpoint_within(asked);
         self.writing.set_decided_over(held.0);
         self.counters.last_rowid.set(held.1);
         self.counters.last_changes.set(held.2);
         self.counters.changed_ever.set(held.3);
+        self.counters.total_changes.set(held.4);
         outcome
     }
 
@@ -286,6 +288,7 @@ impl ImportedDatabase {
             self.counters.last_rowid.get(),
             self.counters.last_changes.get(),
             self.counters.changed_ever.get(),
+            self.counters.total_changes.get(),
         );
         // `false`: a release is not somebody asking for a checkpoint, so each
         // attached file's own log decides whether this one reclaims.
@@ -294,6 +297,7 @@ impl ImportedDatabase {
         self.counters.last_rowid.set(held.1);
         self.counters.last_changes.set(held.2);
         self.counters.changed_ever.set(held.3);
+        self.counters.total_changes.set(held.4);
         outcome
     }
 

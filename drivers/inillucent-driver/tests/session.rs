@@ -139,3 +139,59 @@ fn a_connection_pragma_holds_for_the_whole_session() {
     drop(database);
     let _ = std::fs::remove_file(&path);
 }
+
+/// Each connection's counters belong to it alone.
+///
+/// `changes()`, `total_changes()` and `last_insert_rowid()` are a
+/// connection's in SQLite. They were one set of numbers for the whole
+/// database, so a second connection's one row insert left the first reading
+/// `changes()` 1 and `total_changes()` 4 where SQLite answers 3 and 3, and a
+/// pool handed every thread whichever numbers the last statement set.
+#[test]
+fn a_connection_reads_its_own_counters_after_another_connection_writes() {
+    let path = scratch("counters");
+    let database = Database::open(&path).expect("the database opens");
+    let first = database.session();
+    let second = database.session();
+
+    first
+        .execute("CREATE TABLE t(a)", &[])
+        .expect("the table is made");
+    first
+        .execute("INSERT INTO t VALUES (1), (2), (3)", &[])
+        .expect("three rows are written");
+    second
+        .execute("INSERT INTO t VALUES (4)", &[])
+        .expect("the second connection writes one row");
+
+    assert_eq!(first.changes().expect("changes"), 3);
+    assert_eq!(first.total_changes().expect("total_changes"), 3);
+    assert_eq!(first.last_insert_rowid().expect("last_insert_rowid"), 3);
+    assert_eq!(second.changes().expect("changes"), 1);
+    assert_eq!(second.total_changes().expect("total_changes"), 1);
+    assert_eq!(second.last_insert_rowid().expect("last_insert_rowid"), 4);
+    let scalar = first
+        .query(
+            "SELECT changes(), total_changes(), last_insert_rowid()",
+            &[],
+            1,
+        )
+        .expect("the scalars answer");
+    assert_eq!(
+        format!("{:?}", scalar.rows.first()),
+        format!(
+            "{:?}",
+            second
+                .query("SELECT 3, 3, 3", &[], 1)
+                .expect("the literal row")
+                .rows
+                .first()
+        ),
+        "the SQL scalars read another connection's counters"
+    );
+
+    drop(first);
+    drop(second);
+    drop(database);
+    let _ = std::fs::remove_file(&path);
+}

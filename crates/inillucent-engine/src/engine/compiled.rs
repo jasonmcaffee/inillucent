@@ -271,7 +271,13 @@ impl crate::ImportedDatabase {
             Cached::Insert(statement, source, values_hold_subquery) => {
                 let rows = match source {
                     Some(query) => {
-                        self.run_cached_query(&query.plan, &query.prepared, &query.slot, params)?
+                        let rows = self.run_cached_query(
+                            &query.plan,
+                            &query.prepared,
+                            &query.slot,
+                            params,
+                        );
+                        self.before_write(rows)?
                     }
                     None => Vec::new(),
                 };
@@ -283,7 +289,8 @@ impl crate::ImportedDatabase {
                 // statement was compiled: an insert that holds no subquery is
                 // the common case and pays nothing for this.
                 let folded = if *values_hold_subquery {
-                    self.fold_values(statement, params)?
+                    let folded = self.fold_values(statement, params);
+                    self.before_write(folded)?
                 } else {
                     None
                 };
@@ -295,7 +302,8 @@ impl crate::ImportedDatabase {
                 )
             }
             Cached::Update(statement, query, assignments_hold_subquery, setup) => {
-                let keys = self.update_keys_of(statement, query, params)?;
+                let keys = self.update_keys_of(statement, query, params);
+                let keys = self.before_write(keys)?;
                 // The same for an `UPDATE`'s assignments: the plan above finds
                 // the rows, and the values written into them are evaluated by
                 // the write path from expressions the plan never carried.
@@ -306,7 +314,9 @@ impl crate::ImportedDatabase {
                         .map(|assignment| &assignment.value)
                         .chain(statement.returning.iter().map(|column| &column.expr))
                         .collect();
-                    inillucent_exec::subquery::fold_expressions(&assigned, self, params)?
+                    let folded =
+                        inillucent_exec::subquery::fold_expressions(&assigned, self, params);
+                    self.before_write(folded)?
                 } else {
                     None
                 };
@@ -356,7 +366,8 @@ impl crate::ImportedDatabase {
                 self.delete_from_module(statement, &keys)
             }
             Cached::Delete(statement, query) => {
-                let keys = self.keys_of(query, params)?;
+                let keys = self.keys_of(query, params);
+                let keys = self.before_write(keys)?;
                 // A `RETURNING` clause is a result-column list the write path
                 // evaluates directly, so the plan-shaped fold never sees its
                 // subqueries. `DELETE ... RETURNING id, (SELECT count(*) FROM
@@ -368,7 +379,8 @@ impl crate::ImportedDatabase {
                     .iter()
                     .map(|column| &column.expr)
                     .collect();
-                let folded = inillucent_exec::subquery::fold_expressions(&returned, self, params)?;
+                let folded = inillucent_exec::subquery::fold_expressions(&returned, self, params);
+                let folded = self.before_write(folded)?;
                 let params = folded.as_ref().unwrap_or(params);
                 self.write(
                     params,
@@ -377,6 +389,25 @@ impl crate::ImportedDatabase {
                 )
             }
         }
+    }
+
+    /// Passes on what a write statement computed before it started writing,
+    /// setting `changes()` to 0 when that failed.
+    ///
+    /// **A write statement that fails reports 0 changes, wherever it failed.**
+    /// SQLite sets `changes()` when any `INSERT`, `UPDATE` or `DELETE`
+    /// finishes, and to 0 when it fails. `write` does that for a failure while
+    /// rows are written, but the rows an `UPDATE ... FROM` changes, an
+    /// `INSERT ... SELECT` copies and a `DELETE` removes are all found
+    /// before `write` starts, and a failure there left the previous
+    /// statement's count in place.
+    ///
+    /// @param step - what the step before the write answered
+    fn before_write<T>(&self, step: DbResult<T>) -> DbResult<T> {
+        if step.is_err() {
+            self.counters.last_changes.set(0);
+        }
+        step
     }
 
     /// Runs an insert into a virtual table with its `VALUES` subqueries folded.
@@ -987,10 +1018,19 @@ impl crate::ImportedDatabase {
                 // back, so the tally is taken only for `FAIL` - which is what
                 // makes `UPDATE OR FAIL` report `1 | 4` and a plain `UPDATE`
                 // that aborts report `0` and no movement at all.
+                //
+                // **A trigger's rows reach `total_changes()` even when they
+                // are undone.** SQLite adds a trigger program's rows to the
+                // running total as they are written, and an `ABORT` that
+                // undoes them does not take them back off: an `INSERT` of
+                // three rows whose `AFTER` trigger writes two rows each, and
+                // which fails on its third row, moves `total_changes()` by 4
+                // and `changes()` to 0. The statement's own rows are the only
+                // ones it leaves out.
                 if error.unwind() == Unwind::Nothing {
                     self.record_changes(counted.0, counted.1);
                 } else {
-                    self.counters.last_changes.set(0);
+                    self.record_changes(0, counted.1.saturating_sub(counted.0));
                 }
                 return Err(self.abandon(error, mark, autocommit, wrote, txn));
             }

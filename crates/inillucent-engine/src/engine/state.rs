@@ -1083,11 +1083,15 @@ pub(crate) struct Counters {
     /// Never decremented: a `ROLLBACK` does not put it back, which was measured
     /// against the pinned shell rather than assumed.
     pub(crate) changed_ever: std::cell::Cell<i64>,
-    /// What `changed_ever` read when each connection's session was opened, so
-    /// `total_changes()` answers for this session alone rather than for every
-    /// session this database has ever handed out. See
+    /// Every row the running session's statements have changed, for
+    /// `total_changes()`.
+    ///
+    /// `changed_ever` counts every session's rows; this counts the running
+    /// session's, because `total_changes()` belongs to a connection.
+    pub(crate) total_changes: std::cell::Cell<i64>,
+    /// The counters of every session that is not running. See
     /// [`session_changes::SessionChanges`].
-    pub(crate) session_change_baseline: session_changes::SessionChanges,
+    pub(crate) sessions: session_changes::SessionChanges,
     /// How many rows the most recent write changed, for `changes()`.
     ///
     /// The statement's own rows only - a trigger body's are not in it. A
@@ -1096,6 +1100,45 @@ pub(crate) struct Counters {
     pub(crate) last_changes: std::cell::Cell<i64>,
     /// The random built-ins' stream, advanced once per statement.
     pub(crate) seed: std::cell::Cell<u64>,
+}
+
+impl Counters {
+    /// Returns the running session's three counters.
+    pub(crate) fn live(&self) -> session_changes::SessionCounters {
+        session_changes::SessionCounters {
+            last_rowid: self.last_rowid.get(),
+            last_changes: self.last_changes.get(),
+            total_changes: self.total_changes.get(),
+        }
+    }
+
+    /// Makes `session` the running session, parking the outgoing one's
+    /// counters and loading its own.
+    ///
+    /// @param session - the session about to run
+    pub(crate) fn switch_to(&self, session: u64) {
+        if self.sessions.running() == session {
+            return;
+        }
+        let incoming = self.sessions.switch_to(session, self.live());
+        self.load(incoming);
+    }
+
+    /// Puts the running session's three counters back to `held`.
+    ///
+    /// @param held - the values to load, from an earlier [`Counters::live`]
+    pub(crate) fn load(&self, held: session_changes::SessionCounters) {
+        self.last_rowid.set(held.last_rowid);
+        self.last_changes.set(held.last_changes);
+        self.total_changes.set(held.total_changes);
+    }
+
+    /// Returns one session's counters, running or not.
+    ///
+    /// @param session - the session asking
+    pub(crate) fn of(&self, session: u64) -> session_changes::SessionCounters {
+        self.sessions.read(session, self.live())
+    }
 }
 
 impl Schema {

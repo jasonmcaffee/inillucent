@@ -6,7 +6,7 @@
 //! that wanted to plan once and execute many could not do it through one
 //! combined call.
 
-use inillucent_base::error::refusal;
+use inillucent_base::error::{refusal, statement_refusal};
 use inillucent_base::DbResult;
 use inillucent_exec::physical::{self, ForcePlan, Params};
 use inillucent_sql::bind::{AllowAll, Binder, BoundStatement};
@@ -375,8 +375,11 @@ impl ImportedDatabase {
         if !is_the_schema_table(written) {
             return Ok(());
         }
+        // `SQLITE_ERROR` (1): SQLite refuses this write with "table
+        // sqlite_master may not be modified" and code 1, and an application
+        // that reads the code must not see an API misuse.
         if !self.pragmas.writable_schema() {
-            return Err(refusal(
+            return Err(statement_refusal(
                 "writing to sqlite_schema needs PRAGMA writable_schema = ON",
             ));
         }

@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use inillucent_base::error::refusal;
+use inillucent_base::error::{refusal, statement_refusal};
 use inillucent_base::DbResult;
 use inillucent_pool::{Database, Options};
 use inillucent_vfs::memory::MemoryVfs;
@@ -90,8 +90,10 @@ impl ImportedDatabase {
                 String::from_utf8_lossy(name)
             )));
         }
+        // `SQLITE_ERROR` (1), as the pinned reference answers; `refusal` would
+        // answer `SQLITE_MISUSE` (21).
         if self.session_state.attached.len() >= MAX_ATTACHED {
-            return Err(refusal(format!(
+            return Err(statement_refusal(format!(
                 "too many attached databases - max {MAX_ATTACHED}"
             )));
         }

@@ -204,7 +204,15 @@ impl crate::ImportedDatabase {
             String::from_utf8_lossy(name).replace('"', "\"\""),
             String::from_utf8_lossy(select_sql)
         );
-        let outcome = self.execute_any(&fill, &inillucent_exec::physical::Params::new())?;
+        // **The fill moves none of the connection's counters.** SQLite's
+        // `CREATE TABLE ... AS SELECT` is not an `INSERT`: `changes()`,
+        // `total_changes()` and `last_insert_rowid()` all read what they read
+        // before it. Running the fill as an `INSERT` set all three to the
+        // copied rows.
+        let held = self.counters.live();
+        let filled = self.execute_any(&fill, &inillucent_exec::physical::Params::new());
+        self.counters.load(held);
+        let outcome = filled?;
         self.seal()?;
         Ok(Outcome {
             rows: Vec::new(),

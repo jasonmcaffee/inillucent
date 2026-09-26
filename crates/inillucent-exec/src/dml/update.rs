@@ -237,6 +237,7 @@ pub fn update_at_cached(
             &after,
             Some(&before),
             IndexExprs::new(declarations, space),
+            &[],
         )? {
             // The constraint's own clause, when the statement wrote none -
             // `a TEXT UNIQUE ON CONFLICT REPLACE` replaces under a plain

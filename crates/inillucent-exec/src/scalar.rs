@@ -1006,7 +1006,9 @@ impl Eval for Pattern {
                 }
                 let bytes = eval::text_bytes(&Value::from(&value.get()).into_owned()?, ENCODING);
                 inillucent_scalar::builtin::single_character_escape(&bytes)
-                    .map_err(inillucent_base::error::misuse)?;
+                    // `SQLITE_ERROR` (1), SQLite's code for this refusal, with
+                    // its sentence as the message a caller reads.
+                    .map_err(inillucent_base::error::statement_refusal)?;
                 Some(bytes)
             }
             None => None,

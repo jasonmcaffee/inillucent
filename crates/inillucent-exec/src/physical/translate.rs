@@ -14,7 +14,7 @@ use inillucent_base::DbResult;
 // `physical::Slot` / `physical::Compiled` / `physical::try_compile` reference
 // - `inillucent-engine`'s `Cached::Select` among them - did not have to move
 // with them.
-use inillucent_sql::ast::{BinaryOp, PatternOp, SortOrder, UnaryOp};
+use inillucent_sql::ast::{BinaryOp, PatternOp, SortOrder};
 use inillucent_sql::bind::{BoundExpr, BoundSelect, SubqueryKind};
 use inillucent_sql::function::{AggregateFunc, ScalarFunc};
 use inillucent_tree::datum::OwnedDatum;
@@ -1204,21 +1204,13 @@ pub(crate) fn constant_count(
     let number = match expr {
         None => return Ok(None),
         Some(BoundExpr::Integer(number)) => *number,
-        // A negative literal binds as a negation of a literal rather than as a
-        // literal, which is why `LIMIT -1` was refused as "not a constant".
-        Some(BoundExpr::Unary {
-            op: UnaryOp::Negate,
-            operand,
-        }) => match operand.as_ref() {
-            BoundExpr::Integer(number) => number.saturating_neg(),
-            _ => return unsupported("a LIMIT or OFFSET that is not a constant"),
-        },
-        Some(BoundExpr::Parameter(index)) => match params.get(*index) {
-            OwnedDatum::Int(number) => number,
-            OwnedDatum::Null => return Ok(None),
-            _ => return unsupported("a LIMIT bound to a non-integer"),
-        },
-        Some(_) => return unsupported("a LIMIT or OFFSET that is not a constant"),
+        Some(BoundExpr::Parameter(index)) => must_be_integer(params.get(*index))?,
+        // Anything else that reads no row - `LIMIT -1`, `LIMIT 2.7`, `LIMIT
+        // NULL`, `LIMIT '2'`, `LIMIT 1 + 1` - is folded once and then held to
+        // the same rule a bound value is. All but a negated integer were
+        // refused as not built, with `SQLITE_MISUSE`; SQLite answers every one
+        // of them.
+        Some(other) => must_be_integer(crate::constant::literal_value(other, params)?)?,
     };
     if number < 0 {
         return Ok(match negative {
@@ -1227,6 +1219,35 @@ pub(crate) fn constant_count(
         });
     }
     Ok(Some(number as usize))
+}
+
+/// Returns a `LIMIT` or `OFFSET` value as an integer, or SQLite's refusal.
+///
+/// This is SQLite's `OP_MustBeInt`: numeric affinity is applied, trying for an
+/// integer, so `2.0`, `'2'` and `'2.0'` are all 2. Whatever is still not an
+/// integer after that - `2.7`, `NULL`, a blob, text that is not a number - is
+/// `SQLITE_MISMATCH` (20), "datatype mismatch". A bound NULL is refused the
+/// same way; it used to mean "no limit", which SQLite never answers.
+///
+/// @param value - the clause's value
+fn must_be_integer(value: OwnedDatum) -> DbResult<i64> {
+    let converted = match &value {
+        OwnedDatum::Int(number) => return Ok(*number),
+        OwnedDatum::Real(_) => {
+            inillucent_value::affinity::integer_affinity(inillucent_value::Value::from(&value))
+        }
+        OwnedDatum::Text(_) => inillucent_value::affinity::apply_numeric_affinity(
+            inillucent_value::Value::from(&value),
+            true,
+        ),
+        OwnedDatum::Null | OwnedDatum::Blob(_) => inillucent_value::Value::Null,
+    };
+    match converted {
+        inillucent_value::Value::Integer(number) => Ok(number),
+        _ => Err(inillucent_base::DbError::primary(
+            inillucent_base::PrimaryCode::Mismatch,
+        )),
+    }
 }
 /// Reports whether two translated expressions are the same expression.
 ///

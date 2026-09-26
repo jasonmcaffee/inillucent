@@ -23,17 +23,10 @@ impl crate::ImportedDatabase {
     /// Returns how many rows every statement on **this connection** has
     /// changed.
     ///
-    /// `changed_ever` is one counter shared by every connection this database
-    /// has ever handed out, so the answer is the counter's value minus what it
-    /// already read when `self.session_state.session` was opened - see
-    /// `session_change_baseline`. `self.session_state.session` is always the caller's own:
-    /// every entry point reaches this through `use_session`, which sets it
-    /// first.
+    /// The running session's own count: every entry point reaches this
+    /// through `use_session`, which loads the caller's counters first.
     pub fn total_changes(&self) -> i64 {
-        self.counters.session_change_baseline.total_changes(
-            self.session_state.session.get(),
-            self.counters.changed_ever.get(),
-        )
+        self.counters.total_changes.get()
     }
 
     /// Returns how many rows the most recent write changed.
@@ -54,6 +47,9 @@ impl crate::ImportedDatabase {
         self.counters
             .changed_ever
             .set(self.counters.changed_ever.get().saturating_add(all));
+        self.counters
+            .total_changes
+            .set(self.counters.total_changes.get().saturating_add(all));
     }
 
     /// Records the rowid an `INSERT` assigned, when it assigned one.

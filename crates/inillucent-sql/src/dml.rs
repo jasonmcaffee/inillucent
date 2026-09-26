@@ -471,13 +471,31 @@ fn fault_applies(
 /// here, on the bodies this binder generated, and nowhere else.
 fn report_as_foreign_key(trigger: &mut BoundTrigger) {
     trigger.foreign_key = true;
+    mark_raises(trigger, true);
+}
+
+/// Sets which code every `RAISE` in a synthesised body reports.
+///
+/// **`ON DELETE RESTRICT` and `ON UPDATE RESTRICT` report the trigger's
+/// code.** SQLite enforces RESTRICT with a trigger program and reports
+/// `SQLITE_CONSTRAINT_TRIGGER` (1811) for it, while a `NO ACTION` key, which
+/// it checks with a counter, reports `SQLITE_CONSTRAINT_FOREIGNKEY` (787).
+/// The message is the same for both.
+///
+/// @param trigger - the bound body
+/// @param foreign_key - whether its aborts report the foreign key's code
+fn mark_raises(trigger: &mut BoundTrigger, foreign_key: bool) {
     for statement in &mut trigger.body {
         let BoundTriggerStatement::Select(select) = statement else {
             continue;
         };
         for column in &mut select.columns {
-            if let BoundExpr::Raise { foreign_key, .. } = &mut column.expr {
-                *foreign_key = true;
+            if let BoundExpr::Raise {
+                foreign_key: marked,
+                ..
+            } = &mut column.expr
+            {
+                *marked = foreign_key;
             }
         }
     }
@@ -997,6 +1015,11 @@ impl<'a> Binder<'a> {
             }
             let mut one = self.bind_foreign_key_trigger(table, trigger, &event)?;
             one.self_referencing = planned.self_referencing;
+            // A parent action that fires BEFORE the write is a RESTRICT, which
+            // is the only parent action `foreign_key::parent_action` times so.
+            if !planned.is_check && trigger.time == ast::TriggerTime::Before {
+                mark_raises(&mut one, false);
+            }
             bound.push(one);
         }
         Ok(bound)

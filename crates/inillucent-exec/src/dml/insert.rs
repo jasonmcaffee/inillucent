@@ -151,6 +151,16 @@ pub fn insert_at(
     let mut changes = Changes::default();
     let captured = target.captures(table.root);
     for supplied_row in &rows {
+        // **A row that is skipped gives its rowid back.** SQLite allocates a
+        // rowid when it writes the row, so a row that `OR IGNORE`, a `CHECK`,
+        // a `NOT NULL` or a trigger's `RAISE(IGNORE)` skips never had one,
+        // and the next row takes the number. This engine allocates while it
+        // builds the image, so a skipped row used to use up its number: the
+        // rows were stored as 1, 3, 6 where SQLite stores 1, 2, 3, and
+        // `last_insert_rowid()` answered the larger number. An
+        // `AUTOINCREMENT` table is the exception, in SQLite too: its sequence
+        // keeps every number it handed out.
+        let rowid_before = next_rowid;
         let image = plan.build_row(
             supplied_row,
             &space,
@@ -186,6 +196,7 @@ pub fn insert_at(
             },
         )? == trigger::Fired::SkipRow
         {
+            give_back(table, &mut next_rowid, rowid_before);
             continue;
         }
         // **Affinity first, then the constraints.** `NOT NULL`, `STRICT` and
@@ -201,10 +212,12 @@ pub fn insert_at(
         // `INSERT ... ON CONFLICT DO NOTHING`.
         let declared = resolution_of(statement.on_conflict);
         if !declarations_are_met(table, &layout, &declarations, &space, &mut image, declared)? {
+            give_back(table, &mut next_rowid, rowid_before);
             continue;
         }
         declarations.types_are_met(table, &image)?;
         if !declarations.checks_are_met(&space, &image, declared == Resolution::Skip)? {
+            give_back(table, &mut next_rowid, rowid_before);
             continue;
         }
         let Some(stored) = write_one(
@@ -221,8 +234,32 @@ pub fn insert_at(
             },
         )?
         else {
+            give_back(table, &mut next_rowid, rowid_before);
             continue;
         };
+        // **`last_insert_rowid()` moves for an insert, never for an upsert's
+        // `DO UPDATE` arm.** See [`Stored`]'s own doc comment: both used to
+        // feed the same row image into `changes.last_rowid`, so resolving a
+        // conflict onto an existing row reported *that* row's rowid as newly
+        // inserted.
+        //
+        // **Recorded when the row is written, before its `AFTER` triggers.**
+        // SQLite sets the rowid as the row goes in, so an `AFTER INSERT`
+        // trigger that fails with `RAISE(ROLLBACK)` leaves it at the row it
+        // undid; recording it after the triggers left it at 0. Only the
+        // statement's own rows move it: a trigger body's insert moves
+        // SQLite's value only while the trigger runs.
+        if let Stored::Inserted(row) = &stored {
+            if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| row.get(at)) {
+                changes.last_rowid = Some(*assigned);
+                if depth.0 == 0 {
+                    target.count_rowid(*assigned);
+                }
+                // A key the statement supplied raises the mark too: `INSERT
+                // INTO t VALUES (50, ...)` makes the next allocated key 51.
+                high_water = high_water.max(*assigned);
+            }
+        }
         if trigger::fire(
             &statement.triggers,
             TriggerTime::After,
@@ -242,20 +279,6 @@ pub fn insert_at(
             continue;
         }
         count_row(&mut changes, target, depth);
-        // **`last_insert_rowid()` moves for an insert, never for an upsert's
-        // `DO UPDATE` arm.** See [`Stored`]'s own doc comment: both used to
-        // feed the same row image into `changes.last_rowid`, so resolving a
-        // conflict onto an existing row reported *that* row's rowid as newly
-        // inserted.
-        if let Stored::Inserted(row) = &stored {
-            if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| row.get(at)) {
-                changes.last_rowid = Some(*assigned);
-                target.count_rowid(*assigned);
-                // A key the statement supplied raises the mark too: `INSERT
-                // INTO t VALUES (50, ...)` makes the next allocated key 51.
-                high_water = high_water.max(*assigned);
-            }
-        }
         if captured {
             changes.written.push(stored.row().to_vec());
         }
@@ -279,6 +302,19 @@ pub fn insert_at(
         }
     }
     Ok(changes)
+}
+/// Hands a skipped row's rowid back, so the next row is given it.
+///
+/// An `AUTOINCREMENT` table keeps the number, as SQLite's does: its sequence
+/// records every rowid it hands out.
+///
+/// @param table - the table being written
+/// @param next_rowid - the next rowid to allocate
+/// @param before - what it was before the skipped row was built
+fn give_back(table: &TableInfo, next_rowid: &mut Option<i64>, before: Option<i64>) {
+    if !table.autoincrement {
+        *next_rowid = before;
+    }
 }
 /// Fires a view's `INSTEAD OF INSERT` triggers, storing nothing.
 ///
@@ -406,7 +442,7 @@ fn write_one(
         if place_row_absent(table, layout, target, &row, indexes)? {
             return Ok(Some(Stored::Inserted(row)));
         }
-        let clash = conflicting_row(table, layout, target, &row, None, indexes)?;
+        let clash = conflicting_row(table, layout, target, &row, None, indexes, &[])?;
         let constraint = clash.as_ref().and_then(|found| found.conflict);
         return Err(clash
             .map(|found| found.error)
@@ -420,7 +456,15 @@ fn write_one(
     // *different* row on each of two unique indexes and `REPLACE` deletes every
     // one of them - which is what `UPDATE OR REPLACE` has always done here and
     // the insert path did not. It terminates: every turn removes a row.
-    while let Some(clash) = conflicting_row(table, layout, target, &row, None, indexes)? {
+    // The upsert arms' targets are asked first, as SQLite asks them. A
+    // statement with no upsert collects nothing and allocates nothing.
+    let targets: Vec<&[u16]> = statement
+        .upsert
+        .iter()
+        .filter(|arm| !arm.target.is_empty())
+        .map(|arm| arm.target.as_slice())
+        .collect();
+    while let Some(clash) = conflicting_row(table, layout, target, &row, None, indexes, &targets)? {
         let arm = matching_arm(statement, &clash.columns);
         match resolution_for_arm(statement, clash.conflict, arm) {
             Resolution::Skip => return Ok(None),

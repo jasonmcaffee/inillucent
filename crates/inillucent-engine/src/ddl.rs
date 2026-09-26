@@ -354,17 +354,24 @@ impl ImportedDatabase {
             // them. It is the same defect three times,
             // and it is how a caller finds out that an `OR ROLLBACK` ended the
             // transaction underneath it: the `COMMIT` that follows has nothing
-            // left to commit and has to say so.
+            // left to commit and has to say so. Each refusal is `SQLITE_ERROR`
+            // (1), which is what the pinned reference answers; `refusal` would
+            // answer `SQLITE_MISUSE` (21), and the statement matrix's
+            // transaction cases found exactly that.
             Directive::Begin(_) => {
                 if self.writing.batch().is_some() {
-                    return Err(refusal("cannot start a transaction within a transaction"));
+                    return Err(statement_refusal(
+                        "cannot start a transaction within a transaction",
+                    ));
                 }
                 self.begin_batch();
                 Ok(Outcome::empty())
             }
             Directive::Commit => {
                 if self.writing.batch().is_none() {
-                    return Err(refusal("cannot commit - no transaction is active"));
+                    return Err(statement_refusal(
+                        "cannot commit - no transaction is active",
+                    ));
                 }
                 self.commit_batch()?;
                 Ok(Outcome::empty())
@@ -382,7 +389,9 @@ impl ImportedDatabase {
                 }
                 None => {
                     if self.writing.batch().is_none() {
-                        return Err(refusal("cannot rollback - no transaction is active"));
+                        return Err(statement_refusal(
+                            "cannot rollback - no transaction is active",
+                        ));
                     }
                     self.rollback()?;
                     Ok(Outcome::empty())
@@ -518,10 +527,15 @@ pub(crate) fn refuse_duplicates(
                     format!("{}.{}", String::from_utf8_lossy(&owner.name), name)
                 })
                 .collect();
-            return Err(refusal(format!(
-                "UNIQUE constraint failed: {}",
-                columns.join(", ")
-            )));
+            // `SQLITE_CONSTRAINT_UNIQUE` (2067), which is what SQLite reports
+            // when the rows already there break the new index; `refusal`
+            // answered `SQLITE_MISUSE` (21).
+            let said = format!("UNIQUE constraint failed: {}", columns.join(", "));
+            return Err(inillucent_base::DbError::new(inillucent_base::ExtendedCode(
+                inillucent_sql::dml::codes::UNIQUE,
+            ))
+            .with_message(said.clone())
+            .with_detail(said));
         }
     }
     Ok(())

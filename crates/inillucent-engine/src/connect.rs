@@ -1041,7 +1041,7 @@ impl<'d> Connection<'d> {
     /// holding the previous statement's number, and `sqlite3_changes` and
     /// `changes()` could answer differently about the same statement.
     pub fn changes(&self) -> DbResult<i64> {
-        Ok(self.database.counters.last_changes.get())
+        Ok(self.database.counters.of(self.session).last_changes)
     }
 
     /// Returns how many rows every statement so far has changed.
@@ -1050,16 +1050,12 @@ impl<'d> Connection<'d> {
     /// whatever the last `use_session` set, and a connection knows which one it
     /// is without asking.
     pub fn total_changes(&self) -> DbResult<i64> {
-        Ok(self
-            .database
-            .counters
-            .session_change_baseline
-            .total_changes(self.session, self.database.counters.changed_ever.get()))
+        Ok(self.database.counters.of(self.session).total_changes)
     }
 
     /// Returns the rowid the last `INSERT` assigned.
     pub fn last_insert_rowid(&self) -> DbResult<i64> {
-        Ok(self.database.counters.last_rowid.get())
+        Ok(self.database.counters.of(self.session).last_rowid)
     }
 
     /// Returns how many databases the last commit was decided over.

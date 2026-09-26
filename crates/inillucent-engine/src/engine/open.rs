@@ -209,7 +209,8 @@ impl crate::ImportedDatabase {
                 last_changes: std::cell::Cell::new(0),
                 seed: std::cell::Cell::new(fresh_seed()),
                 changed_ever: std::cell::Cell::new(0),
-                session_change_baseline: session_changes::SessionChanges::default(),
+                total_changes: std::cell::Cell::new(0),
+                sessions: session_changes::SessionChanges::default(),
             }),
             compiled: std::rc::Rc::new(Compiled {
                 statements: std::cell::RefCell::new(HashMap::new()),
@@ -540,7 +541,8 @@ impl crate::ImportedDatabase {
                 last_changes: std::cell::Cell::new(0),
                 seed: std::cell::Cell::new(fresh_seed()),
                 changed_ever: std::cell::Cell::new(0),
-                session_change_baseline: session_changes::SessionChanges::default(),
+                total_changes: std::cell::Cell::new(0),
+                sessions: session_changes::SessionChanges::default(),
             }),
             compiled: std::rc::Rc::new(Compiled {
                 statements: std::cell::RefCell::new(HashMap::new()),

@@ -718,17 +718,13 @@ impl ImportedDatabase {
     /// @param session - the connection's number, from `open_session`
     pub fn use_session(&mut self, session: u64) {
         self.session_state.session.set(session);
-        // **The baseline is recorded here rather than when the number was
-        // handed out (task-1962, A11).** `open_session` used to do both, and
-        // `Database::session` therefore had to borrow the engine to open a
-        // connection - which panicked when a callback asked for a second
-        // connection while a statement was running. The number comes off a
-        // counter the `Database` owns now, and the first statement that runs on
-        // it records what `changed_ever` stood at. Nothing can have changed in
-        // between: a connection that has run nothing has changed nothing.
-        self.counters
-            .session_change_baseline
-            .record_open_once(session, self.counters.changed_ever.get());
+        // **Each connection reads its own counters.** `changes()`,
+        // `total_changes()` and `last_insert_rowid()` belong to a connection
+        // in SQLite, and one set of cells shared by every session let a
+        // statement on one connection move another's numbers. The cells hold
+        // the running session's; switching parks them and loads the new
+        // session's, which costs one comparison when nothing changes.
+        self.counters.switch_to(session);
         if self.session_state.tables_session == session {
             return;
         }
