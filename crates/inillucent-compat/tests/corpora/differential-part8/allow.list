@@ -6,9 +6,10 @@
 # cannot fail is worse than none.
 #
 # All twenty-three of task-1979 section 6's defects are off this list: nine in
-# task-1980 and the other fourteen in task-1981. What is left is the four cases
-# that are not wrong answers at all. Each one is a construct this engine has not
-# built, so it refuses with exit code 3 - the engine's own "not yet", which is a
+# task-1980 and the other fourteen in task-1981. Three of the four cases that
+# were left - `LIMIT 1+1`, `LIMIT '2'` and `UPDATE t SET (a,b) = (3,4)` - came off
+# in task-2136, when the constructs were built. The one left is not a wrong
+# answer at all. It is a construct this engine has not built, so it refuses with exit code 3 - the engine's own "not yet", which is a
 # documented answer rather than a wrong one, and which the suite's `Verdict`
 # tells apart from a refusal for any other reason. They come off this list when
 # the construct is built, and until then they are what keeps the list honest
@@ -19,8 +20,5 @@
 # SQLITE_ENABLE_UPDATE_DELETE_LIMIT, and which this engine runs, as builds with
 # that option do (task-2120). It stays here for as long as the engine accepts it.
 
-lim-004	an exit 3 gap: `LIMIT 1+1`, an expression rather than a literal
-lim-005	an exit 3 gap: `LIMIT '2'`, a text literal
-ms-006	an exit 3 gap: `UPDATE t SET (a,b) = (3,4)`, the row-value form
 ms-007	accepted on purpose: `DELETE ... ORDER BY ... LIMIT`, which the pinned build is compiled without
 sub-010	an exit 3 gap: `(a, b) IN (SELECT ...)`, a row value against a subquery

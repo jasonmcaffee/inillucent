@@ -68,11 +68,11 @@ application that uses the driver does not change when crates below the engine mo
 1. **Handle `unsupported` on its own.** The engine returns `unsupported` (`INILLUCENT_UNSUPPORTED` in
    C, `Status::Unsupported` in Rust) for a construct it has not built. A mistyped statement gets a
    different status, such as `syntax`. A binding that turns both into one general error cannot tell
-   "not built yet" from "wrong". For example, `SELECT 1 LIMIT 1 + 1` returns `unsupported`, because
-   `LIMIT` takes only a constant or a bound parameter. The 416 case differential probe, which runs
-   each case on inillucent and on the pinned SQLite 3.53.4, has no case that returns `unsupported`.
-   Write the `unsupported` branch anyway, because the capability table lists 19 constructs the
-   engine refuses.
+   "not built yet" from "wrong". For example, `SELECT 1 FROM t WHERE (a, b) IN (SELECT x, y FROM s)`
+   returns `unsupported`, because a row value on the left of `IN` takes a value list and not a
+   query. The 416 case differential probe, which runs each case on inillucent and on the pinned
+   SQLite 3.53.4, has no case that returns `unsupported`. Write the `unsupported` branch anyway,
+   because the capability table lists 16 constructs the engine refuses.
 2. **Read the capability table before you write unusual SQL.** The table lists what the engine can
    do, with a sentence about each row. See [The capability table](#the-capability-table).
 
@@ -80,10 +80,10 @@ The Python conformance runner prints the size of the table when it finishes:
 
 ```
 $ python drivers/bindings/python/run_conformance.py
-49 capabilities reported
+50 capabilities reported
 ```
 
-The 49 rows are 28 `yes`, 2 `partial` and 19 `no`. The two `partial` rows are:
+The 50 rows are 32 `yes`, 2 `partial` and 16 `no`. The two `partial` rows are:
 
 | Capability | Why it is `partial` |
 |---|---|
@@ -301,11 +301,16 @@ order is an error your code can see, and the process does not crash.
 One file has one buffer pool, and the engine runs on one thread. Keep an `inillucent_db` and every
 handle made from it on one thread, or guard every call with a lock your binding owns. The C library
 has no lock inside it. `inillucent_cancel` is the one call that is safe from another thread while a
-statement runs. Two databases on two files are independent.
+statement runs. It sets a flag and touches nothing else. In Rust, `Database::cancel_handle()` returns
+a `CancelHandle` that is `Send` and `Sync`: take it before the statement starts, move it to another
+thread and call `cancel()` there. `Connection::cancel()` can only be called between statements,
+because `Database` and `Connection` stay on one thread. Two databases on two files are independent.
 
 ### Sessions, and a connection per call
 
-A session is what `temp.` tables, `ATTACH` and the connection pragmas belong to. In C,
+A session is what `temp.` tables, `ATTACH`, the connection pragmas and the counters belong to. As
+in SQLite, `changes()`, `total_changes()` and `last_insert_rowid()` answer for the session that
+asks: a statement on one session does not move another session's numbers. In C,
 `inillucent_connect` opens a session and the `inillucent_conn` handle keeps it. Every call on that
 handle runs in the same session.
 

@@ -44,7 +44,7 @@ The statuses you will see most often, each produced by the release build:
 
 | Status | What caused it | An example message |
 |---|---|---|
-| `unsupported` | a construct the engine has not built | `the new engine's physical pass does not handle a LIMIT or OFFSET that is not a constant yet` |
+| `unsupported` | a construct the engine has not built | `unsupported: a row value IN a query rather than a value list` |
 | `syntax` | the statement is not valid SQL | `near "SELEC": syntax error` |
 | `not_found` | no such table, column, index, function or capability | `no such table: nothere` |
 | `constraint` | a constraint refused the write | `UNIQUE constraint failed: t.a` |
@@ -75,24 +75,25 @@ can change between releases.
 ## "It says unsupported" or "it exited 3"
 
 ```sh
-inillucent query "SELECT 1 LIMIT 1+1"
+inillucent query "SELECT 1 FROM t WHERE (a, b) IN (SELECT x, y FROM s)"
 ```
 
 ```text
-Error [unsupported]: the new engine's physical pass does not handle a LIMIT or OFFSET that is not a constant yet
-  not built yet: a LIMIT or OFFSET that is not a constant
+Error [unsupported]: unsupported: a row value IN a query rather than a value list
+  not built yet: a row value IN a query rather than a value list
+  at byte 22 of the statement
 ```
 
 The SQL is correct. The engine has not built that construct, so rewording the same construct gets
-the same answer. Write the query another way: here, compute the number first and bind it with
-`--params`. Ask what the engine supports before you write an unusual statement:
+the same answer. Write the query another way: here, `EXISTS (SELECT 1 FROM s WHERE x = a AND
+y = b)`. Ask what the engine supports before you write an unusual statement:
 
 ```sh
 inillucent capabilities                  # the whole table
 inillucent capabilities triggers         # one row
 ```
 
-`inillucent capabilities` lists 49 capabilities. A test checks every row but two against the running
+`inillucent capabilities` lists 50 capabilities. A test checks every row but two against the running
 engine in both directions: a row that says yes and fails, or a row that says no and works, fails the
 build. The two unchecked rows are `cancel` and `readonly_open`, and both say `partial`. A name that
 is not in the table is the status `not_found` and means no.

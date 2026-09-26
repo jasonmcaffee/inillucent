@@ -971,7 +971,7 @@ The 26 that answer differently with no arguments:
 
 ## Constructs the probe does not reach
 
-`inillucent capabilities` lists 49 capabilities reported by the engine. 16 of them are `no`: the
+`inillucent capabilities` lists 50 capabilities reported by the engine. 16 of them are `no`: the
 engine refuses the construct with exit code 3. None of these is one of the 416 cases. Most of them
 run in SQLite. One, writing to a view, is refused by SQLite too.
 
@@ -979,7 +979,7 @@ run in SQLite. One, writing to a view, is refused by SQLite too.
 |---|---|
 | `attach_with_key` | `ATTACH ... KEY`, which SQLite runs only with its encryption extension |
 | `row_value_in_subquery` | `(a, b) IN (SELECT x, y FROM s)` |
-| `computed_limit` | an expression in `LIMIT` or `OFFSET`, such as `LIMIT 1 + 1` |
+| `match_in_an_or_reading_a_row` | a full text `MATCH` under an `OR` whose pattern reads another table's row, such as `f MATCH q.w OR rowid = 3` |
 | `load_extension` | `load_extension()`. There is no C extension interface |
 | `compound_ordered_by_expression` | a compound select ordered by an expression |
 | `multi_column_vector_index` | a vector index over more than one column |

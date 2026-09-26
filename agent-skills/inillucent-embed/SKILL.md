@@ -44,12 +44,13 @@ The engine returns the status `unsupported` for a statement it has not built. Th
 A mistyped statement gets a different status, such as `syntax`.
 
 ```sh
-inillucent query "SELECT 1 LIMIT 1 + 1"
+inillucent query "SELECT 1 FROM t WHERE (a, b) IN (SELECT x, y FROM s)"
 ```
 
 ```
-Error [unsupported]: the new engine's physical pass does not handle a LIMIT or OFFSET that is not a constant yet
-  not built yet: a LIMIT or OFFSET that is not a constant
+Error [unsupported]: unsupported: a row value IN a query rather than a value list
+  not built yet: a row value IN a query rather than a value list
+  at byte 22 of the statement
 ```
 
 Keep `unsupported` separate from other errors in your code. An application can then tell its user
@@ -140,7 +141,8 @@ The rules a binding must follow:
 - **Map `INILLUCENT_UNSUPPORTED` to its own error type.**
 - **Keep each database and its handles on one thread,** or guard every call with a lock your
   binding owns. The C library has no lock inside it. `inillucent_cancel` is the one call that is
-  safe from another thread.
+  safe from another thread. In Rust, `Database::cancel_handle()` gives a handle another thread can
+  cancel with.
 - **Run `drivers/conformance/suite.json`.** A binding that passes it agrees with the driver on every
   status, value and lifetime.
 

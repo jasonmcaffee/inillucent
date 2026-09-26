@@ -258,7 +258,7 @@ exit code 3.
 |---|---|---|
 | `ATTACH ... KEY` | `ATTACH 'x.db' AS k KEY 'secret'` | `ATTACH` without `KEY`. inillucent has no encryption |
 | a row value `IN` a subquery | `(a, b) IN (SELECT x, y FROM s)` | `EXISTS (SELECT 1 FROM s WHERE x = a AND y = b)` |
-| an expression in `LIMIT` or `OFFSET` | `LIMIT 1 + 1` | a constant or a bound parameter |
+| a full text `MATCH` under an `OR` whose pattern reads another table's row | `f MATCH q.w OR rowid = 3` | a constant or bound pattern, or two queries joined with `UNION` |
 | a partial index as an `ON CONFLICT` target | `ON CONFLICT(b) WHERE b > 0` | a full unique index |
 | an expression as an `ON CONFLICT` target | `ON CONFLICT(lower(a))` | a stored column with a unique index |
 | a correlated `IN` subquery with `GROUP BY`, `LIMIT` or a compound query | `a IN (SELECT a FROM t i WHERE i.id = o.id LIMIT 1)` | `EXISTS` with the condition written out |

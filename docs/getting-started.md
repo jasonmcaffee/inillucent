@@ -197,7 +197,7 @@ A script should read these fields and branch on `status`. The `text` field is fo
 | `0` | The command succeeded. | a query that returned rows |
 | `1` | The command ran and failed. | bad SQL, a constraint, a missing table, a file that cannot be read |
 | `2` | The command line could not be acted on. | a mistyped command, an unknown option |
-| `3` | The engine has not built that feature yet. | `SELECT * FROM note LIMIT 1 + 1` |
+| `3` | The engine has not built that feature yet. | `SELECT * FROM note WHERE (id, body) IN (SELECT id, body FROM note)` |
 
 Exit code 3 means "not built yet". A script can check for it without reading the message. Rewording
 the SQL will not help. Over MCP and the language bindings, the same case has the status

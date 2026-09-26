@@ -10,6 +10,41 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**The statement matrix's first run found 67 ways inillucent answered differently from SQLite
+3.53.4, and 66 of them are fixed.** The matrix runs every case against the pinned SQLite and
+compares rows, result codes and counters. What changed, by what a caller sees:
+
+- **Result codes.** A refused `BEGIN`, `COMMIT` or `ROLLBACK`, an `ATTACH` past ten, an `ADD COLUMN
+  NOT NULL` with no default, an `ESCAPE` that is not one character and a write to `sqlite_schema`
+  answer code 1, where they answered 21. A unique index built over duplicates answers 19 and 2067. A
+  `LIMIT` of 2.7 or NULL answers 20, `datatype mismatch`. `ON DELETE RESTRICT` reports 1811, and a
+  `UNIQUE` index over a `WITHOUT ROWID` key reports 2067.
+- **Counters.** `changes()`, `total_changes()` and `last_insert_rowid()` belong to each
+  connection, so another connection's statement no longer moves them. `CREATE TABLE ... AS SELECT`
+  moves none of them. A row that `OR IGNORE`, a `CHECK` or `RAISE(IGNORE)` skips gives its rowid
+  back, so the rows are stored as 1, 2, 3 where they were 1, 3, 6. An immediate foreign key is
+  checked when the statement ends, so one `INSERT` can write a child before its parent.
+- **SQL that was refused as not built.** `LIMIT` and `OFFSET` take any expression that reads no
+  row. `UPDATE ... SET (a, b) = (...)` and `= (SELECT ...)`, and row values with `IS`, `BETWEEN`
+  and a `CASE` operand, all run. A full text `MATCH` under an `OR`, and a `MATCH` written on one
+  FTS5 column, run. An `IN` list on a joined table, a correlated subquery over a nested subquery,
+  and an `UPDATE` of a virtual table computed from the row all run. `CREATE TABLE ... AS WITH ...`,
+  `CREATE INDEX` on a temporary table, `CREATE TEMP TABLE temp.t` and `ANALYZE` of an attached
+  schema run. Every pragma that returns a value has its `pragma_<name>` table function.
+- **Wrong answers.** A `RIGHT` or `FULL JOIN` put the right table's values in the left table's
+  columns; it no longer does. `sum()` over text holding integers is an integer, the remainder of a
+  real is a real, a `STRICT` table's `ANY` column keeps text as text, and negative zero, `unicode()`,
+  `substr()`, `replace()`, a unary minus on text and a division by text answer what SQLite answers.
+  A `DROP COLUMN` a view uses is refused, `PRAGMA auto_vacuum` survives a reopen, and VACUUM keeps a
+  table with a stored generated column.
+- **The Rust driver can cancel a statement from another thread.** `Database::cancel_handle()`
+  returns a `CancelHandle` that is `Send` and `Sync`, and `inillucent_cancel` in the C library now
+  sets the flag and touches nothing else.
+
+The one left is a table whose columns do not fit one page, such as 2,000 columns at a page of 4,096
+bytes. It is refused with exit code 3 and a message that names the column count and says a larger
+page size holds it.
+
 **A new example, `examples/coffee-shop`: a coffee shop's orders, stock and double entry books, as a
 REST API in Rust.** It takes orders with sizes and modifiers, prices them with promotion codes,
 loyalty points and sales tax, takes split cash and card payments, and keeps the stock and the books

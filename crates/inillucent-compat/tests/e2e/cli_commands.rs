@@ -322,7 +322,7 @@ fn run_reports_an_unbuilt_construct_as_unsupported() {
     let binary = program("inillucent");
     let database = populated(&binary, "run-unsupported");
     let path = database.to_string_lossy().to_string();
-    let unbuilt = "SELECT 1 FROM note LIMIT 1 + 1";
+    let unbuilt = "SELECT 1 FROM note WHERE (id, body) IN (SELECT id, body FROM note)";
     let refused = run(
         &binary,
         &[
