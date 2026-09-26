@@ -24,7 +24,13 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_NIKAYA = r"C:/jason/dev/nikaya/server"
+# A sibling of this checkout, not a machine's path: Nikaya is a separate,
+# private repository most machines building this one do not have, so nothing
+# here names where any particular developer keeps it. This only resolves to
+# something real on a machine that checks both repositories out side by side;
+# everywhere else --check reports "not on this machine" (exit 2), which is the
+# outcome `workload_freshness.rs` already treats as a skip rather than a fail.
+DEFAULT_NIKAYA = os.path.join(os.path.dirname(HERE), "nikaya", "server")
 DEFAULT_OUT = os.path.join(HERE, "tests", "workloads", "nikaya", "statements.sql")
 
 START = re.compile(r'^\s*(SELECT|INSERT|UPDATE|DELETE|WITH|CREATE|ALTER|DROP|REPLACE)\b', re.I)
@@ -230,7 +236,7 @@ def parameters(statement, tables):
 
 HEADER = '''-- Nikaya's own statements, so a consumer's corpus is something the suite runs.
 --
--- Built by `tools/extract-nikaya-workload.py` from `%s`:
+-- Built by `tools/extract-nikaya-workload.py` from Nikaya's own checkout:
 -- every SQL statement literal in `src/`, de-duplicated, with the file and line
 -- it came from, and the schema its migrations build.
 --
@@ -302,7 +308,7 @@ def render(nikaya):
     templates = [row for row in rows if is_a_template(row[2])]
     rows = [row for row in rows if not is_a_template(row[2])]
 
-    out = [HEADER % (nikaya.replace("\\", "/"), len(rows), len(templates),
+    out = [HEADER % (len(rows), len(templates),
                      "\n".join("--   %s:%d" % (rel, line) for rel, line, _ in templates))]
     out.append("-- section: schema\n\n")
     out.append("-- from src/db.rs, which creates the migration ledger before it can read it\n")

@@ -24,7 +24,7 @@
 
 .EXAMPLE
     pwsh packaging/deploy-site.ps1
-    pwsh packaging/deploy-site.ps1 -SitePath C:/jason/dev/black-rainbow-labs-sites/sites/inillucent
+    pwsh packaging/deploy-site.ps1 -SitePath ../black-rainbow-labs-sites/sites/inillucent
 #>
 [CmdletBinding()]
 param(

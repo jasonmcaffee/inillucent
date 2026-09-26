@@ -96,7 +96,7 @@ they are touching do not collide; two that have not, do.
   `needs oracle` and run nothing - which is most of what checks a parser or planner change against
   3.53.4. `inillucent-fullgate` refuses outright with "sqlite-bench is not built". Junction it in
   before you read any result:
-  `New-Item -ItemType Junction -Path <worktree>\.sqlite-ref -Target C:\jason\dev\inillucent\.sqlite-ref`.
+  `New-Item -ItemType Junction -Path <worktree>\.sqlite-ref -Target <main-checkout>\.sqlite-ref`.
   Remove the junction before you retire the worktree. (task-2039)
 - **There is one copy of that oracle and every worktree junctions to it, so a recursive delete of
   your own junction empties it for everybody.** `Remove-Item -Recurse` and `rm -rf` both follow a
@@ -349,7 +349,7 @@ they are touching do not collide; two that have not, do.
 - **`_agent_output/fixtures/` is missing from a worktree in the same way `.sqlite-ref/` is, and a
   junction handles both.** task-2041 recorded copying `small.db` across; a junction is one command
   and covers `medium.db` and `large.db` too:
-  `New-Item -ItemType Junction -Path <worktree>\_agent_output\fixtures -Target C:\jason\dev\inillucent\_agent_output\fixtures`.
+  `New-Item -ItemType Junction -Path <worktree>\_agent_output\fixtures -Target <main-checkout>\_agent_output\fixtures`.
   Remove both junctions before retiring the worktree. (task-2051)
 - **A position in the new declaration is not a position in the old one, and `DROP COLUMN` is where
   they part.** `rebuild_table_tree` filled each surviving column from `old_layout.slots[declared]`
@@ -527,7 +527,7 @@ they are touching do not collide; two that have not, do.
   `J:/build/nightly`: the scheduled task forces it to `origin/main` every night. (task-2125)
 - **Copy `.sqlite-ref/` into the worktree rather than junctioning it.** task-2048 records a
   recursive delete of a junction emptying the one shared copy for every worktree at once.
-  `Copy-Item -Recurse C:\jason\dev\inillucent\.sqlite-ref <worktree>\.sqlite-ref` costs about four
+  `Copy-Item -Recurse <main-checkout>\.sqlite-ref <worktree>\.sqlite-ref` costs about four
   seconds and 40 MB and cannot do that, and the directory goes when the worktree is retired.
   (task-2061)
 - **What `--strict` counts as a prerequisite failure on this box, in one place.** The list above is
@@ -574,7 +574,7 @@ they are touching do not collide; two that have not, do.
   green from the same binary a minute later; a whole sweep of deliberately built corpora passed in
   between. Start the run, then leave the tree alone until it is finished. (task-2067)
 - **Copy `.sqlite-ref/` into your worktree rather than junctioning it.** `cp -r
-  C:/jason/dev/inillucent/.sqlite-ref <worktree>/.sqlite-ref` costs 42 MB and about ten seconds, and
+  <main-checkout>/.sqlite-ref <worktree>/.sqlite-ref` costs 42 MB and about ten seconds, and
   retiring the worktree deletes it like any other file. A junction has to be removed with a command
   that does not follow it, and the entry above records the day somebody's `rm -rf` followed one and
   emptied the only copy for every worktree at once. The copy has no way to do that. (task-2067)

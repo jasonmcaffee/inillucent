@@ -22,7 +22,7 @@
 //!
 //! ## Why the statements are Nikaya's own
 //!
-//! They are copied from `C:/jason/dev/nikaya/server/src/db.rs` and
+//! They are copied from Nikaya's own `src/db.rs` and
 //! `migrations/inillucent/*.sql` rather than written to look like them. The
 //! whole point of a consumer story is that it is the consumer's program: a
 //! sequence invented here would be a sequence nobody runs, and the escape it is

@@ -1,7 +1,7 @@
 //! Nikaya's corpus, in miniature, for the stories that run its startup.
 //!
-//! Invariant: **the schema and the sequence are copied from
-//! `C:/jason/dev/nikaya/server`, and none of its data is.** What makes a
+//! Invariant: **the schema and the sequence are copied from Nikaya's own
+//! checkout, and none of its data is.** What makes a
 //! consumer story worth having is that it is the consumer's program; a schema
 //! invented here to look like Nikaya's would be a schema nobody runs. What
 //! makes it safe to check in is that the values are generated - Nikaya's corpus

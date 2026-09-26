@@ -1,6 +1,6 @@
 # Inillucent end to end testing: scenarios, edge cases, and the harness that keeps them true
 
-**task-2035. Written 2026-09-20 from a read only review of `C:/jason/dev/inillucent`.** No test or build
+**task-2035. Written 2026-09-20 from a read only review of this checkout.** No test or build
 was run in that checkout, because task-2025 was taking timed measurements in it. Every count below
 was taken from the files named beside it.
 
@@ -225,7 +225,7 @@ Then `ANALYZE`, close, reopen, read back again. Then the same with the process k
 index built after `ALTER TABLE ADD COLUMN` is checked by asking the same question two ways, rule 1.6.
 
 **`story_workload_replay.rs`, the consumer's statements.** `tests/workloads/nikaya/statements.sql`
-holds every statement string in `C:/jason/dev/nikaya/server/src/db.rs` and `services/*.rs`
+holds every statement string in Nikaya's own `src/db.rs` and `services/*.rs`
 (27 lines match a statement literal today), with a generator that builds a schema and data those
 statements can run against. The test prepares and runs every statement with representative
 parameters at every arm, and where the oracle can answer the same statement, diffs the result. A

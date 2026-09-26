@@ -165,7 +165,7 @@ These tests and tools read the pages. The rewrite keeps each of them passing.
 | Links resolve | `documentation.rs`, `no_page_links_to_something_that_is_not_there` | every relative link in `docs/` points at a file that exists |
 | Index lists every page | `every_page_is_listed_in_the_index`, `every_page_is_reachable_from_the_index` | `docs/README.md` names every file under `docs/`, including the new `writing-style.md` |
 | Commands exist | `every_command_the_documentation_names_exists` | `inillucent <verb>` in a code span or block is one of the 30 verbs |
-| No private references | `doc-facts`, `privateReferences` | no developer paths such as `C:\jason`, no private emails or hosts |
+| No private references | `doc-facts`, `privateReferences` | no developer's absolute machine paths, no private emails or hosts |
 | No ticket numbers | `doc-facts`, `ticketNumbers` | no ticket keys in published pages |
 
 ### 8.2 Links in the release archive

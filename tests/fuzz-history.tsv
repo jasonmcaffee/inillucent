@@ -14,7 +14,7 @@ when	commit	machine	target	seconds	outcome	detail
 2026-09-22T22:23:19Z	da58017	JASON-25	sql_text	20	clean	
 2026-09-22T22:23:49Z	da58017	JASON-25	fts5_query	20	clean	
 2026-09-22T22:24:14Z	da58017	JASON-25	sqlite_file	20	clean	
-2026-09-22T22:24:26Z	da58017	JASON-25	segment_header	20	crash	C:\jason\dev\inillucent\.claude\worktrees\task-2068\fuzz\artifacts\segment_header
+2026-09-22T22:24:26Z	da58017	JASON-25	segment_header	20	crash	fuzz/artifacts/segment_header
 2026-09-22T22:36:12Z	da58017	JASON-25	sql_text	20	clean	
 2026-09-22T22:36:35Z	da58017	JASON-25	fts5_query	20	clean	
 2026-09-22T22:36:57Z	da58017	JASON-25	sqlite_file	20	clean	

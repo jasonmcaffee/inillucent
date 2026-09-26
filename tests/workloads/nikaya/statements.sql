@@ -1,6 +1,6 @@
 -- Nikaya's own statements, so a consumer's corpus is something the suite runs.
 --
--- Built by `tools/extract-nikaya-workload.py` from `C:/jason/dev/nikaya/server`:
+-- Built by `tools/extract-nikaya-workload.py` from Nikaya's own checkout:
 -- every SQL statement literal in `src/`, de-duplicated, with the file and line
 -- it came from, and the schema its migrations build.
 --

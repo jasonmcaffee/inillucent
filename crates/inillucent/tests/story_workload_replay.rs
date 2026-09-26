@@ -16,7 +16,7 @@
 //! consumer's own statement.
 //!
 //! So the corpus is the consumer's. `tests/workloads/nikaya/statements.sql`
-//! holds every SQL literal in `C:/jason/dev/nikaya/server/src`, extracted by
+//! holds every SQL literal in Nikaya's own `src/`, extracted by
 //! `tools/extract-nikaya-workload.py`, with the schema its four migrations
 //! build and one parameter value per placeholder. Nikaya's data is private mail
 //! and none of it is here.

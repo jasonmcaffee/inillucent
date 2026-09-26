@@ -360,7 +360,14 @@ const PRIVATE_REFERENCES = [
     // file, and that one is gone.
     allow: ['README.md', 'agent-skills/README.md'],
   },
-  { needle: 'opencode.json', why: 'a file in a private repository' },
+  {
+    needle: 'claude-settings/opencode/opencode.json',
+    why: "a config file in one developer's private settings repository",
+    // Bare `opencode.json` is not the needle: `examples/rag-agent/rust-example/`
+    // ships its own `opencode.json`, the config file the `opencode` CLI itself
+    // reads, and that file is meant to be here. What H7 found was a *path*
+    // naming the private `claude-settings` checkout this one lives beside.
+  },
   { needle: 'aiservice-web', why: 'a private repository' },
 ];
 

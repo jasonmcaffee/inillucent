@@ -34,10 +34,21 @@ use inillucent_compat::workspace_root;
 ///
 /// The extractor holds the same default, and reads the same variable; this is
 /// here so the skip message can name the path it looked at.
+///
+/// **The default is a sibling of this checkout, not a machine's path.** Nikaya
+/// is a separate, private repository that most machines building this one do
+/// not have, so nothing here names where any particular developer keeps it;
+/// the default only ever resolves to something real on a machine that happens
+/// to check both repositories out side by side, and is a harmless miss
+/// everywhere else - which is exactly the "checkout is not here" branch this
+/// function's caller already handles.
 fn nikaya_root() -> PathBuf {
     match std::env::var("NIKAYA_ROOT") {
         Ok(path) => PathBuf::from(path),
-        Err(_) => PathBuf::from("C:/jason/dev/nikaya/server"),
+        Err(_) => workspace_root()
+            .parent()
+            .map(|dev| dev.join("nikaya/server"))
+            .unwrap_or_else(|| PathBuf::from("nikaya/server")),
     }
 }
 

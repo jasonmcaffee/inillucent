@@ -796,8 +796,8 @@ carries. Give the nested run its own `CARGO_TARGET_DIR` under the test's tempora
 run those three under a `serial` marker the runner honours, so a strict run in a worktree has no
 named skip that a person on this machine could not clear.
 
-The teacher model at `J:/inillucent-embeddings/models/qwen3-embedding-4b-teacher` fails to parse
-("Protobuf parsing failed") and takes five `inillucent-bench` cases with it. That is a file on this
+The teacher model `qwen3-embedding-4b-teacher`, under this machine's local model directory, fails to
+parse ("Protobuf parsing failed") and takes five `inillucent-bench` cases with it. That is a file on this
 machine and not the tree; it is listed in §9 for a person to re-fetch.
 
 ### 4.5 The record
@@ -941,8 +941,8 @@ merged.
    will grade against them again; if they are to move, `compat/perf/contract.toml` is where.
 4. The `bind.rs` split and the `Identifier` type, recommended in four reviews, still have no ticket.
 5. Whether the SQLLogicTest import (Alternatives) is wanted as its own nightly ticket.
-6. The teacher model at `J:/inillucent-embeddings/models/qwen3-embedding-4b-teacher` fails to
-   parse on this machine and takes five `inillucent-bench` cases with it; re-fetching it is a
+6. The teacher model `qwen3-embedding-4b-teacher`, under this machine's local model directory, fails
+   to parse on this machine and takes five `inillucent-bench` cases with it; re-fetching it is a
    person's job, and until then every strict run names it.
 
 ## Done means

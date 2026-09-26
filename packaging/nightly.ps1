@@ -441,7 +441,8 @@ function Send-NightlyTicket {
     #>
     param([string] $Commit, $Evidence)
     $api = if ($env:TASKS_API) { $env:TASKS_API } else { 'http://localhost:8091/tasks' }
-    $resolver = 'C:/jason/dev/ai-service/backend/skipToken.cjs'
+    $devRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $resolver = Join-Path $devRoot 'ai-service/backend/skipToken.cjs'
     if (-not (Test-Path -LiteralPath $resolver)) { return "skipped: $resolver is not there, so the board cannot be reached" }
     $token = & node -e "process.stdout.write(require('$resolver').resolveSkipToken(['CLAUDE_SKIP_TOKEN']))"
     if (-not $token) { return 'skipped: no board token could be resolved' }
