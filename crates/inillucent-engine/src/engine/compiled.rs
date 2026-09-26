@@ -155,11 +155,14 @@ impl crate::ImportedDatabase {
                     params,
                     selected,
                 } => {
+                    // A trigger body's `INSERT` has no `RETURNING`, so no
+                    // row image is kept.
                     self.insert_rows_into_module(
                         &statement,
                         &params,
                         selected.as_deref(),
                         &mut changed,
+                        &mut Vec::new(),
                     )?;
                 }
                 inillucent_exec::dml::ModuleWrite::Update { statement, params } => {
@@ -401,11 +404,20 @@ impl crate::ImportedDatabase {
         params: &Params,
         selected: Option<&[Vec<OwnedDatum>]>,
     ) -> DbResult<Outcome> {
-        let folded = if holds_subquery {
-            self.fold_values(statement, params)?
-        } else {
-            None
-        };
+        // The `RETURNING` list is folded with the `VALUES` list, for the same
+        // reason: a module's row image is evaluated outside any plan, so a
+        // subquery in `RETURNING` has to be answered first.
+        let mut exprs: Vec<&inillucent_sql::bind::BoundExpr> = statement
+            .returning
+            .iter()
+            .map(|column| &column.expr)
+            .collect();
+        if let (true, inillucent_sql::dml::BoundInsertSource::Values(rows)) =
+            (holds_subquery, &statement.source)
+        {
+            exprs.extend(rows.iter().flatten());
+        }
+        let folded = inillucent_exec::subquery::fold_expressions(&exprs, self, params)?;
         self.insert_into_module(statement, folded.as_ref().unwrap_or(params), selected)
     }
 
@@ -996,6 +1008,23 @@ impl crate::ImportedDatabase {
             }
         };
         self.writing.set_touched(self.writing.touched() | wrote);
+        // **A deferred key is checked at the commit, and in autocommit the
+        // commit is this statement's.** The statement is its own transaction,
+        // so a `DEFERRABLE INITIALLY DEFERRED` key has no later point to wait
+        // for. `commit_batch` makes the same check for an explicit
+        // transaction; without this one an autocommit `INSERT` of an orphan
+        // row was stored where SQLite fails it and keeps nothing. It runs
+        // before the modules are synced, so a failure leaves them nothing to
+        // take back.
+        if autocommit {
+            if let Err(error) = self.check_deferred_foreign_keys() {
+                // The rows were written before the commit failed, and SQLite
+                // leaves `last_insert_rowid()` on the last of them.
+                self.remember_rowid(changes.last_rowid);
+                self.counters.last_changes.set(0);
+                return Err(self.abandon(error, mark, autocommit, wrote, txn));
+            }
+        }
         let module_rows = match self.follow_modules(deferred, &changes, autocommit) {
             Ok(rows) => rows,
             Err(error) => return Err(self.abandon(error, mark, autocommit, wrote, txn)),

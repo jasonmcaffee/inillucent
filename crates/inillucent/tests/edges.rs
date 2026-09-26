@@ -605,6 +605,41 @@ fn execute_batch_creates_a_trigger() {
     );
 }
 
+/// A statement with `RETURNING` in a batch makes its change, and so does every
+/// statement after it.
+///
+/// The matrix reported the opposite for `execute_batch`, and the cause was the
+/// matrix: its script left out every record that returns rows, and an
+/// `INSERT ... RETURNING` is such a record. This checks the engine directly,
+/// for an insert, an update, a delete and an upsert.
+#[test]
+fn execute_batch_keeps_the_change_of_a_returning_statement() {
+    let (_path, database) = fresh("batch-returning");
+    let connection = database.session();
+    connection
+        .execute_batch(
+            "CREATE TABLE t (a INTEGER PRIMARY KEY, b);\
+             INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'z') RETURNING a;\
+             UPDATE t SET b = 'w' WHERE a = 2 RETURNING b;\
+             DELETE FROM t WHERE a = 3 RETURNING *;\
+             INSERT INTO t VALUES (1, 'v') ON CONFLICT (a) DO UPDATE SET b = excluded.b RETURNING a;\
+             INSERT INTO t VALUES (4, 'u');",
+        )
+        .expect("the batch runs");
+    let rows = connection
+        .query("SELECT a, b FROM t ORDER BY a")
+        .expect("the table is read");
+    assert_eq!(
+        rows,
+        vec![
+            vec![OwnedDatum::Int(1), OwnedDatum::Text(b"v".to_vec())],
+            vec![OwnedDatum::Int(2), OwnedDatum::Text(b"w".to_vec())],
+            vec![OwnedDatum::Int(4), OwnedDatum::Text(b"u".to_vec())],
+        ],
+        "a statement with RETURNING lost its change inside the batch"
+    );
+}
+
 /// And the things a batch is allowed to be that are not statements: nothing at
 /// all, only comments, only separators.
 ///

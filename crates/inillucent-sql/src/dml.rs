@@ -680,6 +680,7 @@ impl<'a> Binder<'a> {
         }
         let (table, source) =
             self.write_target_from_term(update.target, &TriggerEventInfo::Update(Vec::new()))?;
+        refuse_module_returning(&table, &update.returning, "UPDATE")?;
         // **The `FROM` terms are bound after the target**, so the target keeps
         // the lowest source number and every reference to an unqualified column
         // resolves to it first - which is SQLite's rule and the reason
@@ -755,10 +756,15 @@ impl<'a> Binder<'a> {
                 None => constraint,
             });
         }
-        let generated = self.bind_stored_generated(&table)?;
-        let checks = self.bind_checks(&table)?;
-        let not_null_defaults = self.bind_not_null_defaults(&table)?;
-        let index_exprs = self.bind_index_exprs(&table)?;
+        // **The schema's expressions see the target and nothing else.** A
+        // partial index's `WHERE a IS NOT NULL`, a `CHECK` and a generated
+        // column name the target's own columns. With the `FROM` terms still in
+        // scope, a `FROM` table that also had a column `a` made the index's `a`
+        // ambiguous, and `UPDATE t ... FROM r` was refused where SQLite runs it.
+        let saved_scopes = core::mem::replace(&mut self.scopes, vec![vec![source]]);
+        let schema = self.bind_update_schema(&table);
+        self.scopes = saved_scopes;
+        let (generated, checks, not_null_defaults, index_exprs) = schema?;
         let returning = self.bind_returning(&update.returning)?;
         // Bound as expressions, the way an aggregate's own `ORDER BY` is: a
         // write has no result columns, so a bare integer names no ordinal.
@@ -828,6 +834,7 @@ impl<'a> Binder<'a> {
         }
         let (table, source) =
             self.write_target_from_term(delete.target, &TriggerEventInfo::Delete)?;
+        refuse_module_returning(&table, &delete.returning, "DELETE")?;
         let index_exprs = self.bind_index_exprs(&table)?;
         let filter = match delete.filter {
             Some(expr) => Some(self.bind_expr(expr)?),
@@ -1592,6 +1599,32 @@ impl<'a> Binder<'a> {
         Ok(Some(self.bind_schema_expr(&sql)?))
     }
 
+    /// Binds the schema expressions an `UPDATE` evaluates for each row.
+    ///
+    /// The caller narrows the scope to the target first, so a name in the
+    /// schema text cannot reach a `FROM` term.
+    ///
+    /// @param table - the table being written
+    #[allow(clippy::type_complexity)]
+    fn bind_update_schema(
+        &mut self,
+        table: &TableInfo,
+    ) -> Result<
+        (
+            Vec<BoundAssignment>,
+            Vec<BoundCheck>,
+            Vec<BoundDefault>,
+            Vec<BoundIndexExprs>,
+        ),
+        ParseError,
+    > {
+        let generated = self.bind_stored_generated(table)?;
+        let checks = self.bind_checks(table)?;
+        let not_null_defaults = self.bind_not_null_defaults(table)?;
+        let index_exprs = self.bind_index_exprs(table)?;
+        Ok((generated, checks, not_null_defaults, index_exprs))
+    }
+
     /// Binds every `STORED` generated column's expression.
     ///
     /// Returns them as assignments, because that is what they are on the write
@@ -1759,6 +1792,18 @@ impl<'a> Binder<'a> {
         if insert.upserts.is_empty() {
             return Ok(Vec::new());
         }
+        // A module decides for itself what a clash is, so there is no
+        // constraint for a conflict target to name. SQLite refuses the clause
+        // on a virtual table outright, in these words.
+        if table.kind == TableKind::Virtual {
+            return Err(crate::bind::schema_refused(
+                format!(
+                    "UPSERT not implemented for virtual table \"{}\"",
+                    String::from_utf8_lossy(&table.name)
+                ),
+                Span::default(),
+            ));
+        }
         // **Every clause is bound, in written order.** A statement may carry
         // several - `ON CONFLICT(k) DO UPDATE ... ON CONFLICT(id) DO UPDATE ...`
         // - and which one runs is decided at *run time*, by which constraint
@@ -1816,6 +1861,7 @@ impl<'a> Binder<'a> {
         upsert: &ast::Upsert,
     ) -> Result<Option<BoundUpsert>, ParseError> {
         let mut target = Vec::new();
+        let mut collated: Vec<(u16, Option<Vec<u8>>)> = Vec::new();
         for column in &upsert.target {
             let Some(name) = bare_indexed_column(self.ast, column) else {
                 return Err(unsupported(
@@ -1827,8 +1873,15 @@ impl<'a> Binder<'a> {
                 return Err(no_such_column(&name, Span::default()));
             };
             target.push(position);
+            collated.push((position, target_collation(self.ast, column)));
         }
         target.sort_unstable();
+        if !target.is_empty() && !conflict_target_matches(table, &collated) {
+            return Err(crate::bind::schema_refused(
+                "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint",
+                Span::default(),
+            ));
+        }
         let mut assignments = Vec::new();
         for (names, value) in &upsert.assignments {
             let bound = self.bind_expr(*value)?;
@@ -1870,9 +1923,33 @@ impl<'a> Binder<'a> {
     }
 }
 
-/// Returns an indexed column's bare folded name, when it names a column.
-fn bare_indexed_column(ast: &crate::Ast, column: &ast::IndexedColumn) -> Option<Vec<u8>> {
+/// Returns the collation a conflict target's column names, folded.
+///
+/// It may be written as the indexed column's own `COLLATE` or as a `COLLATE`
+/// around the name; SQLite reads both as the same expression.
+///
+/// @param ast - the statement's arena
+/// @param column - one column of the conflict target
+fn target_collation(ast: &crate::Ast, column: &ast::IndexedColumn) -> Option<Vec<u8>> {
+    if let Some(name) = column.collation {
+        return Some(ast.folded(name).to_vec());
+    }
     match ast.expr(column.expr) {
+        Some(ast::Expr::Collate { collation, .. }) => Some(ast.folded(*collation).to_vec()),
+        _ => None,
+    }
+}
+
+/// Returns an indexed column's bare folded name, when it names a column.
+///
+/// A `COLLATE` around the name is looked through, because a conflict target
+/// may name its collation that way; `target_collation` reads it.
+fn bare_indexed_column(ast: &crate::Ast, column: &ast::IndexedColumn) -> Option<Vec<u8>> {
+    let expr = match ast.expr(column.expr) {
+        Some(ast::Expr::Collate { operand, .. }) => *operand,
+        _ => column.expr,
+    };
+    match ast.expr(expr) {
         Some(ast::Expr::Column {
             table: None,
             column: name,
@@ -2032,6 +2109,68 @@ fn order_without_limit(
         format!("ORDER BY without LIMIT on {statement}"),
         span,
     ))
+}
+
+/// Refuses `RETURNING` on an `UPDATE` or a `DELETE` of a virtual table.
+///
+/// SQLite refuses both when it prepares the statement, before it looks at
+/// anything else in it, so a statement with a subquery in its `SET` gets this
+/// message and not one about the subquery. An `INSERT` into a virtual table
+/// may return rows, and is not refused here.
+///
+/// @param table - the table being written
+/// @param returning - the statement's `RETURNING` list, empty when it has none
+/// @param statement - `UPDATE` or `DELETE`, for the message
+fn refuse_module_returning(
+    table: &TableInfo,
+    returning: &[ast::ResultColumn],
+    statement: &str,
+) -> Result<(), ParseError> {
+    if table.kind != TableKind::Virtual || returning.is_empty() {
+        return Ok(());
+    }
+    Err(crate::bind::schema_refused(
+        format!("{statement} RETURNING is not available on virtual tables"),
+        Span::default(),
+    ))
+}
+
+/// Reports whether an upsert's conflict target names a key of the table.
+///
+/// SQLite accepts a target only when it is exactly the columns of the rowid
+/// alias, or of a `PRIMARY KEY` or `UNIQUE` index that is not partial, in any
+/// order. A target that names no key is refused, because no insert could ever
+/// clash on it and the `DO` clause would never run. A partial index needs the
+/// target's own `WHERE`, which is refused before this is asked. A column that
+/// names a collation matches only an index key ordered by that collation, and
+/// never the rowid alias, which is how `sqlite3UpsertAnalyzeTarget` compares
+/// them.
+///
+/// @param table - the table being inserted into
+/// @param target - each target column's position and the collation it names
+fn conflict_target_matches(table: &TableInfo, target: &[(u16, Option<Vec<u8>>)]) -> bool {
+    if let (false, Some(alias), [(column, None)]) = (table.without_rowid, table.rowid_alias, target)
+    {
+        if *column == alias {
+            return true;
+        }
+    }
+    table.indexes.iter().any(|index| {
+        if !index.unique || index.partial_sql.is_some() || index.columns.len() != target.len() {
+            return false;
+        }
+        index.columns.iter().all(|key| {
+            let Some(position) = key.plain_column() else {
+                return false;
+            };
+            target.iter().any(|(column, collation)| {
+                *column == position
+                    && collation
+                        .as_deref()
+                        .is_none_or(|named| named.eq_ignore_ascii_case(&key.collation))
+            })
+        })
+    })
 }
 
 #[cfg(test)]

@@ -1140,6 +1140,7 @@ impl Schema {
                     child: child.name.clone(),
                     parent: parent.name.clone(),
                     key: u16::try_from(key.id).unwrap_or_default(),
+                    deferred: key.is_deferred(),
                 });
             }
         }

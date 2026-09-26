@@ -455,9 +455,13 @@ fn prepared_runs(
 /// @param path - the database file
 /// @param expected - the state the reference run left
 fn through_batch(case: &Case, path: &Path, expected: &[String]) -> Result<Option<String>, String> {
+    // **Every record goes in, the queries too.** A query record can write:
+    // `INSERT ... RETURNING` is one, because it returns rows. Leaving the
+    // queries out made the script skip those writes, and the difference was
+    // reported as `execute_batch` losing them.
     let mut script = String::new();
     for record in all_records(case) {
-        if let Record::Statement { sql, .. } = record {
+        if let Record::Statement { sql, .. } | Record::Query { sql, .. } = record {
             script.push_str(sql.trim().trim_end_matches(';'));
             script.push_str(";\n");
         }
@@ -476,8 +480,9 @@ fn through_batch(case: &Case, path: &Path, expected: &[String]) -> Result<Option
 }
 
 /// Whether a case can run as one script: it never reopens, every statement
-/// is expected to succeed, and every one did succeed on the connection, so a
-/// script that stops at a failure is the surface's doing.
+/// is expected to succeed, every one did succeed on the connection, so a
+/// script that stops at a failure is the surface's doing, and no query binds
+/// values, since a script has nothing to bind them with.
 ///
 /// @param case - the case
 /// @param expected - the reference answers
@@ -489,7 +494,7 @@ fn batchable(case: &Case, expected: &[Vec<Answer>]) -> bool {
     succeeded
         && all_records(case).all(|record| match record {
             Record::Statement { expect, .. } => *expect == Expect::Ok,
-            Record::Query { .. } => true,
+            Record::Query { binds, .. } => binds.is_empty(),
             Record::Reopen => false,
         })
 }

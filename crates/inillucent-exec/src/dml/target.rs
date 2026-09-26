@@ -569,6 +569,25 @@ pub fn view_layout(table: &TableInfo) -> std::rc::Rc<SourceLayout> {
         key_columns: Vec::new(),
     })
 }
+/// Returns the row shape an `INSERT ... RETURNING` into a virtual table reads.
+///
+/// One slot per declared column, in order, and the rowid after them. A module
+/// keeps its rows in its own storage, so the image is built by the engine from
+/// the values it handed the module rather than read out of a tree.
+///
+/// @param table - the virtual table
+pub fn module_layout(table: &TableInfo) -> std::rc::Rc<SourceLayout> {
+    let width = table.columns.len().saturating_add(1);
+    std::rc::Rc::new(SourceLayout {
+        tree_key: 0,
+        slots: (0..table.columns.len()).map(Some).collect(),
+        rowid: Some(table.columns.len()),
+        identity: Vec::new(),
+        types: vec![crate::expr::StaticType::Unknown; width],
+        width,
+        key_columns: Vec::new(),
+    })
+}
 /// Reports whether a table holds a row under one key.
 ///
 /// **The uniqueness check asks only whether something is there**, and reading

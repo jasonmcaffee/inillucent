@@ -2764,7 +2764,10 @@ impl<'a> Binder<'a> {
                 span,
             ));
         }
-        if unit != FrameUnit::Rows
+        // Only `RANGE` measures an offset in ordering values, so only `RANGE`
+        // needs a single ordering term. A `GROUPS` offset counts peer groups,
+        // which any number of terms defines, and SQLite accepts it with none.
+        if unit == FrameUnit::Range
             && matches!(
                 (&start, &end),
                 (BoundFrameBound::Preceding(_), _)
@@ -2984,7 +2987,7 @@ impl<'a> Binder<'a> {
     ) -> Result<Option<BoundExpr>, ParseError> {
         let mut predicate: Option<BoundExpr> = None;
         for name in names {
-            let Some((left_source, left_column)) = self.find_column_left_of(position, name) else {
+            let Some(left) = self.using_left_operand(position, name)? else {
                 continue;
             };
             let Some((right_source, right_column)) = self.find_column_in(position, name) else {
@@ -2995,7 +2998,6 @@ impl<'a> Binder<'a> {
                     source.suppressed.push(right_column);
                 }
             }
-            let left = self.column_expr(left_source, left_column)?;
             let right = self.column_expr(right_source, right_column)?;
             let (affinity, collation) = comparison_rules(&left, &right);
             let equality = BoundExpr::Compare {
@@ -3020,14 +3022,147 @@ impl<'a> Binder<'a> {
         source.table.column_position(folded).map(|c| (id, c))
     }
 
-    /// Finds a column by folded name in the sources before one.
-    fn find_column_left_of(&self, position: usize, folded: &[u8]) -> Option<(usize, u16)> {
-        for index in (0..position).rev() {
-            if let Some(found) = self.find_column_in(index, folded) {
-                return Some(found);
+    /// Returns the left side of one `USING` equality, as SQLite builds it.
+    ///
+    /// SQLite equates the right term's column with the *leftmost* term that
+    /// has the name, not the nearest one. The two differ in a chain of `LEFT`
+    /// joins: `a LEFT JOIN b USING (k) LEFT JOIN c USING (k)` matches `c`
+    /// against `a.k`, which is set on every row, where `b.k` is NULL on a row
+    /// `b` did not match. When the block has a `RIGHT` or `FULL` join, any
+    /// term on the left may be the one holding the value, so the operand is
+    /// `coalesce()` over every left copy, and a copy that is not itself a
+    /// `USING` column is ambiguous. This is `sqlite3ProcessJoin` in SQLite's
+    /// `select.c`.
+    ///
+    /// @param position - the right term's position in the block
+    /// @param folded - the column name, folded
+    fn using_left_operand(
+        &mut self,
+        position: usize,
+        folded: &[u8],
+    ) -> Result<Option<BoundExpr>, ParseError> {
+        let copies: Vec<(usize, u16)> = (0..position)
+            .filter_map(|index| self.find_column_in(index, folded))
+            .collect();
+        let Some(&(first_source, first_column)) = copies.first() else {
+            return Ok(None);
+        };
+        let outer_right = self.scope().iter().any(|id| {
+            self.sources
+                .get(*id)
+                .is_some_and(|source| matches!(source.join, JoinKind::Right | JoinKind::Full))
+        });
+        if !outer_right || copies.len() == 1 {
+            return self.column_expr(first_source, first_column).map(Some);
+        }
+        for &(source, column) in copies.iter().skip(1) {
+            let joined = self
+                .sources
+                .get(source)
+                .is_some_and(|held| held.suppressed.contains(&column));
+            if !joined {
+                return Err(refused(
+                    format!(
+                        "ambiguous reference to {} in USING()",
+                        String::from_utf8_lossy(folded)
+                    ),
+                    Span::default(),
+                ));
             }
         }
-        None
+        self.coalesce_using_copies(&copies, Span::default())
+            .map(Some)
+    }
+
+    /// Returns what `*` shows for one column, given the `USING` joins after it.
+    ///
+    /// SQLite expands a column that a later `USING` names as the bare name,
+    /// so it resolves by the rule an unqualified reference follows: under a
+    /// `RIGHT` join that is the right copy, under a `FULL` join `coalesce()`
+    /// of every copy. Without those joins the answer is this column itself.
+    ///
+    /// @param scope - the block's source ids, in FROM order
+    /// @param id - the source being expanded
+    /// @param index - the column being expanded
+    /// @param span - where the `*` is, for an error
+    fn star_using_column(
+        &mut self,
+        scope: &[usize],
+        id: usize,
+        index: u16,
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        let Some(folded) = self
+            .sources
+            .get(id)
+            .and_then(|source| source.table.column(index))
+            .map(|column| column.folded.clone())
+        else {
+            return self.column_expr(id, index);
+        };
+        let mut base: Option<(usize, u16)> = None;
+        let mut found: Option<(usize, u16)> = None;
+        let mut coalesced: Vec<(usize, u16)> = Vec::new();
+        for candidate in scope {
+            let Some(source) = self.sources.get(*candidate) else {
+                continue;
+            };
+            let Some(position) = source.table.column_position(&folded) else {
+                continue;
+            };
+            if source.suppressed.contains(&position) {
+                step_using_match(
+                    source.join,
+                    (*candidate, position),
+                    &mut found,
+                    &mut coalesced,
+                );
+            } else if base.is_none() {
+                base = Some((*candidate, position));
+                found = base;
+            }
+        }
+        // Only the leftmost copy is expanded as the bare name. A right copy
+        // shows itself when `r.*` asks for it, and so does a column no `USING`
+        // names.
+        if base != Some((id, index)) {
+            return self.column_expr(id, index);
+        }
+        if coalesced.len() > 1 {
+            return self.coalesce_using_copies(&coalesced, span);
+        }
+        match found {
+            Some((source, column)) => self.column_expr(source, column),
+            None => self.column_expr(id, index),
+        }
+    }
+
+    /// Returns `coalesce()` over the copies of one `USING` column.
+    ///
+    /// @param copies - each copy's source id and column, leftmost first
+    /// @param span - where the reference is, for an error
+    fn coalesce_using_copies(
+        &mut self,
+        copies: &[(usize, u16)],
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        let Some(func) = function::lookup_scalar(b"coalesce") else {
+            return Err(no_such_function(b"coalesce", span));
+        };
+        let mut arguments = Vec::with_capacity(copies.len());
+        for &(source, column) in copies {
+            self.note_correlation(source);
+            arguments.push(self.column_expr(source, column)?);
+        }
+        let collation = arguments
+            .first()
+            .and_then(BoundExpr::collation)
+            .unwrap_or(Collation::Binary);
+        Ok(BoundExpr::Function {
+            func,
+            arguments,
+            collation,
+        })
     }
 
     /// Records that the statement depends on a database's schema cookie.
@@ -3257,6 +3392,7 @@ impl<'a> Binder<'a> {
             ));
         }
         let mut matched = false;
+        let scope_ids = scope.clone();
         for id in scope {
             let Some(source) = self.sources.get(id) else {
                 continue;
@@ -3274,7 +3410,9 @@ impl<'a> Binder<'a> {
             let synthetic = source.table.kind == TableKind::Subquery;
             for (index, column) in columns.iter().enumerate() {
                 let position_u16 = index as u16;
-                if column.hidden || suppressed.contains(&position_u16) {
+                // A `USING` column is left out of a bare `*` only. `r.*` names
+                // the term, and SQLite shows every column of it.
+                if column.hidden || (qualifier.is_none() && suppressed.contains(&position_u16)) {
                     continue;
                 }
                 if self.authorizer.authorize(AuthAction::Read {
@@ -3285,7 +3423,11 @@ impl<'a> Binder<'a> {
                 {
                     return Err(denied("not authorized", span));
                 }
-                let expr = self.column_expr(id, position_u16)?;
+                // `l.*` goes through the same rule as `*`: SQLite expands a
+                // column a later `USING` names as the bare name even when the
+                // star is qualified, so `l.*` over `l FULL JOIN r USING (a)`
+                // shows `coalesce(l.a, r.a)`.
+                let expr = self.star_using_column(&scope_ids, id, position_u16, span)?;
                 into.push(BoundResultColumn {
                     expr,
                     name: column.name.clone(),
@@ -4058,6 +4200,7 @@ impl<'a> Binder<'a> {
                 .get(level)
                 .map_or(Vec::new(), |scope| scope.clone());
             let mut found: Option<(usize, u16)> = None;
+            let mut coalesced: Vec<(usize, u16)> = Vec::new();
             let mut rowid_here: Option<usize> = None;
             for id in ids {
                 let Some(source) = self.sources.get(id) else {
@@ -4087,7 +4230,14 @@ impl<'a> Binder<'a> {
                     // `ambiguous column name: k`, and why four of the five join
                     // spellings failed on one message. A qualified `b.k` still
                     // reaches the right-hand copy, which is what SQLite does.
+                    //
+                    // **A `RIGHT` or `FULL` join is the exception.** Its left
+                    // copy is NULL on a row only the right side has, so SQLite
+                    // resolves the name to the right copy under `RIGHT` and to
+                    // `coalesce()` of every copy under `FULL`; see
+                    // `step_using_match`.
                     if table_folded.is_none() && source.suppressed.contains(&index) {
+                        step_using_match(source.join, (id, index), &mut found, &mut coalesced);
                         continue;
                     }
                     if found.is_some() {
@@ -4099,6 +4249,9 @@ impl<'a> Binder<'a> {
                 if source.table.is_rowid_name(&folded) && rowid_here.is_none() {
                     rowid_here = Some(id);
                 }
+            }
+            if coalesced.len() > 1 {
+                return self.coalesce_using_copies(&coalesced, span);
             }
             if found.is_some() {
                 resolved = found;
@@ -4561,6 +4714,43 @@ impl<'a> Binder<'a> {
             arguments: bound,
             collation,
         })
+    }
+}
+
+/// Applies SQLite's rule for an unqualified name that a `USING` join repeats.
+///
+/// Called for each right copy of the name, in FROM order, after the leftmost
+/// copy has set `found`. An `INNER` or `LEFT` join keeps the left copy, since
+/// the left side is set on every row it produces. A `RIGHT` join makes the
+/// right copy the answer, since only it is set on every row. A `FULL` join
+/// can leave either side NULL, so the answer is `coalesce()` of every copy,
+/// collected in `coalesced`. This is `lookupName` in SQLite's `resolve.c`.
+///
+/// @param join - the join that attaches the right copy's term
+/// @param copy - the right copy's source id and column
+/// @param found - the copy the name resolves to so far
+/// @param coalesced - the copies a `FULL` join has collected, or empty
+fn step_using_match(
+    join: JoinKind,
+    copy: (usize, u16),
+    found: &mut Option<(usize, u16)>,
+    coalesced: &mut Vec<(usize, u16)>,
+) {
+    match join {
+        JoinKind::Right => {
+            coalesced.clear();
+            *found = Some(copy);
+        }
+        JoinKind::Full => {
+            if coalesced.is_empty() {
+                if let Some(previous) = *found {
+                    coalesced.push(previous);
+                }
+            }
+            coalesced.push(copy);
+            *found = Some(copy);
+        }
+        JoinKind::Left | JoinKind::Inner | JoinKind::Comma | JoinKind::Cross => {}
     }
 }
 
