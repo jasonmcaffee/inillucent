@@ -197,7 +197,21 @@ fn runs_of(record: &Record) -> Vec<Vec<Value>> {
 /// @param path - the file
 fn fresh(path: &Path) -> Result<Database, String> {
     inillucent_base::testing::remove_database(path);
-    Database::open(path).map_err(|error| format!("open {}: {}", path.display(), error.message))
+    open(path)
+}
+
+/// Opens a database with a bound on what each statement may spend, so a case
+/// that runs away fails instead of growing: the same reason as the runner's
+/// `case_budget`.
+///
+/// @param path - the file
+fn open(path: &Path) -> Result<Database, String> {
+    let options = OpenOptions {
+        limits: inillucent_driver::StatementLimits::served(),
+        ..OpenOptions::default()
+    };
+    Database::open_with(path, options)
+        .map_err(|error| format!("open {}: {}", path.display(), error.message))
 }
 
 /// Runs one record on one session of the reference path.
@@ -255,7 +269,7 @@ fn reference(case: &Case, path: &Path) -> Result<(Vec<Vec<Answer>>, Vec<String>)
     for record in all_records(case) {
         if matches!(record, Record::Reopen) {
             drop(database);
-            database = Database::open(path).map_err(|error| error.message)?;
+            database = open(path)?;
             session = database.session().session();
         }
         answers.push(run_direct(&database, session, record));
@@ -275,7 +289,13 @@ fn reference(case: &Case, path: &Path) -> Result<(Vec<Vec<Answer>>, Vec<String>)
 /// @param path - the database file
 fn through_shared(case: &Case, path: &Path) -> Result<Vec<Vec<Answer>>, String> {
     inillucent_base::testing::remove_database(path);
-    let open = |path: &Path| SharedDatabase::open(path).map_err(|error| error.message);
+    let open = |path: &Path| {
+        let options = OpenOptions {
+            limits: inillucent_driver::StatementLimits::served(),
+            ..OpenOptions::default()
+        };
+        SharedDatabase::open_with(path, options).map_err(|error| error.message)
+    };
     let mut database = open(path)?;
     let mut answers = Vec::new();
     for record in all_records(case) {
@@ -352,7 +372,7 @@ fn through_prepared(
     for (index, record) in all_records(case).enumerate() {
         if matches!(record, Record::Reopen) {
             drop(database);
-            database = Database::open(path).map_err(|error| error.message)?;
+            database = open(path)?;
             session = database.session().session();
             continue;
         }

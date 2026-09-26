@@ -281,6 +281,7 @@ impl Runner {
         }
         let started = Instant::now();
         self.stats.cases = self.stats.cases.saturating_add(1);
+        trace(&case.id);
         let directory = self.root.join(&case.id);
         let verdict = self.with_replay(case, &directory, |runner| runner.attempt(case, setup));
         self.stats.record_case(&case.id, started.elapsed());
@@ -342,6 +343,7 @@ impl Runner {
         case: &Case,
         setup: Option<&Setup<'_>>,
     ) -> Result<Vec<Failure>, OracleLost> {
+        let _budget = case_budget();
         let directory = self.root.join(&case.id);
         let _ = std::fs::remove_dir_all(&directory);
         let _ = std::fs::create_dir_all(&directory);
@@ -444,6 +446,11 @@ impl Runner {
         let Some(first) = cases.first() else {
             return Vec::new();
         };
+        for case in cases {
+            trace(&case.id);
+        }
+        // The fixture's statements get a case's budget; each case then arms its own.
+        let fixture_budget = case_budget();
         self.batches = self.batches.saturating_add(1);
         let directory = self.root.join(format!("batch-{}", self.batches));
         let _ = std::fs::remove_dir_all(&directory);
@@ -459,6 +466,7 @@ impl Runner {
                     .collect();
             }
         };
+        drop(fixture_budget);
         self.copy_fixture(&fixture, &directory);
         let mut verdicts = Vec::with_capacity(cases.len());
         while verdicts.len() < cases.len() {
@@ -545,6 +553,7 @@ impl Runner {
         verdicts: &mut [Verdict],
     ) {
         for (at, case) in cases.iter().enumerate().skip(first) {
+            let _budget = case_budget();
             let mut failures = Vec::new();
             let mut context = CaseContext {
                 case,
@@ -592,6 +601,7 @@ impl Runner {
         directory: &Path,
         oracle_open: &mut bool,
     ) -> Result<Vec<Failure>, OracleLost> {
+        let _budget = case_budget();
         let graded = case.oracle && self.program.is_some();
         if graded && (!*oracle_open || self.oracle.is_none()) {
             self.open_oracle(&directory.join("sqlite.db"))?;
@@ -1159,4 +1169,38 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
         return format!("inillucent panicked: {text}");
     }
     "inillucent panicked with a payload that is not text".to_string()
+}
+
+/// Prints a case id to standard error before it runs, when
+/// `INILLUCENT_MATRIX_TRACE` is set, so a case that never finishes can be
+/// named: the runner's own report comes only at the end of a group.
+///
+/// @param id - the case about to run
+fn trace(id: &str) {
+    if std::env::var_os("INILLUCENT_MATRIX_TRACE").is_some() {
+        eprintln!("matrix: running {id}");
+    }
+}
+
+/// What one case may spend on inillucent: five million rows, 1 GiB of row
+/// data and two minutes, counted across every statement the case runs.
+///
+/// **A case that runs away has to fail, not grow.** Run against an older
+/// engine for section 11.1 of the design, one matrix process reached 66 GB and
+/// another 34 GB before they were stopped by hand, with 1.6 GB of the machine
+/// left. The largest case here reads a few thousand rows, so these bounds are
+/// three orders of magnitude above any honest answer. A statement past one
+/// fails with the engine's budget error, and the case reports it as a
+/// difference. `inillucent-testrun` also caps each test process's memory, for
+/// the growth this cannot see.
+fn case_budget() -> inillucent_base::budget::Guard {
+    let limits = inillucent_base::budget::Limits {
+        rows: Some(5_000_000),
+        bytes: Some(1024 * 1024 * 1024),
+        time: Some(Duration::from_secs(120)),
+    };
+    inillucent_base::budget::arm(
+        limits,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
 }

@@ -421,6 +421,28 @@ fn did_not_run() -> ExitCode {
 ///   selection matched nothing, the MSVC environment could not be found, the
 ///   build failed, or cargo could not say what it had built. Nothing was
 ///   graded, so nothing here may be read as a pass.
+/// The most memory one test process may commit: 8 GiB.
+///
+/// **Measured need, with room.** No suite this runner starts needs more than a
+/// few GiB; the statement matrix run against an older engine reached 66 GB in
+/// one process and 34 GB in another before they were stopped by hand, with
+/// 1.6 GB of the machine's 127.5 GB left. A process past this fails its own
+/// allocation and its target is reported as failed.
+const PROCESS_MEMORY: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Caps what every process this run starts may commit together at a quarter of the
+/// machine's memory, so a run at one process per processor cannot take the
+/// rest of the machine even when each process stays under its own cap.
+fn cap_memory() {
+    let Some(physical) = inillucent_compat::supervise::physical_memory() else {
+        return;
+    };
+    let total = physical / 4;
+    if !inillucent_compat::supervise::cap_everything_started(total) {
+        eprintln!("inillucent-testrun: could not cap the memory of the processes it starts");
+    }
+}
+
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let options = match parse_options(&arguments) {
@@ -493,6 +515,8 @@ fn run(options: &Options) -> Result<bool, String> {
         }
     );
     let started = Instant::now();
+    // After the build, so the cap bounds the tests and not cargo.
+    cap_memory();
     let mut outcomes = execute(shared, options, &budgets);
     if !alone.is_empty() {
         // **One binary at a time, and one thread inside it.** `jobs: 1` alone
@@ -1888,6 +1912,7 @@ fn run_process(
     command.args(words);
     let limits = Limits {
         budget,
+        memory: Some(PROCESS_MEMORY),
         ..Limits::default()
     };
     // **Not `Command::output()`, and that is the whole of task-2071.**

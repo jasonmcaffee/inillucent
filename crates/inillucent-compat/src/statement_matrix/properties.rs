@@ -21,7 +21,7 @@
 
 use inillucent_engine::connect::Connection;
 
-use crate::differential::{observe_detailed, tagged};
+use crate::differential::observe_detailed;
 use crate::oracle::TaggedValue;
 
 /// One property of a generated case.

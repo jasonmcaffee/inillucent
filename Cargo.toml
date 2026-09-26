@@ -203,6 +203,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     # `GetProcessMemoryInfo`, for the gate's memory accounting (task-1838).
     "Win32_System_ProcessStatus",
+    # A job object per test process, so one that grows without bound fails
+    # itself rather than the machine (task-2137).
+    "Win32_System_JobObjects",
     # `SystemTimeToTzSpecificLocalTime`, for the `utc` and `localtime` date
     # modifiers (task-1979, F13).
     "Win32_System_Time",

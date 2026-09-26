@@ -195,6 +195,15 @@ pub struct Limits {
     pub silence: Duration,
     /// How long to keep reading the pipes once the child has exited.
     pub drain: Duration,
+    /// The most memory the child may commit, in bytes; `None` for no cap.
+    ///
+    /// **A test process that grows without bound takes the machine with it.**
+    /// The statement matrix, run against an older engine for section 11.1 of
+    /// its design, reached 66 GB in one process and 34 GB in another with
+    /// 1.6 GB of 127.5 GB left, beside a database server and a production
+    /// backend. A capped child fails its own allocation and exits, and the run
+    /// reports that target as failed.
+    pub memory: Option<u64>,
 }
 
 impl Default for Limits {
@@ -203,6 +212,7 @@ impl Default for Limits {
             budget: None,
             silence: BUDGET_SILENCE,
             drain: DRAIN,
+            memory: None,
         }
     }
 }
@@ -330,6 +340,9 @@ pub fn supervise(command: &mut Command, limits: &Limits) -> std::io::Result<Supe
         .stderr(Stdio::piped())
         .spawn()?;
     let started = Instant::now();
+    // Held until the child is waited for: closing the job ends every process
+    // still in it, which also stops a descendant the child left behind.
+    let _job = limits.memory.and_then(|bytes| memory::cap(&child, bytes));
     let out = reader(child.stdout.take());
     let err = reader(child.stderr.take());
     let (stopped, status) = wait_for(&mut child, &out, &err, limits, started);
@@ -490,6 +503,15 @@ mod tests {
                 println!("the child is exiting and the grandchild is not");
             }
             "sleep" => std::thread::sleep(Duration::from_secs(30)),
+            "hungry" => {
+                // Commits a gibibyte and writes every page, so the memory is
+                // really committed and not only reserved.
+                let block = vec![1u8; 1 << 30];
+                println!(
+                    "allocated {} bytes",
+                    block.iter().map(|&b| usize::from(b)).sum::<usize>()
+                );
+            }
             "silent" => std::thread::sleep(Duration::from_secs(30)),
             "noisy" => {
                 // **Written to the handle, not through `println!`.** libtest
@@ -584,6 +606,7 @@ mod tests {
                 budget: Some(Duration::from_millis(300)),
                 silence: Duration::from_millis(300),
                 drain: Duration::from_secs(2),
+                memory: None,
             },
         )
         .unwrap();
@@ -633,6 +656,7 @@ mod tests {
                 // load nobody should create is how a guard stops guarding.
                 silence: Duration::from_secs(2),
                 drain: Duration::from_secs(2),
+                memory: None,
             },
         )
         .unwrap();
@@ -707,5 +731,191 @@ mod tests {
             budget(Some(Duration::from_secs(1800))),
             Duration::from_secs(4 * 3600)
         );
+    }
+
+    /// A child that commits more than its cap fails, and the same child with
+    /// no cap does not, so the cap is what stopped it.
+    #[cfg(windows)]
+    #[test]
+    fn a_child_past_its_memory_cap_fails_and_one_under_it_does_not() {
+        let capped = supervise(
+            &mut helper("hungry"),
+            &Limits {
+                memory: Some(256 * 1024 * 1024),
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !capped.status.is_some_and(|status| status.success()),
+            "a child that committed 1 GiB under a 256 MiB cap succeeded: {}",
+            String::from_utf8_lossy(&capped.stdout)
+        );
+        let free = supervise(&mut helper("hungry"), &Limits::default()).unwrap();
+        assert!(
+            free.status.is_some_and(|status| status.success()),
+            "the same child with no cap failed, so the test proves nothing: {}",
+            String::from_utf8_lossy(&free.stdout)
+        );
+    }
+}
+
+/// Caps the memory every process this one starts may commit together.
+///
+/// The per child cap of [`Limits::memory`] bounds one process, and the runner
+/// runs one per processor, so the caps alone add up to more than the machine
+/// has. This one puts the current process in a job whose total limit every
+/// child inherits. Returns whether the cap is in place; the job lives as long
+/// as the process.
+///
+/// @param bytes - the most all of them may commit together
+pub fn cap_everything_started(bytes: u64) -> bool {
+    memory::cap_this_process(bytes)
+}
+
+/// Returns the machine's physical memory in bytes, or `None` when it cannot be
+/// read.
+pub fn physical_memory() -> Option<u64> {
+    memory::physical()
+}
+
+/// Caps what a child process may commit.
+///
+/// On Windows the child goes in a job object of its own with a process memory
+/// limit; an allocation past it fails in the child. Elsewhere there is no cap
+/// yet, and [`cap`] returns nothing.
+mod memory {
+    use std::process::Child;
+
+    /// A job object that closes when dropped.
+    #[cfg(windows)]
+    pub struct Job(windows_sys::Win32::Foundation::HANDLE);
+
+    #[cfg(windows)]
+    impl Drop for Job {
+        /// Closes the job, which ends any process still in it.
+        fn drop(&mut self) {
+            // SAFETY: the handle came from `CreateJobObjectW` and is closed
+            // exactly once, here.
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// Puts the child in a job that limits its committed memory.
+    ///
+    /// Returns nothing when the job cannot be made; the child then runs
+    /// uncapped, which is what it did before, rather than not at all.
+    ///
+    /// @param child - the process, just started
+    /// @param bytes - the most it may commit
+    #[cfg(windows)]
+    pub fn cap(child: &Child, bytes: u64) -> Option<Job> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+        };
+        // SAFETY: null attributes and a null name make an unnamed job with the
+        // default security, which is the documented use.
+        let handle = unsafe { CreateJobObjectW(core::ptr::null(), core::ptr::null()) };
+        if handle.is_null() {
+            return None;
+        }
+        let job = Job(handle);
+        // SAFETY: an all zero structure is a valid value of this plain C
+        // structure: no limits, no flags.
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { core::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        info.ProcessMemoryLimit = usize::try_from(bytes).unwrap_or(usize::MAX);
+        // SAFETY: `info` is the structure the class names, and the length
+        // passed is its size.
+        let set = unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                core::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        // SAFETY: both handles are live: the job was just made and the child
+        // has not been waited for.
+        let assigned =
+            set != 0 && unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle()) } != 0;
+        assigned.then_some(job)
+    }
+
+    /// No cap off Windows yet.
+    ///
+    /// @param _child - the process
+    /// @param _bytes - the most it may commit
+    #[cfg(not(windows))]
+    pub fn cap(_child: &Child, _bytes: u64) -> Option<()> {
+        None
+    }
+
+    /// Puts this process in a job with a total memory limit, which the
+    /// processes it starts inherit. The handle is left open on purpose: the
+    /// job has to last as long as the process.
+    ///
+    /// @param bytes - the most the job may commit
+    #[cfg(windows)]
+    pub fn cap_this_process(bytes: u64) -> bool {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_JOB_MEMORY,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        // SAFETY: null attributes and a null name make an unnamed job.
+        let handle = unsafe { CreateJobObjectW(core::ptr::null(), core::ptr::null()) };
+        if handle.is_null() {
+            return false;
+        }
+        // SAFETY: an all zero structure is a valid value of this C structure.
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { core::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY;
+        info.JobMemoryLimit = usize::try_from(bytes).unwrap_or(usize::MAX);
+        // SAFETY: `info` is the structure the class names and the length is its
+        // size; the pseudo handle for this process is always valid.
+        unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                core::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+                && AssignProcessToJobObject(handle, GetCurrentProcess()) != 0
+        }
+    }
+
+    /// No cap off Windows yet.
+    ///
+    /// @param _bytes - the most the job may commit
+    #[cfg(not(windows))]
+    pub fn cap_this_process(_bytes: u64) -> bool {
+        false
+    }
+
+    /// The machine's physical memory in bytes.
+    #[cfg(windows)]
+    pub fn physical() -> Option<u64> {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        // SAFETY: an all zero structure is a valid value; the length field is
+        // set before the call, as the call requires.
+        let mut status: MEMORYSTATUSEX = unsafe { core::mem::zeroed() };
+        status.dwLength = core::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        // SAFETY: `status` is a live structure of the size its length says.
+        let ok = unsafe { GlobalMemoryStatusEx(&mut status) } != 0;
+        ok.then_some(status.ullTotalPhys)
+    }
+
+    /// Not read off Windows yet.
+    #[cfg(not(windows))]
+    pub fn physical() -> Option<u64> {
+        None
     }
 }
