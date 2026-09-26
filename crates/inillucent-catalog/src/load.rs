@@ -184,11 +184,12 @@ pub fn apply_statistic(tables: &mut [TableInfo], table: &[u8], index: Option<&[u
         return;
     };
     let index_folded = index.to_ascii_lowercase();
-    let Some(entry) = info
-        .indexes
-        .iter_mut()
-        .find(|candidate| candidate.folded == index_folded)
-    else {
+    // A `WITHOUT ROWID` table's primary key is named after the table in
+    // `sqlite_stat1`, which is how SQLite's `analyzeOneTable` writes it.
+    let primary = info.without_rowid && index_folded == folded;
+    let Some(entry) = info.indexes.iter_mut().find(|candidate| {
+        candidate.folded == index_folded || (primary && candidate.origin == IndexOrigin::PrimaryKey)
+    }) else {
         return;
     };
     let partial = entry.partial_sql.is_some();
@@ -382,6 +383,7 @@ pub fn trigger_from_create_sql(sql: &[u8]) -> DbResult<TriggerInfo> {
         event,
         when,
         body,
+        table_database,
         ..
     } = &parsed.statement
     else {
@@ -408,6 +410,7 @@ pub fn trigger_from_create_sql(sql: &[u8]) -> DbResult<TriggerInfo> {
         event,
         when: *when,
         body: body.clone(),
+        table_database: table_database.map(|id| parsed.ast.folded(id).to_vec()),
         ast: parsed.ast,
     })
 }
@@ -515,6 +518,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         }
     }
     info.rowid_alias = rowid_alias(&info, &parsed.ast, columns, constraints);
+    strict_primary_key_not_null(&mut info);
     info.autoincrement = info.rowid_alias.is_some() && declares_autoincrement(columns, constraints);
     let (automatic, rowid_key_conflict) =
         automatic_indexes(&info, &parsed.ast, columns, constraints);
@@ -775,6 +779,27 @@ fn apply_table_constraints(
                     column.not_null = true;
                 }
             }
+        }
+    }
+}
+
+/// Marks a STRICT table's primary key columns NOT NULL.
+///
+/// Every one except the rowid alias, which cannot hold NULL anyway. That is
+/// SQLite's `sqlite3EndTable`, and without it `PRAGMA table_info` reported
+/// `notnull` 0 for `a REAL PRIMARY KEY` in a STRICT table where SQLite reports
+/// 1, and an INSERT of NULL into the key was accepted.
+///
+/// @param info - the table, with its rowid alias already decided
+fn strict_primary_key_not_null(info: &mut TableInfo) {
+    if !info.strict {
+        return;
+    }
+    let alias = info.rowid_alias;
+    for (position, column) in info.columns.iter_mut().enumerate() {
+        let is_alias = alias == Some(position as u16);
+        if column.primary_key_position.is_some() && !is_alias {
+            column.not_null = true;
         }
     }
 }

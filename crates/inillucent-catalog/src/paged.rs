@@ -526,6 +526,19 @@ pub fn tables_from_entries(
             continue;
         }
         let folded = entry.table.to_ascii_lowercase();
+        let trigger = crate::load::trigger_from_create_sql(&entry.sql)
+            .map_err(|error| error.with_detail(format!("in trigger {}", name_of(entry))))?;
+        // A temporary trigger written `ON main.t` belongs to `main`'s table
+        // even when a temporary table of the same name exists, so it is left
+        // for the caller that sees every database to attach.
+        if database == inillucent_storage::TEMP_DATABASE
+            && trigger
+                .table_database
+                .as_ref()
+                .is_some_and(|named| named.as_slice() != b"temp")
+        {
+            continue;
+        }
         let Some(table) = tables.iter_mut().find(|table| table.folded == folded) else {
             // A trigger whose table is gone is dropped with it, so a row that
             // outlived its table is a catalog that is mid-drop rather than one
@@ -533,8 +546,6 @@ pub fn tables_from_entries(
             // the same shape.
             continue;
         };
-        let trigger = crate::load::trigger_from_create_sql(&entry.sql)
-            .map_err(|error| error.with_detail(format!("in trigger {}", name_of(entry))))?;
         table.triggers.push(trigger);
     }
     Ok(tables)

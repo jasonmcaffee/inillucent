@@ -184,12 +184,39 @@ fn copy_rows(
     if rows.is_empty() {
         return Ok(());
     }
-    let placeholders = (1..=columns.len())
+    // **A generated column is computed again, not copied.** `SELECT *` reads
+    // a STORED generated column's value, and naming that column in the
+    // `INSERT` is refused ("cannot INSERT into generated column"), which made
+    // `VACUUM` fail on any table that had one. SQLite's own copy leaves them
+    // out for the same reason, and the new table computes them from the
+    // columns it is given.
+    let folded = table.to_ascii_lowercase();
+    let generated: Vec<Vec<u8>> = source
+        .schema
+        .tables
+        .iter()
+        .find(|held| held.folded == folded && held.database == crate::MAIN)
+        .map(|held| {
+            held.columns
+                .iter()
+                .filter(|column| column.generated)
+                .map(|column| column.folded.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let kept: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !generated.contains(&column.to_ascii_lowercase().into_bytes()))
+        .map(|(at, _)| at)
+        .collect();
+    let placeholders = (1..=kept.len())
         .map(|at| format!("?{at}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let names = columns
+    let names = kept
         .iter()
+        .filter_map(|at| columns.get(*at))
         .map(|column| quoted(column.as_bytes()))
         .collect::<Vec<_>>()
         .join(", ");
@@ -205,8 +232,10 @@ fn copy_rows(
     let insert = format!("{verb} {name} ({names}) VALUES ({placeholders})");
     for row in rows {
         let mut params = inillucent_exec::physical::Params::new();
-        for (at, value) in row.iter().enumerate() {
-            params.set(at.saturating_add(1) as u32, value.clone());
+        for (slot, at) in kept.iter().enumerate() {
+            if let Some(value) = row.get(*at) {
+                params.set(slot.saturating_add(1) as u32, value.clone());
+            }
         }
         fresh.execute_any(&insert, &params)?;
     }
@@ -223,6 +252,13 @@ fn copy_rows(
 /// @param source - the database being rebuilt
 /// @param fresh - the database being built
 fn carry_header(source: &ImportedDatabase, fresh: &mut ImportedDatabase) -> DbResult<()> {
+    // The vacuum mode is in the header too, and SQLite keeps it across a
+    // `VACUUM`. Set directly rather than by `PRAGMA auto_vacuum`, which the
+    // rebuilt file refuses once it holds a table; the checkpoint the
+    // `user_version` below takes writes it.
+    let mode = source.storage.database.auto_vacuum();
+    fresh.storage.database.set_auto_vacuum(mode);
+    fresh.pragmas.set_auto_vacuum(mode);
     let empty = inillucent_exec::physical::Params::new();
     fresh.execute_any(
         &format!("PRAGMA user_version={}", source.user_version()),

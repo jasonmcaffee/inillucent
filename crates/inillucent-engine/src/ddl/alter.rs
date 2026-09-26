@@ -482,8 +482,37 @@ impl crate::ImportedDatabase {
             self.refresh_index_layouts(at, &folded);
         }
         self.refresh_catalog();
+        if let AlterKind::DropColumn { .. } = action {
+            self.views_still_bind(at, "after drop column")?;
+        }
         self.seal()?;
         Ok(Outcome::empty())
+    }
+    /// Refuses a schema change that leaves a view which no longer binds.
+    ///
+    /// **SQLite's `renameTestSchema`.** After `ALTER TABLE t DROP COLUMN c`
+    /// SQLite re-reads every view in the schema and in `temp`, and refuses the
+    /// statement with "error in view v after drop column: no such column: c"
+    /// when one of them names the column. Without it the drop succeeded and
+    /// left a view that every later read of it failed on. The caller's
+    /// statement is undone by `execute_ddl`'s rollback when this refuses.
+    ///
+    /// @param at - the schema the change was made in
+    /// @param when - the words SQLite puts after the view's name
+    fn views_still_bind(&self, at: usize, when: &str) -> DbResult<()> {
+        for table in &self.schema.tables {
+            if table.database != at && table.database != crate::TEMP {
+                continue;
+            }
+            if let Some(Err(error)) = self.bind_view(table) {
+                return Err(inillucent_base::error::statement_refusal(format!(
+                    "error in view {} {when}: {}",
+                    String::from_utf8_lossy(&table.name),
+                    error.message()
+                )));
+            }
+        }
+        Ok(())
     }
     /// Returns the value a column's `DEFAULT` has for a row that predates it.
     ///
@@ -535,22 +564,36 @@ impl crate::ImportedDatabase {
         // permanent table - so `tables_from_entries` leaves it unattached, and
         // this is where it is put where it belongs. Newest first, which is
         // SQLite's own order.
-        let orphans: Vec<(Vec<u8>, Vec<u8>)> = self
+        // One written `ON main.t` belongs to the table in the database it
+        // names, even when a temporary table of the same name shadows it.
+        let temp_triggers: Vec<(Vec<u8>, Vec<u8>)> = self
             .entries_of(crate::TEMP)
             .iter()
             .filter(|row| row.entry.kind == ObjectKind::Trigger)
             .map(|row| (row.entry.table.to_ascii_lowercase(), row.entry.sql.clone()))
-            .filter(|(folded, _)| {
-                !rebuilt
-                    .iter()
-                    .any(|table| table.database == crate::TEMP && table.folded == *folded)
-            })
             .collect();
-        for (folded, sql) in orphans {
+        for (folded, sql) in temp_triggers {
             let Ok(trigger) = inillucent_catalog::load::trigger_from_create_sql(&sql) else {
                 continue;
             };
-            if let Some(table) = rebuilt.iter_mut().find(|table| table.folded == folded) {
+            let named = match trigger.table_database.as_deref() {
+                Some(b"temp") | None => None,
+                Some(name) => match self.schema_named(name) {
+                    Some(at) => Some(at),
+                    None => continue,
+                },
+            };
+            let in_temp = rebuilt
+                .iter()
+                .any(|table| table.database == crate::TEMP && table.folded == folded);
+            // Attached by `tables_from_entries` already.
+            if named.is_none() && in_temp {
+                continue;
+            }
+            if let Some(table) = rebuilt
+                .iter_mut()
+                .find(|table| table.folded == folded && named.is_none_or(|at| table.database == at))
+            {
                 table.triggers.insert(0, trigger);
             }
         }

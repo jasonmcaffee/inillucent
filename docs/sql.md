@@ -130,9 +130,9 @@ otherwise.
 | Window functions | all eleven window functions, `PARTITION BY`, `ROWS`, `RANGE` and `GROUPS` frames, every `EXCLUDE` clause, `FILTER`, and named `WINDOW` clauses |
 | Writes | `INSERT`, `UPDATE`, `DELETE` and `REPLACE`, every `OR` conflict clause, `RETURNING`, `UPDATE ... FROM`, and `ON CONFLICT ... DO UPDATE` and `DO NOTHING` |
 | Tables | `CREATE TABLE`, `CREATE TABLE ... AS SELECT`, `WITHOUT ROWID`, `STRICT`, `VIRTUAL` and `STORED` generated columns, `AUTOINCREMENT` |
-| Indexes | unique, descending, partial, on an expression, with `COLLATE`, on a `WITHOUT ROWID` table. `REINDEX`, `INDEXED BY`, and `ANALYZE`, which writes `sqlite_stat1` |
+| Indexes | unique, descending, partial, on an expression, with `COLLATE`, on a `WITHOUT ROWID` table. `REINDEX`, `INDEXED BY`, and `ANALYZE`, which writes `sqlite_stat1` in each database it measures, `ANALYZE aux` included |
 | Views and triggers | `CREATE VIEW`. `CREATE TRIGGER` with `BEFORE`, `AFTER` and `INSTEAD OF`, `UPDATE OF`, `WHEN`, `RAISE` with a message that is any expression, and recursive triggers |
-| `ALTER TABLE` | `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` and `DROP COLUMN` |
+| `ALTER TABLE` | `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` and `DROP COLUMN`. `DROP COLUMN` is refused when a view reads the column |
 | Constraints | `NOT NULL`, `UNIQUE`, `PRIMARY KEY`, `CHECK`, `DEFAULT`, and foreign keys with all five actions, immediate or deferred, and `PRAGMA foreign_key_check` |
 | Values | type affinity on write, `CAST`, the `BINARY`, `NOCASE` and `RTRIM` collations, `LIKE`, `GLOB`, values larger than a page |
 | Functions | 190 built in function names, including 30 JSON functions, the maths functions and the date and time functions. Functions, aggregates and collations an application defines |
@@ -140,7 +140,7 @@ otherwise.
 | Several databases | `ATTACH` and `DETACH`, joins across files, and one transaction that commits to two files or to neither. Temporary tables, views and triggers |
 | Schema and maintenance | `sqlite_schema` and `sqlite_master`, `VACUUM`, `VACUUM INTO`, `integrity_check` and `quick_check` |
 | Plans | `EXPLAIN QUERY PLAN` in SQLite's format. Plain `EXPLAIN` runs and prints a different program, see [below](#five-follow-from-how-inillucent-is-built) |
-| Table valued functions | `generate_series`, `json_each`, `json_tree`, the `pragma_*` functions such as `pragma_table_info('t')`, and any module an application registers |
+| Table valued functions | `generate_series`, `json_each`, `json_tree`, a `pragma_*` function for every pragma that returns a value except `foreign_key_check`, such as `pragma_table_info('t')` and `pragma_user_version`, and any module an application registers |
 
 ### Rules a reader asks about
 

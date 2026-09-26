@@ -231,21 +231,19 @@ impl crate::ImportedDatabase {
             changes: Default::default(),
         })
     }
-    /// Returns the columns a view's `SELECT` produces.
+    /// Binds a view's `SELECT` against the catalog as it is now.
     ///
-    /// Bound rather than stored, because the file records a view's text and not
-    /// its shape. A view whose body no longer binds - a table it reads was
-    /// dropped - answers no columns rather than failing the pragma, which is
-    /// what SQLite does with the same thing.
+    /// `None` when the table is not a view. Shared by `view_columns` and by
+    /// `ALTER TABLE DROP COLUMN`, which refuses a drop that leaves a view
+    /// naming a column the table no longer has.
     ///
     /// @param table - the view
-    pub(crate) fn view_columns(
+    pub(crate) fn bind_view(
         &self,
         table: &inillucent_sql::catalog_view::TableInfo,
-    ) -> Vec<inillucent_sql::catalog_view::ColumnInfo> {
-        let Some(body) = table.view.as_ref() else {
-            return Vec::new();
-        };
+    ) -> Option<Result<inillucent_sql::bind::BoundSelect, inillucent_sql::diagnostic::ParseError>>
+    {
+        let body = table.view.as_ref()?;
         let authorizer = inillucent_sql::bind::AllowAll;
         // **The body is read as what it is: schema (task-1972).** A view over a
         // registered function reports the columns it would produce only if the
@@ -259,7 +257,24 @@ impl crate::ImportedDatabase {
                 .with_collations(&self.session_state.collations)
                 .with_trusted_schema(self.session_state.registry.policy().trusted_schema)
                 .in_schema();
-        let Ok(bound) = binder.bind_select(body.select) else {
+        Some(binder.bind_select(body.select))
+    }
+    /// Returns the columns a view's `SELECT` produces.
+    ///
+    /// Bound rather than stored, because the file records a view's text and not
+    /// its shape. A view whose body no longer binds - a table it reads was
+    /// dropped - answers no columns rather than failing the pragma, which is
+    /// what SQLite does with the same thing.
+    ///
+    /// @param table - the view
+    pub(crate) fn view_columns(
+        &self,
+        table: &inillucent_sql::catalog_view::TableInfo,
+    ) -> Vec<inillucent_sql::catalog_view::ColumnInfo> {
+        let Some(Ok(bound)) = self.bind_view(table) else {
+            return Vec::new();
+        };
+        let Some(body) = table.view.as_ref() else {
             return Vec::new();
         };
         let declared = body.columns.clone();
@@ -272,11 +287,12 @@ impl crate::ImportedDatabase {
                     .get(position)
                     .cloned()
                     .unwrap_or_else(|| column.name.clone());
+                let (declared_type, affinity) = view_column_type(&bound, position);
                 inillucent_sql::catalog_view::ColumnInfo {
                     folded: name.to_ascii_lowercase(),
                     name,
-                    declared_type: column.declared_type.clone(),
-                    affinity: inillucent_value::affinity::for_column(&column.declared_type),
+                    declared_type,
+                    affinity,
                     collation: b"binary".to_vec(),
                     not_null: false,
                     not_null_conflict: None,
@@ -492,9 +508,13 @@ impl crate::ImportedDatabase {
             if at.is_some_and(|named| table.database != named) {
                 continue;
             }
+            // A virtual table's shadow table is `shadow`, which is SQLite's
+            // word for a table a module owns; it said `table`, which the
+            // retained case for bug 46 found.
             let kind: &[u8] = match table.kind {
                 inillucent_sql::catalog_view::TableKind::View => b"view",
                 inillucent_sql::catalog_view::TableKind::Virtual => b"virtual",
+                _ if self.is_shadow_table(&table.name) => b"shadow",
                 _ => b"table",
             };
             let ncol = if table.kind == inillucent_sql::catalog_view::TableKind::View {
@@ -600,5 +620,139 @@ impl crate::ImportedDatabase {
                     None
                 },
             )
+    }
+}
+
+/// Returns the declared type and the affinity SQLite gives one column of a view.
+///
+/// **SQLite's `sqlite3SubqueryColumnTypes`, and not the origin column's
+/// declared type.** A view column's affinity is its expression's, taken from a
+/// later arm of a compound when the first has none, and demoted to BLOB when
+/// the arms disagree about text and numbers. The declared type the origin
+/// column carries is kept only when its affinity is that affinity; otherwise
+/// the column is named after the affinity (`BLOB`, `TEXT`, `INT`, `REAL` or
+/// `NUM`), and an expression with no affinity has no type. Reporting the
+/// origin's declared type made a column with no declared type read an empty
+/// type where SQLite reads `BLOB`, and a STRICT table's `ANY` column read `ANY`
+/// where SQLite reads `BLOB`.
+///
+/// @param bound - the view's bound `SELECT`
+/// @param position - the column's position in the result
+fn view_column_type(
+    bound: &inillucent_sql::bind::BoundSelect,
+    position: usize,
+) -> (Vec<u8>, inillucent_value::affinity::Affinity) {
+    use inillucent_value::affinity::Affinity;
+    let Some(first) = bound.columns.get(position) else {
+        return (Vec::new(), Affinity::Blob);
+    };
+    let arms: Vec<Option<&inillucent_sql::bind::BoundExpr>> = std::iter::once(bound)
+        .chain(bound.compounds.iter().map(|(_, arm)| arm))
+        .map(|arm| arm.columns.get(position).map(|column| &column.expr))
+        .collect();
+    let mut kinds = 0u8;
+    let mut at = 0usize;
+    let mut affinity = first.expr.affinity();
+    while affinity.is_none() && at.saturating_add(1) < arms.len() {
+        kinds |= arms.get(at).copied().flatten().map_or(0, value_kinds);
+        at = at.saturating_add(1);
+        affinity = arms
+            .get(at)
+            .copied()
+            .flatten()
+            .and_then(inillucent_sql::bind::BoundExpr::affinity);
+    }
+    // A view passes SQLite's "no affinity" through, and a column with none
+    // has no declared type.
+    let Some(mut affinity) = affinity else {
+        return (Vec::new(), Affinity::Blob);
+    };
+    if affinity != Affinity::Blob && arms.len() > 1 {
+        for arm in arms.iter().skip(at.saturating_add(1)) {
+            kinds |= arm.map_or(0, value_kinds);
+        }
+        if affinity == Affinity::Text && kinds & 0x01 != 0 {
+            affinity = Affinity::Blob;
+        } else if is_numeric(affinity) && kinds & 0x02 != 0 {
+            affinity = Affinity::Blob;
+        }
+        if is_numeric(affinity)
+            && matches!(first.expr, inillucent_sql::bind::BoundExpr::Cast { .. })
+        {
+            affinity = Affinity::FlexNum;
+        }
+    }
+    let declared = &first.declared_type;
+    if !declared.is_empty() && inillucent_value::affinity::for_column(declared) == affinity {
+        return (declared.clone(), affinity);
+    }
+    let named: &[u8] = match affinity {
+        Affinity::Numeric | Affinity::FlexNum => b"NUM",
+        Affinity::Blob => b"BLOB",
+        Affinity::Integer => b"INT",
+        Affinity::Real => b"REAL",
+        Affinity::Text => b"TEXT",
+    };
+    (named.to_vec(), affinity)
+}
+
+/// Returns whether an affinity is one of the four numeric ones.
+///
+/// @param affinity - the affinity
+fn is_numeric(affinity: inillucent_value::affinity::Affinity) -> bool {
+    use inillucent_value::affinity::Affinity;
+    matches!(
+        affinity,
+        Affinity::Numeric | Affinity::Integer | Affinity::Real | Affinity::FlexNum
+    )
+}
+
+/// Returns which kinds of value an expression can produce, as SQLite's
+/// `sqlite3ExprDataType` does: 1 a number, 2 text, 4 a blob.
+///
+/// It is what decides whether the arms of a compound agree about a view
+/// column's affinity; see [`view_column_type`].
+///
+/// @param expr - one arm's expression for the column
+fn value_kinds(expr: &inillucent_sql::bind::BoundExpr) -> u8 {
+    use inillucent_sql::bind::BoundExpr;
+    match expr {
+        BoundExpr::Null => 0,
+        BoundExpr::Text(_) => 0x02,
+        BoundExpr::Blob(_) => 0x04,
+        BoundExpr::Collate { operand, .. } => value_kinds(operand),
+        BoundExpr::Unary {
+            op: inillucent_sql::ast::UnaryOp::Identity,
+            operand,
+        } => value_kinds(operand),
+        BoundExpr::Arithmetic {
+            op: inillucent_sql::ast::BinaryOp::Concat,
+            ..
+        } => 0x06,
+        BoundExpr::Parameter(_)
+        | BoundExpr::External { .. }
+        | BoundExpr::Function { .. }
+        | BoundExpr::Aggregate { .. } => 0x07,
+        BoundExpr::Column { .. } | BoundExpr::Cast { .. } | BoundExpr::Subquery { .. } => {
+            match expr.affinity() {
+                Some(affinity) if is_numeric(affinity) => 0x05,
+                Some(inillucent_value::affinity::Affinity::Text) => 0x06,
+                _ => 0x07,
+            }
+        }
+        BoundExpr::Case {
+            branches,
+            otherwise,
+            ..
+        } => {
+            let mut kinds = branches
+                .iter()
+                .fold(0u8, |kinds, (_, then)| kinds | value_kinds(then));
+            if let Some(otherwise) = otherwise {
+                kinds |= value_kinds(otherwise);
+            }
+            kinds
+        }
+        _ => 0x01,
     }
 }

@@ -77,6 +77,7 @@ use super::{ImportedDatabase, Outcome, MAIN};
 mod integrity;
 mod schema;
 mod tuning;
+pub(crate) use tuning::setting_function_column;
 
 impl ImportedDatabase {
     /// Runs one `PRAGMA`.
@@ -113,6 +114,13 @@ impl ImportedDatabase {
         if let Some(outcome) = self.pragma_rows_of(name, argument, at)? {
             return Ok(outcome);
         }
+        // A setting read with no argument goes through the same `&self` reader
+        // the `pragma_<name>` function uses; the setters below then only set.
+        if argument.is_none() {
+            if let Some(outcome) = self.pragma_setting_read(name, at)? {
+                return Ok(outcome);
+            }
+        }
         match name {
             // `default_cache_size` is the deprecated spelling of the same
             // setting, and SQLite still answers it.
@@ -126,12 +134,6 @@ impl ImportedDatabase {
             b"journal_mode" => self.pragma_journal_mode(argument),
             b"encoding" => self.pragma_fixed_word(argument, "encoding", b"UTF-8"),
             b"locking_mode" => self.pragma_locking_mode(argument),
-            b"integrity_check" => self.pragma_integrity_check(
-                "integrity_check",
-                crate::engine::integrity::CheckDepth::Full,
-            ),
-            b"quick_check" => self
-                .pragma_integrity_check("quick_check", crate::engine::integrity::CheckDepth::Quick),
             b"wal_checkpoint" => self.pragma_wal_checkpoint(),
             b"page_size" => Ok(named_integer("page_size", self.storage.page_size as i64)),
             b"page_count" => Ok(named_integer(
@@ -185,16 +187,25 @@ impl ImportedDatabase {
             // caller that wrote MEMORY reads 2 back.
             b"temp_store" => self.pragma_temp_store(argument),
             // **The pragmas that do nothing here and nothing observable in
-            // SQLite either.** `PRAGMA optimize` decides whether to re-ANALYZE
-            // and answers no rows; `shrink_memory` releases what a page cache
-            // is holding; `incremental_vacuum` moves free pages when
-            // `auto_vacuum` is on, which it never is in either engine's default.
-            // Answering nothing is the *right* answer for these, and it is the
-            // answer SQLite gives, so they are named here rather than falling
-            // through to the refusal - a refusal would be a difference invented
-            // by the rule rather than found by it.
+            // SQLite either.** `shrink_memory` releases what a page cache is
+            // holding; `incremental_vacuum` moves free pages when `auto_vacuum`
+            // is on. Answering nothing is the *right* answer for these, and it
+            // is the answer SQLite gives, so they are named here rather than
+            // falling through to the refusal - a refusal would be a difference
+            // invented by the rule rather than found by it. `PRAGMA optimize`
+            // is answered by `pragma_rows_of`: no rows, and one column.
             b"incremental_vacuum" => self.pragma_incremental_vacuum(argument),
-            b"optimize" | b"shrink_memory" | b"data_store_directory" | b"temp_store_directory" => {
+            //
+            // **No rows is not the same as no columns.** SQLite's `pragma.h`
+            // gives the two directory pragmas a result column named after
+            // themselves when they are read. Answering `Outcome::empty()` for
+            // them matched the rows and not the column names, which the matrix
+            // case `pragma-temp-store-directory` found. `shrink_memory` has no
+            // result column in SQLite either.
+            b"data_store_directory" | b"temp_store_directory" if argument.is_none() => {
+                Ok(list_of::<&str>(&String::from_utf8_lossy(name), &[]))
+            }
+            b"shrink_memory" | b"data_store_directory" | b"temp_store_directory" => {
                 Ok(Outcome::empty())
             }
             // Reported: a number this engine has exactly one of. Read it and
@@ -264,6 +275,31 @@ impl ImportedDatabase {
         self.pragma_rows_of(name, argument, None)
     }
 
+    /// Answers a `pragma_<name>` table-valued function.
+    ///
+    /// The read-only pragmas first, then, when no argument was given, the
+    /// setting pragmas' values: the same two functions the directive form
+    /// reads, so `PRAGMA x` and `SELECT * FROM pragma_x` cannot answer
+    /// differently.
+    ///
+    /// @param name - the pragma's folded name
+    /// @param argument - the value it was given, when it was given one
+    /// @param at - the attached database it was qualified with
+    pub(crate) fn pragma_function_answer(
+        &self,
+        name: &[u8],
+        argument: Option<&PragmaArgument>,
+        at: Option<usize>,
+    ) -> DbResult<Option<Outcome>> {
+        if let Some(outcome) = self.pragma_rows_of(name, argument, at)? {
+            return Ok(Some(outcome));
+        }
+        if argument.is_none() {
+            return self.pragma_setting_read(name, at);
+        }
+        Ok(None)
+    }
+
     /// The same, for a caller that knows which attached database was named.
     ///
     /// @param name - the pragma's folded name
@@ -277,6 +313,16 @@ impl ImportedDatabase {
         at: Option<usize>,
     ) -> DbResult<Option<Outcome>> {
         Ok(Some(match name {
+            // Here, under `&self`, so the `pragma_<name>` functions reach them.
+            b"integrity_check" => self.pragma_integrity_check(
+                "integrity_check",
+                crate::engine::integrity::CheckDepth::Full,
+            )?,
+            b"quick_check" => self.pragma_integrity_check(
+                "quick_check",
+                crate::engine::integrity::CheckDepth::Quick,
+            )?,
+            b"optimize" => list_of::<&str>("optimize", &[]),
             b"foreign_key_list" => self.pragma_foreign_key_list(argument, at)?,
             b"table_info" => self.pragma_table_info(argument, false, at)?,
             b"table_xinfo" => self.pragma_table_info(argument, true, at)?,
@@ -306,12 +352,60 @@ impl ImportedDatabase {
 
     /// Returns the names of every pragma with a table-valued form.
     ///
-    /// One per read-only pragma above, which is the set that has rows to be a
-    /// function *of*. A pragma whose whole content is a setting is a directive
-    /// and nothing else, and a function that answered nothing would be
-    /// indistinguishable from one that found nothing.
+    /// One per pragma SQLite gives a result: the read-only pragmas above, the
+    /// two integrity checks, `optimize`, and every setting that reads back a
+    /// value, which is SQLite's rule (`pragma.h` flags each of them `Result0`
+    /// or `Result1`, and `sqlite3PragmaVtabRegister` registers a function for
+    /// exactly those). `foreign_key_check` is the one SQLite has and this list
+    /// has not: it runs queries, which needs the connection mutably, and a
+    /// table-valued function is read under `&self`.
     pub(super) fn pragma_function_names() -> &'static [&'static str] {
         &[
+            "pragma_analysis_limit",
+            "pragma_application_id",
+            "pragma_auto_vacuum",
+            "pragma_automatic_index",
+            "pragma_busy_timeout",
+            "pragma_cache_size",
+            "pragma_cache_spill",
+            "pragma_cell_size_check",
+            "pragma_checkpoint_fullfsync",
+            "pragma_count_changes",
+            "pragma_data_version",
+            "pragma_default_cache_size",
+            "pragma_defer_foreign_keys",
+            "pragma_empty_result_callbacks",
+            "pragma_encoding",
+            "pragma_foreign_keys",
+            "pragma_freelist_count",
+            "pragma_full_column_names",
+            "pragma_fullfsync",
+            "pragma_hard_heap_limit",
+            "pragma_ignore_check_constraints",
+            "pragma_integrity_check",
+            "pragma_journal_mode",
+            "pragma_journal_size_limit",
+            "pragma_legacy_alter_table",
+            "pragma_locking_mode",
+            "pragma_max_page_count",
+            "pragma_optimize",
+            "pragma_page_count",
+            "pragma_page_size",
+            "pragma_query_only",
+            "pragma_quick_check",
+            "pragma_read_uncommitted",
+            "pragma_recursive_triggers",
+            "pragma_reverse_unordered_selects",
+            "pragma_schema_version",
+            "pragma_secure_delete",
+            "pragma_short_column_names",
+            "pragma_soft_heap_limit",
+            "pragma_synchronous",
+            "pragma_temp_store",
+            "pragma_threads",
+            "pragma_trusted_schema",
+            "pragma_user_version",
+            "pragma_writable_schema",
             "pragma_collation_list",
             "pragma_compile_options",
             "pragma_database_list",

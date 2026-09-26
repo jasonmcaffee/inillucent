@@ -759,6 +759,21 @@ impl Database {
         self.meta.wal = wal;
     }
 
+    /// Returns the `PRAGMA auto_vacuum` mode the file was given.
+    pub fn auto_vacuum(&self) -> u8 {
+        self.meta.auto_vacuum
+    }
+
+    /// Records the `PRAGMA auto_vacuum` mode.
+    ///
+    /// It lands in the meta record and reaches the file at the next
+    /// checkpoint, which is the same durability every other meta field has.
+    ///
+    /// @param mode - 0 none, 1 full, 2 incremental
+    pub fn set_auto_vacuum(&mut self, mode: u8) {
+        self.meta.auto_vacuum = mode;
+    }
+
     /// Returns the four bytes `PRAGMA application_id` reads.
     pub fn application_id(&self) -> i32 {
         self.meta.application_id
@@ -1160,7 +1175,7 @@ impl Database {
     /// that is four 32 KiB allocations, four 32 KiB reads and four crc32 passes
     /// over 32 KiB, to compare a record 116 bytes long.
     ///
-    /// This reads those 116 bytes from each slot and compares them, and
+    /// This reads those 120 bytes from each slot and compares them, and
     /// remembers the answer for as long as the lock is held, so the second
     /// caller reads nothing at all.
     ///

@@ -214,6 +214,7 @@ fn build(sql: &str, name: Vec<u8>, limits: &Limits) -> Option<TriggerInfo> {
         when: *when,
         body: body.clone(),
         ast: parsed.ast,
+        table_database: None,
     })
 }
 

@@ -171,9 +171,19 @@ mod at {
     /// existed says; such a file resumes where it always did, and the refusal
     /// in `inillucent-wal`'s replay is what stands in front of it instead.
     ///
-    /// The last field named here; the region continues at 116 for whatever
-    /// comes next.
     pub const HIGH_WATER_LSN: usize = 108;
+    /// The `PRAGMA auto_vacuum` mode, 4 bytes: 0 none, 1 full, 2 incremental.
+    ///
+    /// **Kept in the file because SQLite keeps it in the file.** A mode set
+    /// before the first table is made is stored in SQLite's header and read
+    /// back by every later connection; kept only on the connection, a reopen
+    /// read 0 after `PRAGMA auto_vacuum = INCREMENTAL` had been answered 2.
+    /// Zero means none, which is what a file written before this field existed
+    /// says, and is the mode such a file was made with.
+    ///
+    /// The last field named here; the region continues at 120 for whatever
+    /// comes next.
+    pub const AUTO_VACUUM: usize = 116;
 }
 
 /// The smallest a meta page can be and still hold every field.
@@ -184,7 +194,7 @@ pub const META_BYTES: usize = at::RESERVED;
 /// Everything after it is the zero padding [`Meta::encode`] writes over the
 /// rest of the page, so two meta pages whose first `META_RECORD_BYTES` bytes
 /// agree describe the same database. That is what lets a connection ask
-/// "has another process folded since I last looked" by reading 116 bytes
+/// "has another process folded since I last looked" by reading 120 bytes
 /// instead of a whole page - see `Database::disk_record_is_as_last_read`,
 /// where it was four 32 KiB reads and four crc32 passes over 32 KiB per
 /// statement (task-2046).
@@ -192,9 +202,9 @@ pub const META_BYTES: usize = at::RESERVED;
 /// **A field added to the reserved region has to move this.** The region
 /// begins at [`at::RESERVED`] and the last field in it ends here;
 /// `every_field_lives_below_the_record_length` fails when one is added past
-/// it, because a check that read 116 bytes of a record 124 bytes long would
+/// it, because a check that read 120 bytes of a record 128 bytes long would
 /// answer "unchanged" about a change it could not see.
-pub const META_RECORD_BYTES: usize = at::HIGH_WATER_LSN + 8;
+pub const META_RECORD_BYTES: usize = at::AUTO_VACUUM + 4;
 
 /// What the meta page says about the database.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -239,6 +249,8 @@ pub struct Meta {
     /// The log resumes above it, so a page's stamp is always a position in the
     /// stream beside the file - see `at::HIGH_WATER_LSN`. Zero means unset.
     pub high_water_lsn: u64,
+    /// What `PRAGMA auto_vacuum` reads back - see `at::AUTO_VACUUM`.
+    pub auto_vacuum: u8,
 }
 
 impl Meta {
@@ -262,6 +274,7 @@ impl Meta {
             schema_cookie: 0,
             wal: false,
             high_water_lsn: 0,
+            auto_vacuum: 0,
         }
     }
 
@@ -299,6 +312,13 @@ impl Meta {
         // reserved region, and the region is only as long as the page.
         if page.len() >= at::HIGH_WATER_LSN.saturating_add(8) {
             put(page, at::HIGH_WATER_LSN, &self.high_water_lsn.to_le_bytes())?;
+        }
+        if page.len() >= at::AUTO_VACUUM.saturating_add(4) {
+            put(
+                page,
+                at::AUTO_VACUUM,
+                &u32::from(self.auto_vacuum).to_le_bytes(),
+            )?;
         }
         let sum = checksum(page)?;
         put(page, at::CHECKSUM, &sum.to_le_bytes())?;
@@ -344,6 +364,7 @@ impl Meta {
             schema_cookie: i32v(page, at::SCHEMA_COOKIE),
             wal: i32v(page, at::WAL) != 0,
             high_water_lsn: u64_or_zero(page, at::HIGH_WATER_LSN),
+            auto_vacuum: u8::try_from(i32v(page, at::AUTO_VACUUM)).unwrap_or(0),
         })
     }
 
@@ -492,6 +513,8 @@ mod tests {
             wal: true,
             // And the high water, which is the field a reopen resumes above.
             high_water_lsn: 900_000,
+            // And the vacuum mode, which a reopen reads back.
+            auto_vacuum: 2,
         };
         let mut page = vec![0u8; 32_768];
         meta.encode(&mut page).unwrap();
@@ -524,8 +547,9 @@ mod tests {
             schema_cookie: 3,
             wal: true,
             high_water_lsn: 900_000,
+            auto_vacuum: 2,
         };
-        let moved: [(&str, Meta); 14] = [
+        let moved: [(&str, Meta); 15] = [
             (
                 "page_size",
                 Meta {
@@ -609,6 +633,13 @@ mod tests {
                 "high_water_lsn",
                 Meta {
                     high_water_lsn: 900_001,
+                    ..base
+                },
+            ),
+            (
+                "auto_vacuum",
+                Meta {
+                    auto_vacuum: 1,
                     ..base
                 },
             ),

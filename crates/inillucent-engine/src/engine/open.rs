@@ -288,6 +288,10 @@ impl crate::ImportedDatabase {
     /// pragma reports and nothing writes a pre-image, which is a durability
     /// hole rather than a cosmetic one.
     fn settle_journal(&mut self) -> DbResult<()> {
+        // The vacuum mode is the other setting the file carries, read here for
+        // the same reason: a connection starts with what the file says.
+        self.pragmas
+            .set_auto_vacuum(self.storage.database.auto_vacuum());
         let mode = if self.storage.database.wal_mode() {
             inillucent_pool::journal::JournalMode::Wal
         } else {

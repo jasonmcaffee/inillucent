@@ -438,6 +438,9 @@ impl Pragmas {
     ///
     /// @param on - whether the planner may build one
     pub(crate) fn set_automatic_index(&self, on: bool) {
+        // The field is what `PRAGMA automatic_index` reads back. Setting only
+        // the lever made `PRAGMA automatic_index = OFF` read back 1.
+        self.automatic_index.set(on);
         let mask = self.levers.get().disabled();
         self.levers.set(Levers::without(if on {
             mask & !Levers::AUTOMATIC_INDEX

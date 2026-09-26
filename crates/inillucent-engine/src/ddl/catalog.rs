@@ -130,6 +130,10 @@ impl crate::ImportedDatabase {
             let temp_master = crate::schema_named(&held.schema_info, b"sqlite_temp_master");
             catalog = catalog.with_table(temp_schema);
             catalog = catalog.with_table(temp_master);
+        } else {
+            for table in empty_temp_schema() {
+                catalog = catalog.with_table(table);
+            }
         }
         // **The eponymous modules, last.** `generate_series`, `json_each`,
         // `json_tree` and the `pragma_*` set are names rather than tables: they
@@ -286,17 +290,36 @@ impl crate::ImportedDatabase {
     /// @param name - the function's name, `pragma_` and the pragma's own
     fn pragma_function_table(&self, name: &str) -> Option<inillucent_sql::catalog_view::TableInfo> {
         let pragma = name.strip_prefix("pragma_")?;
-        let shape = self.pragma_rows(pragma.as_bytes(), None).ok()??;
-        if shape.names.is_empty() {
+        // **A setting's shape is written down rather than read.** Its one
+        // column and whether it takes a schema are SQLite's `pragma.h`, and
+        // reading the value to learn the column name would do work at every
+        // open for an answer that never changes. The two integrity checks are
+        // named for a stronger reason: reading them to learn the column would
+        // run a full check of the file.
+        let (names, argument, schema): (Vec<String>, bool, bool) =
+            if let Some((column, schema)) = crate::pragma::setting_function_column(pragma) {
+                (vec![column.to_string()], false, schema)
+            } else if matches!(pragma, "integrity_check" | "quick_check") {
+                (vec![pragma.to_string()], true, true)
+            } else if pragma == "optimize" {
+                (vec![pragma.to_string()], true, false)
+            } else {
+                let shape = self.pragma_rows(pragma.as_bytes(), None).ok()??;
+                (shape.names.to_vec(), true, true)
+            };
+        if names.is_empty() {
             return None;
         }
-        let mut columns: Vec<inillucent_sql::catalog_view::ColumnInfo> = shape
-            .names
+        let mut columns: Vec<inillucent_sql::catalog_view::ColumnInfo> = names
             .iter()
             .map(|held| pragma_column(held.as_bytes(), false))
             .collect();
-        columns.push(pragma_column(b"arg", true));
-        columns.push(pragma_column(b"schema", true));
+        if argument {
+            columns.push(pragma_column(b"arg", true));
+        }
+        if schema {
+            columns.push(pragma_column(b"schema", true));
+        }
         Some(inillucent_sql::catalog_view::TableInfo::eponymous(
             name.as_bytes().to_vec(),
             columns,
@@ -721,4 +744,52 @@ impl crate::ImportedDatabase {
         let participants = self.writing.replace_touched(0) | crate::schema_bit(at);
         self.commit_across(txn, participants)
     }
+}
+
+/// Returns `sqlite_temp_schema` and `sqlite_temp_master` for a connection that
+/// has no temporary database yet.
+///
+/// **SQLite answers both names on every connection**, with no rows until
+/// something temporary is made. The temporary database here is made by the
+/// first statement that writes into it, so before that there is no tree for
+/// the names to scan, and `SELECT name FROM sqlite_temp_schema` as the first
+/// statement on a new file was "no such table". Making the temporary database
+/// on a read instead would put `temp` in `PRAGMA database_list`, which SQLite
+/// does not list until a temporary object exists. So the two names are empty
+/// views over `main`'s catalog, which take their column names and declared
+/// types from the same five columns and return no row.
+fn empty_temp_schema() -> Vec<inillucent_sql::catalog_view::TableInfo> {
+    let mut tables = Vec::new();
+    for name in ["sqlite_temp_schema", "sqlite_temp_master"] {
+        let create_sql = format!(
+            "CREATE VIEW {name} AS SELECT type, name, tbl_name, rootpage, sql \
+             FROM main.sqlite_schema WHERE 0"
+        )
+        .into_bytes();
+        let Ok(view) = inillucent_catalog::load::view_from_create_sql(&create_sql) else {
+            continue;
+        };
+        tables.push(inillucent_sql::catalog_view::TableInfo {
+            name: name.as_bytes().to_vec(),
+            folded: name.as_bytes().to_vec(),
+            database: crate::TEMP,
+            root: 0,
+            columns: Vec::new(),
+            rowid_alias: None,
+            without_rowid: false,
+            strict: false,
+            autoincrement: false,
+            kind: inillucent_sql::catalog_view::TableKind::View,
+            create_sql,
+            view: Some(Box::new(view)),
+            triggers: Vec::new(),
+            analysed_rows: None,
+            indexes: Vec::new(),
+            checks: Vec::new(),
+            foreign_keys: Vec::new(),
+            foreign_key_triggers: Vec::new(),
+            module: None,
+        });
+    }
+    tables
 }

@@ -192,7 +192,7 @@ impl Module for Fts5Module {
     /// The five shadow tables the index lives in.
     fn shadow_tables(&self, arguments: &ModuleArguments) -> DbResult<Vec<ShadowTable>> {
         let options = parse_options(&arguments.arguments)?;
-        let mut content = String::from("CREATE TABLE \"%_content\"(id INTEGER PRIMARY KEY");
+        let mut content = String::from("CREATE TABLE '%_content'(id INTEGER PRIMARY KEY");
         // The suffix an external table's rows are reached under is empty,
         // because the name is the owner's own rather than one derived from it.
         for index in 0..options.columns.len() {
@@ -202,8 +202,7 @@ impl Module for Fts5Module {
         Ok(vec![
             ShadowTable {
                 suffix: b"data".to_vec(),
-                create_sql: "CREATE TABLE \"%_data\"(id INTEGER PRIMARY KEY, block BLOB)"
-                    .to_string(),
+                create_sql: "CREATE TABLE '%_data'(id INTEGER PRIMARY KEY, block BLOB)".to_string(),
                 owner: None,
             },
             ShadowTable {
@@ -212,10 +211,9 @@ impl Module for Fts5Module {
                 // number from a file an older build wrote just as readily as
                 // the blob doclist this build writes - see the module's own
                 // doc comment for why the two coexist.
-                create_sql:
-                    "CREATE TABLE \"%_idx\"(segid, term, doclist, PRIMARY KEY(segid, term)) \
+                create_sql: "CREATE TABLE '%_idx'(segid, term, doclist, PRIMARY KEY(segid, term)) \
                      WITHOUT ROWID"
-                        .to_string(),
+                    .to_string(),
                 owner: None,
             },
             // **Named rather than made** for an external content table: the
@@ -238,13 +236,12 @@ impl Module for Fts5Module {
             },
             ShadowTable {
                 suffix: b"docsize".to_vec(),
-                create_sql: "CREATE TABLE \"%_docsize\"(id INTEGER PRIMARY KEY, sz BLOB)"
-                    .to_string(),
+                create_sql: "CREATE TABLE '%_docsize'(id INTEGER PRIMARY KEY, sz BLOB)".to_string(),
                 owner: None,
             },
             ShadowTable {
                 suffix: b"config".to_vec(),
-                create_sql: "CREATE TABLE \"%_config\"(k PRIMARY KEY, v) WITHOUT ROWID".to_string(),
+                create_sql: "CREATE TABLE '%_config'(k PRIMARY KEY, v) WITHOUT ROWID".to_string(),
                 owner: None,
             },
         ]

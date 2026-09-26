@@ -528,6 +528,13 @@ impl crate::ImportedDatabase {
                 .all(|table| table.folded.starts_with(b"sqlite_"))
             {
                 self.pragmas.set_auto_vacuum(mode);
+                // Into the file as well, and checkpointed for the reason
+                // `user_version` is: the meta page is not in the log, and
+                // SQLite reads the mode back on the next open.
+                if self.storage.database.auto_vacuum() != mode {
+                    self.storage.database.set_auto_vacuum(mode);
+                    self.checkpoint()?;
+                }
             }
         }
         Ok(Outcome::empty())
@@ -618,9 +625,9 @@ impl crate::ImportedDatabase {
         if asked != self.pragmas.automatic_index() {
             self.forget_compiled_statements();
         }
-        self.pragmas.set_automatic_index(asked);
-        // The planner reads the lever, not the field: a plan carries the levers
-        // it was built under, so the two have to move together.
+        // One call sets both the field the read reports and the lever the
+        // planner reads: a plan carries the levers it was built under, so the
+        // two have to move together.
         self.pragmas.set_automatic_index(asked);
         Ok(Outcome::empty())
     }
@@ -636,12 +643,14 @@ impl crate::ImportedDatabase {
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            // **Zero, whatever was set.** It is what the reference reads back
-            // too - it clears the flag as soon as the schema is re-read - and
-            // here it is the literal truth: there is nothing this engine's
-            // catalog will let a statement write with the flag on that it
-            // refuses with it off.
-            return Ok(named_integer("writable_schema", 0));
+            // **What was set.** The pinned SQLite reads back 1 after
+            // `PRAGMA writable_schema = ON` on the same connection; this used
+            // to answer 0 whatever was set, which the matrix case
+            // `probe-prag.schema.switches` found.
+            return Ok(named_integer(
+                "writable_schema",
+                i64::from(self.pragmas.writable_schema()),
+            ));
         };
         self.pragmas.set_writable_schema(argument_boolean(argument));
         Ok(Outcome::empty())
@@ -719,4 +728,170 @@ impl crate::ImportedDatabase {
         });
         Ok(Outcome::empty())
     }
+}
+
+impl crate::ImportedDatabase {
+    /// Reads one setting pragma's value, under `&self`.
+    ///
+    /// **The one read path for a setting, whichever way it is asked.** `PRAGMA
+    /// user_version` with no argument and `SELECT * FROM pragma_user_version`
+    /// both come here: the directive form through [`Self::pragma`], and the
+    /// table-valued form from inside a virtual-table scan, which runs under
+    /// `&self` and cannot reach the `&mut self` setters at all. SQLite gives
+    /// every pragma that returns a value a `pragma_<name>` function, and the
+    /// settings had none here, so `SELECT * FROM pragma_user_version` was
+    /// "no such table".
+    ///
+    /// `Ok(None)` means `name` is not a setting this function reads.
+    ///
+    /// @param name - the pragma's folded name
+    /// @param at - the attached database it was qualified with, `None` for
+    ///             `main`
+    pub(crate) fn pragma_setting_read(
+        &self,
+        name: &[u8],
+        at: Option<usize>,
+    ) -> DbResult<Option<Outcome>> {
+        let flag = |column: &str, value: bool| Some(named_integer(column, i64::from(value)));
+        Ok(match name {
+            b"analysis_limit" => Some(named_integer(
+                "analysis_limit",
+                self.pragmas.analysis_limit(),
+            )),
+            b"application_id" => Some(named_integer(
+                "application_id",
+                i64::from(self.file_of(at)?.application_id()),
+            )),
+            b"auto_vacuum" => Some(named_integer(
+                "auto_vacuum",
+                i64::from(self.pragmas.auto_vacuum()),
+            )),
+            b"automatic_index" => flag("automatic_index", self.pragmas.automatic_index()),
+            b"busy_timeout" => Some(named_integer(
+                "timeout",
+                self.pragmas.busy_timeout_ms() as i64,
+            )),
+            b"cache_size" | b"default_cache_size" => {
+                let page_size = self.storage.page_size.max(1);
+                let bytes = self.storage.frames.saturating_mul(page_size);
+                Some(named_integer(
+                    "cache_size",
+                    self.pragmas
+                        .cache_size()
+                        .unwrap_or(-((bytes / 1024) as i64)),
+                ))
+            }
+            b"data_version" => Some(named_integer("data_version", 1)),
+            b"defer_foreign_keys" => flag("defer_foreign_keys", self.pragmas.defer_foreign_keys()),
+            b"encoding" => Some(word_row("encoding", "UTF-8")),
+            b"foreign_keys" => flag("foreign_keys", self.pragmas.foreign_keys()),
+            b"freelist_count" => Some(named_integer(
+                "freelist_count",
+                self.file_of(at)?.free_pages() as i64,
+            )),
+            b"ignore_check_constraints" => flag(
+                "ignore_check_constraints",
+                self.pragmas.ignore_check_constraints(),
+            ),
+            b"journal_mode" => Some(word_row("journal_mode", self.pragmas.journal_mode().word())),
+            b"locking_mode" => Some(word_row("locking_mode", self.locking_word())),
+            b"max_page_count" => Some(named_integer(
+                "max_page_count",
+                self.pragmas.max_page_count(),
+            )),
+            b"page_count" => Some(named_integer(
+                "page_count",
+                self.file_of(at)?.pool().page_count() as i64,
+            )),
+            b"page_size" => Some(named_integer("page_size", self.storage.page_size as i64)),
+            b"query_only" => flag("query_only", self.pragmas.query_only()),
+            b"recursive_triggers" => flag("recursive_triggers", self.pragmas.recursive_triggers()),
+            b"schema_version" => Some(named_integer(
+                "schema_version",
+                i64::from(self.file_of(at)?.schema_cookie()),
+            )),
+            b"secure_delete" => Some(named_integer(
+                "secure_delete",
+                i64::from(self.pragmas.secure_delete()),
+            )),
+            b"synchronous" => Some(named_integer(
+                "synchronous",
+                match self.storage.wal.synchronous() {
+                    Synchronous::Off => 0,
+                    Synchronous::Normal => 1,
+                    Synchronous::Full => 2,
+                },
+            )),
+            b"temp_store" => Some(named_integer("temp_store", self.pragmas.temp_store())),
+            b"trusted_schema" => flag(
+                "trusted_schema",
+                self.session_state.registry.policy().trusted_schema,
+            ),
+            b"user_version" => Some(named_integer(
+                "user_version",
+                i64::from(self.file_of(at)?.user_version()),
+            )),
+            b"writable_schema" => flag("writable_schema", self.pragmas.writable_schema()),
+            other => reported_value(other)
+                .map(|(value, _)| named_integer(&String::from_utf8_lossy(other), value)),
+        })
+    }
+}
+
+/// Returns the column a setting pragma's `pragma_<name>` function reports, and
+/// whether the function takes a `schema` argument.
+///
+/// SQLite's `pragma.h` for 3.53.4: every pragma flagged `Result0` has a
+/// function, its one column is named after the pragma except where the table
+/// names another (`busy_timeout` answers `timeout`, `default_cache_size`
+/// answers `cache_size`), and the function has a hidden `schema` column only
+/// when the pragma takes a schema.
+///
+/// @param name - the pragma's folded name
+pub(crate) fn setting_function_column(name: &str) -> Option<(&'static str, bool)> {
+    Some(match name {
+        "analysis_limit" => ("analysis_limit", false),
+        "application_id" => ("application_id", false),
+        "auto_vacuum" => ("auto_vacuum", true),
+        "automatic_index" => ("automatic_index", false),
+        "busy_timeout" => ("timeout", false),
+        "cache_size" => ("cache_size", true),
+        "cache_spill" => ("cache_spill", true),
+        "cell_size_check" => ("cell_size_check", false),
+        "checkpoint_fullfsync" => ("checkpoint_fullfsync", false),
+        "count_changes" => ("count_changes", false),
+        "data_version" => ("data_version", false),
+        "default_cache_size" => ("cache_size", true),
+        "defer_foreign_keys" => ("defer_foreign_keys", false),
+        "empty_result_callbacks" => ("empty_result_callbacks", false),
+        "encoding" => ("encoding", false),
+        "foreign_keys" => ("foreign_keys", false),
+        "freelist_count" => ("freelist_count", false),
+        "full_column_names" => ("full_column_names", false),
+        "fullfsync" => ("fullfsync", false),
+        "hard_heap_limit" => ("hard_heap_limit", false),
+        "ignore_check_constraints" => ("ignore_check_constraints", false),
+        "journal_mode" => ("journal_mode", true),
+        "journal_size_limit" => ("journal_size_limit", true),
+        "legacy_alter_table" => ("legacy_alter_table", false),
+        "locking_mode" => ("locking_mode", true),
+        "max_page_count" => ("max_page_count", true),
+        "page_count" => ("page_count", true),
+        "page_size" => ("page_size", true),
+        "query_only" => ("query_only", false),
+        "read_uncommitted" => ("read_uncommitted", false),
+        "recursive_triggers" => ("recursive_triggers", false),
+        "reverse_unordered_selects" => ("reverse_unordered_selects", false),
+        "schema_version" => ("schema_version", false),
+        "secure_delete" => ("secure_delete", false),
+        "short_column_names" => ("short_column_names", false),
+        "soft_heap_limit" => ("soft_heap_limit", false),
+        "synchronous" => ("synchronous", true),
+        "temp_store" => ("temp_store", false),
+        "threads" => ("threads", false),
+        "trusted_schema" => ("trusted_schema", false),
+        "user_version" => ("user_version", false),
+        "writable_schema" => ("writable_schema", false),
+        _ => return None,
+    })
 }

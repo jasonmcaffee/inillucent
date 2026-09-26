@@ -78,7 +78,7 @@ impl crate::ImportedDatabase {
     ///   the answer is reported under
     /// @param depth - how much of the file that name reads
     pub(crate) fn pragma_integrity_check(
-        &mut self,
+        &self,
         column: &str,
         depth: CheckDepth,
     ) -> DbResult<Outcome> {
