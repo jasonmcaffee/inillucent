@@ -1,0 +1,123 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/limit.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2),(3)
+
+case lim-001
+
+query I nosort
+SELECT a FROM t ORDER BY a LIMIT -1
+
+case lim-002
+
+query T nosort
+SELECT a FROM t ORDER BY a LIMIT 0
+
+case lim-003
+
+query I nosort
+SELECT a FROM t ORDER BY a LIMIT 2 OFFSET -1
+
+case lim-004
+capability computed_limit
+
+query I nosort
+SELECT a FROM t ORDER BY a LIMIT 1+1
+
+case lim-005
+capability computed_limit
+
+query I nosort
+SELECT a FROM t ORDER BY a LIMIT '2'
+
+case lim-006
+
+statement error
+SELECT a FROM t ORDER BY a LIMIT 2.7
+
+case lim-007
+
+statement error
+SELECT a FROM t ORDER BY a LIMIT NULL
+
+case lim-008
+
+query I nosort
+SELECT a FROM t ORDER BY a LIMIT 1,2
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(3),(1),(2)
+
+case lim-009
+
+query I nosort
+SELECT a AS x FROM t ORDER BY x
+
+case lim-010
+
+query I nosort
+SELECT a*-1 AS x FROM t ORDER BY 1
+
+case lim-011
+
+statement error
+SELECT a FROM t ORDER BY 2
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+INSERT INTO t VALUES(1,'z'),(1,'a'),(2,'m')
+
+case lim-012
+
+query IT nosort
+SELECT a,b FROM t ORDER BY a, b DESC
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+case lim-013
+
+query I nosort
+SELECT a AS a FROM t ORDER BY -a
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2),(3)
+
+case lim-014
+
+query I nosort
+SELECT a FROM t ORDER BY a LIMIT 9223372036854775807
+
+setup
+
+case lim-015
+
+query T rowsort
+SELECT 1 LIMIT 1 OFFSET 9223372036854775807
+

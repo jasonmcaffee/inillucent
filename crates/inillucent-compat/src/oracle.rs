@@ -315,6 +315,14 @@ impl Driver {
         &self.name
     }
 
+    /// Returns what the driver process has cost so far.
+    ///
+    /// The statement matrix measures its cost per case, and half of each case
+    /// runs in this child, where the test process's own clock cannot see it.
+    pub fn cost(&self) -> crate::procstat::ProcessCost {
+        crate::procstat::child_cost(&self.child)
+    }
+
     /// Sends one command and returns what the driver reported.
     pub fn send(&mut self, op: &Op) -> Result<Observation, String> {
         writeln!(self.input, "{}", op.to_json())
@@ -504,7 +512,18 @@ fn string_list(line: &str, key: &str) -> Vec<String> {
     let mut escaped = false;
     for character in body.chars() {
         if escaped {
-            current.push(character);
+            // The driver escapes a newline, a tab and a carriage return the
+            // way JSON does. Pushing the letter after the backslash made a
+            // column named for an expression holding a newline read `anb`
+            // where SQLite had said `a` newline `b`, which the statement
+            // matrix reported as a column name difference that was the
+            // harness's own.
+            current.push(match character {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                other => other,
+            });
             escaped = false;
             continue;
         }

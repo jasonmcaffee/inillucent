@@ -1,0 +1,263 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/affinity2.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(n, i INTEGER, r REAL, s TEXT, b BLOB, m NUMERIC)
+
+statement ok
+INSERT INTO t VALUES(1,1,1,'1',1,1)
+
+case cma-001
+
+query IIIII rowsort
+SELECT n=i, n=r, n=s, n=b, n=m FROM t
+
+case cma-002
+
+query IIIII rowsort
+SELECT i=s, r=s, m=s, b=s, s=b FROM t
+
+case cma-003
+
+query IIIII rowsort
+SELECT i=n, s=n, s=i, s=r, s=m FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a,b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case cma-004
+
+query IIIIII rowsort
+SELECT a=b, a<b, a>b, a<=b, a>=b, a<>b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case cma-005
+
+query IIII rowsort
+SELECT a=b, a<b, a>b, a<>b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'x')
+
+case cma-006
+
+query III rowsort
+SELECT a=b, a<b, a>b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT)
+
+statement ok
+INSERT INTO t VALUES('1')
+
+case cma-007
+
+query III rowsort
+SELECT a=1, a<2, a>0 FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case cma-008
+
+query III rowsort
+SELECT a='1', a<'2', a>'0' FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case cma-009
+
+query II rowsort
+SELECT a='1', a=1 FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a,b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case cma-010
+
+query I rowsort
+SELECT count(*) FROM t WHERE a=b
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case cma-011
+
+query I rowsort
+SELECT count(*) FROM t WHERE a=b
+
+setup
+
+statement ok
+CREATE TABLE l(a INTEGER)
+
+statement ok
+CREATE TABLE r(b TEXT)
+
+statement ok
+INSERT INTO l VALUES(1)
+
+statement ok
+INSERT INTO r VALUES('1')
+
+case cma-012
+
+query I rowsort
+SELECT count(*) FROM l JOIN r ON l.a=r.b
+
+setup
+
+statement ok
+CREATE TABLE l(a)
+
+statement ok
+CREATE TABLE r(b TEXT)
+
+statement ok
+INSERT INTO l VALUES(1)
+
+statement ok
+INSERT INTO r VALUES('1')
+
+case cma-013
+
+query I rowsort
+SELECT count(*) FROM l JOIN r ON l.a=r.b
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+case cma-014
+
+query I rowsort
+SELECT count(*) FROM t WHERE a IN ('1','2')
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT)
+
+statement ok
+INSERT INTO t VALUES('1')
+
+case cma-015
+
+query I rowsort
+SELECT count(*) FROM t WHERE a IN (1)
+
+setup
+
+statement ok
+CREATE TABLE t(a,b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case cma-016
+
+query I rowsort
+SELECT count(*) FROM t WHERE a BETWEEN b AND b
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case cma-017
+
+query I rowsort
+SELECT count(*) FROM t WHERE a BETWEEN b AND b
+
+setup
+
+statement ok
+CREATE TABLE t(a,b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case cma-018
+
+query II rowsort
+SELECT a IS b, a IS NOT b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case cma-019
+
+query I rowsort
+SELECT a IS b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a BLOB, b TEXT)
+
+statement ok
+INSERT INTO t VALUES('1','1')
+
+case cma-020
+
+query ITT rowsort
+SELECT a=b, typeof(a), typeof(b) FROM t
+

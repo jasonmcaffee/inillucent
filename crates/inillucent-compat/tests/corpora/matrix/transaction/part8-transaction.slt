@@ -1,0 +1,200 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/transaction.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+case txn-001
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES(1)
+
+statement ok
+ROLLBACK
+
+query I rowsort
+SELECT count(*) FROM t
+
+case txn-002
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES(1)
+
+statement ok
+COMMIT
+
+query I rowsort
+SELECT count(*) FROM t
+
+case txn-003
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES(1)
+
+statement ok
+SAVEPOINT s
+
+statement ok
+INSERT INTO t VALUES(2)
+
+statement ok
+ROLLBACK TO s
+
+statement ok
+COMMIT
+
+query I rowsort
+SELECT count(*) FROM t
+
+case txn-004
+
+statement ok
+SAVEPOINT s
+
+statement ok
+INSERT INTO t VALUES(1)
+
+statement ok
+RELEASE s
+
+query I rowsort
+SELECT count(*) FROM t
+
+case txn-005
+
+statement ok
+SAVEPOINT s
+
+statement ok
+INSERT INTO t VALUES(1)
+
+statement ok
+ROLLBACK TO s
+
+statement ok
+RELEASE s
+
+query I rowsort
+SELECT count(*) FROM t
+
+case txn-006
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES(1)
+
+query I rowsort
+SELECT count(*) FROM t
+
+statement ok
+ROLLBACK
+
+setup
+
+case txn-007
+
+statement ok
+BEGIN
+
+statement error
+BEGIN
+
+case txn-008
+
+statement error
+COMMIT
+
+setup
+
+statement ok
+CREATE TABLE t(a UNIQUE)
+
+case txn-009
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES(1)
+
+statement error
+INSERT INTO t VALUES(1)
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+case txn-010
+
+statement ok
+BEGIN
+
+statement ok
+CREATE TABLE u(b)
+
+statement ok
+ROLLBACK
+
+query I rowsort
+SELECT count(*) FROM sqlite_schema WHERE name='u'
+
+case txn-011
+
+statement ok
+SAVEPOINT s1
+
+statement ok
+INSERT INTO t VALUES(1)
+
+statement ok
+SAVEPOINT s2
+
+statement ok
+INSERT INTO t VALUES(2)
+
+statement ok
+ROLLBACK TO s1
+
+statement ok
+RELEASE s1
+
+query I rowsort
+SELECT count(*) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case txn-012
+
+statement ok
+BEGIN
+
+statement ok
+UPDATE t SET a=2
+
+statement ok
+ROLLBACK
+
+query I rowsort
+SELECT a FROM t
+

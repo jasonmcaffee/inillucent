@@ -1,0 +1,143 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-filter-clause-p0
+
+query I rowsort
+SELECT count(*) FILTER (WHERE a > 1) FROM t
+
+case syntax-filter-clause-n1
+
+statement error
+SELECT count(*) FILTER (a > 1) FROM t
+
+case syntax-frame-spec-p0
+
+query I rowsort
+SELECT count(*) OVER (ROWS UNBOUNDED PRECEDING) FROM t
+
+case syntax-frame-spec-p1
+
+statement error
+SELECT count(*) OVER (RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t
+
+case syntax-frame-spec-p2
+
+query I rowsort
+SELECT count(*) OVER (GROUPS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING EXCLUDE TIES) FROM t
+
+case syntax-frame-spec-p3
+
+query I rowsort
+SELECT count(*) OVER (ROWS CURRENT ROW EXCLUDE NO OTHERS) FROM t
+
+case syntax-frame-spec-p4
+
+query I rowsort
+SELECT count(*) OVER (ROWS UNBOUNDED PRECEDING EXCLUDE GROUP) FROM t
+
+case syntax-frame-spec-p5
+
+query I rowsort
+SELECT count(*) OVER (ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW) FROM t
+
+case syntax-frame-spec-n6
+
+statement error
+SELECT count(*) OVER (ROWS BETWEEN 1 PRECEDING) FROM t
+
+case syntax-over-clause-p0
+
+query I rowsort
+SELECT count(*) OVER w FROM t WINDOW w AS (PARTITION BY a)
+
+case syntax-over-clause-p1
+
+query I rowsort
+SELECT count(*) OVER () FROM t
+
+case syntax-over-clause-p2
+
+query I rowsort
+SELECT count(*) OVER (PARTITION BY a ORDER BY b) FROM t
+
+case syntax-over-clause-p3
+
+query I rowsort
+SELECT count(*) OVER (w ORDER BY b) FROM t WINDOW w AS (PARTITION BY a)
+
+case syntax-window-defn-p0
+
+query I rowsort
+SELECT 1 FROM t WINDOW w AS ()
+
+case syntax-window-defn-p1
+
+query I rowsort
+SELECT 1 FROM t WINDOW w AS (PARTITION BY a ORDER BY b ROWS UNBOUNDED PRECEDING)
+
+case syntax-window-defn-p2
+
+query I rowsort
+SELECT 1 FROM t WINDOW w AS (base PARTITION BY a), v AS (w)
+
+case syntax-window-defn-n3
+
+statement error
+SELECT 1 FROM t WINDOW w
+
+case syntax-window-function-invocation-p0
+
+query I rowsort
+SELECT row_number() OVER () FROM t
+
+case syntax-window-function-invocation-p1
+
+query I rowsort
+SELECT sum(a) FILTER (WHERE a > 0) OVER (PARTITION BY b) FROM t
+
+case syntax-window-function-invocation-p2
+
+query I rowsort
+SELECT count(*) OVER w FROM t WINDOW w AS ()
+

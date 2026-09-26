@@ -1,0 +1,32 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2089.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case collate-scalar-subquery
+
+query I rowsort
+SELECT (SELECT 'a' COLLATE NOCASE) = 'A' AS v
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C')
+
+case collate-group-by
+
+query TI rowsort
+SELECT lower(k), c FROM (SELECT s COLLATE NOCASE || '' AS k, count(*) AS c FROM t GROUP BY s COLLATE NOCASE || '') ORDER BY 1
+
+case collate-distinct
+
+query I rowsort
+SELECT count(*) FROM (SELECT DISTINCT s COLLATE NOCASE || '' FROM t)
+
+case collate-subquery-column
+
+query T nosort
+SELECT c FROM (SELECT s COLLATE NOCASE || '' AS c, id FROM t) WHERE c = 'a' ORDER BY id
+

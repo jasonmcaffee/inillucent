@@ -1,0 +1,189 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, tid INTEGER, w TEXT)
+
+statement ok
+INSERT INTO u VALUES (1,1,'aa'),(2,2,'bb'),(3,9,'cc')
+
+case probe-join.inner
+
+query IT rowsort
+SELECT t.id, u.w FROM t JOIN u ON u.tid = t.id ORDER BY t.id
+
+case probe-join.left
+
+query IT rowsort
+SELECT t.id, u.w FROM t LEFT JOIN u ON u.tid = t.id ORDER BY t.id
+
+case probe-join.right
+
+query TT nosort
+SELECT t.id, u.w FROM t RIGHT JOIN u ON u.tid = t.id ORDER BY t.id, u.id
+
+case probe-join.full
+
+query TT nosort
+SELECT t.id, u.w FROM t FULL JOIN u ON u.tid = t.id ORDER BY t.id, u.id
+
+case probe-join.cross
+
+query I rowsort
+SELECT count(*) FROM t CROSS JOIN u
+
+setup
+
+statement ok
+CREATE TABLE a(k INTEGER, x TEXT)
+
+statement ok
+CREATE TABLE b(k INTEGER, y TEXT)
+
+statement ok
+INSERT INTO a VALUES (1,'p'),(2,'q')
+
+statement ok
+INSERT INTO b VALUES (1,'m'),(3,'n')
+
+case probe-join.natural
+
+query ITT rowsort
+SELECT * FROM a NATURAL JOIN b ORDER BY k
+
+case probe-join.using
+
+query ITT rowsort
+SELECT * FROM a JOIN b USING (k) ORDER BY k
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-join.self
+
+query II rowsort
+SELECT x.id, y.id FROM t x JOIN t y ON y.a = x.a AND y.id > x.id ORDER BY x.id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, tid INTEGER, w TEXT)
+
+statement ok
+INSERT INTO u VALUES (1,1,'aa'),(2,2,'bb'),(3,9,'cc')
+
+statement ok
+CREATE TABLE v(id INTEGER PRIMARY KEY, uid INTEGER)
+
+statement ok
+INSERT INTO v VALUES (1,1),(2,2)
+
+statement ok
+CREATE TABLE w(id INTEGER PRIMARY KEY, vid INTEGER)
+
+statement ok
+INSERT INTO w VALUES (1,1),(2,2)
+
+case probe-join.four
+
+query ITII rowsort
+SELECT t.id, u.w, v.id, w.id FROM t JOIN u ON u.tid=t.id JOIN v ON v.uid=u.id JOIN w ON w.vid=v.id ORDER BY t.id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, tid INTEGER, w TEXT)
+
+statement ok
+INSERT INTO u VALUES (1,1,'aa'),(2,2,'bb'),(3,9,'cc')
+
+case probe-join.left.where
+
+query I nosort
+SELECT t.id FROM t LEFT JOIN u ON u.tid=t.id WHERE u.w IS NULL ORDER BY t.id
+
+case probe-join.comma
+
+query IT rowsort
+SELECT t.id, u.w FROM t, u WHERE u.tid = t.id ORDER BY t.id
+
+case probe-join.left.subquery
+
+query II rowsort
+SELECT t.id, s.n FROM t LEFT JOIN (SELECT tid, count(*) n FROM u GROUP BY tid) s ON s.tid = t.id ORDER BY t.id
+
+setup
+
+statement ok
+CREATE TABLE a(k INTEGER, x TEXT)
+
+statement ok
+CREATE TABLE b(k INTEGER, y TEXT)
+
+statement ok
+INSERT INTO a VALUES (1,'p'),(2,'q')
+
+statement ok
+INSERT INTO b VALUES (1,'m')
+
+case probe-join.left.using
+
+query ITT rowsort
+SELECT k, x, y FROM a LEFT JOIN b USING (k) ORDER BY k
+
+case probe-join.natural.left
+
+query ITT rowsort
+SELECT * FROM a NATURAL LEFT JOIN b ORDER BY k
+
+setup
+
+statement ok
+CREATE TABLE a(k INTEGER, x TEXT)
+
+statement ok
+CREATE TABLE b(k INTEGER, y TEXT)
+
+statement ok
+CREATE TABLE c(k INTEGER, z TEXT)
+
+statement ok
+INSERT INTO a VALUES (1,'p')
+
+statement ok
+INSERT INTO b VALUES (1,'q')
+
+statement ok
+INSERT INTO c VALUES (1,'r')
+
+case probe-join.using.three
+
+query ITTT rowsort
+SELECT * FROM a JOIN b USING (k) JOIN c USING (k)
+

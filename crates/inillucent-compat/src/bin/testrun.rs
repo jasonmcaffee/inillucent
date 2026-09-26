@@ -610,7 +610,7 @@ fn executables_for(
         std::env::set_var(testplan::ARTIFACTS_VARIABLE, file);
         let mut built = pick(&read_artifact_list(file)?, selected)?;
         list_module_tests(&mut built, options.filter.as_deref())?;
-        return Ok(built);
+        return Ok(split_shards(built, map));
     }
     let to_build = testplan::build_set(map, selected);
     // Before either cargo call, because `locate` compiles too: it asks cargo
@@ -624,7 +624,34 @@ fn executables_for(
     std::env::set_var(testplan::ARTIFACTS_VARIABLE, &file);
     let mut built = pick(&located, selected)?;
     list_module_tests(&mut built, options.filter.as_deref())?;
-    Ok(built)
+    Ok(split_shards(built, map))
+}
+
+/// Replaces each target whose row says `shards = N` with its `N` shards.
+///
+/// Every shard runs the same test names; the suite reads `INILLUCENT_SHARD`,
+/// which `run_process` sets from the shard's label, and keeps its own share of
+/// the work. A shard is a target of its own everywhere after this: its own
+/// process, its own line in the report, its own timing row.
+///
+/// @param built - the located targets, with their test names listed
+/// @param map - the selection map, which holds each row's shard count
+fn split_shards(built: Vec<Built>, map: &Map) -> Vec<Built> {
+    let mut out = Vec::with_capacity(built.len());
+    for one in built {
+        let count = map.row(&one.target).map(|row| row.shards).unwrap_or(1);
+        if count <= 1 || one.target.module.is_none() {
+            out.push(one);
+            continue;
+        }
+        for index in 0..count {
+            out.push(Built {
+                target: one.target.shard(index, count),
+                ..one.clone()
+            });
+        }
+    }
+    out
 }
 
 /// Fills in each module target's test names, listing each binary once.
@@ -1819,6 +1846,17 @@ fn run_process(
         // is unset for an ordinary run, so a developer without the oracle still
         // gets a green suite that says what it skipped (task-1932, H10).
         .env("INILLUCENT_STRICT", if strict { "1" } else { "" })
+        // Which share of its cases a sharded suite keeps; see `split_shards`.
+        // Every child gets the variable, set or empty, so a shard count cannot
+        // leak in from the shell that started the runner.
+        .env(
+            "INILLUCENT_SHARD",
+            built
+                .target
+                .shard_of()
+                .map(|(index, count)| format!("{index}/{count}"))
+                .unwrap_or_default(),
+        )
         // **`--show-output`, or `--strict` cannot see a skip at all.**
         // libtest swallows the output of a test that *passes*, and
         // a suite whose prerequisite is absent passes - that is the whole shape

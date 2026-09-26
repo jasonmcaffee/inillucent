@@ -1,0 +1,42 @@
+# The matrix cases that disagree with the pinned SQLite 3.53.4 because of a
+# defect that is not fixed yet.
+#
+# One per line: the case id, a tab, the bug's number in the description of
+# task-2136 ("Inillucent Test Suite Bugs Found"), a tab, and one sentence.
+#
+# A listed case that still disagrees passes. A listed case that now agrees at
+# every arm it ran at fails, with a message saying to take its line off: a fix
+# cannot land without this list shrinking. A listed id that no case has fails
+# `matrix::lists`. Differences that are not defects are rules in
+# deliberate.toml, not lines here.
+
+txn-007	1	BEGIN inside a transaction fails with result code 21 where SQLite gives 1.
+txn-008	1	COMMIT with no transaction fails with result code 21 where SQLite gives 1.
+probe-txn.begin.nested	1	BEGIN inside a transaction fails with result code 21 where SQLite gives 1.
+probe-txn.commit.none	1	COMMIT with no transaction fails with result code 21 where SQLite gives 1.
+probe-alter.add.notnull.nodefault	2	ALTER TABLE ADD COLUMN NOT NULL with no default fails with code 21 where SQLite gives 1.
+probe-lim.attach	3	An ATTACH past the limit of ten fails with code 21 where SQLite gives 1.
+t2066-012	4	LIKE with an empty ESCAPE fails with code 21 where SQLite gives 1.
+t2066-014	4	LIKE with a two character ESCAPE fails with code 21 where SQLite gives 1.
+lim-006	5	LIMIT 2.7 fails with code 21 and a not built message where SQLite gives 20, datatype mismatch.
+lim-007	5	LIMIT NULL fails with code 21 and a not built message where SQLite gives 20, datatype mismatch.
+t2134-vgi-004	6	CREATE UNIQUE INDEX over duplicate values fails with code 21 where SQLite gives 19, a constraint.
+fk-004	7	A DELETE refused by ON DELETE RESTRICT reports extended code 787 where SQLite reports 1811.
+probe-ddl.table.as.select	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
+probe-temp.as.select	8	changes() after CREATE TEMP TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
+syntax-create-table-stmt-p5	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
+trg-010	9	After an INSERT undone by RAISE(ROLLBACK), last_insert_rowid() is 0 where SQLite gives the undone row's rowid.
+trg-005	10	After a multi row INSERT whose trigger skips a row with RAISE(IGNORE), last_insert_rowid() differs from SQLite's.
+syntax-returning-clause-p2	11	UPDATE ... RETURNING t.* is accepted where SQLite refuses a table wildcard in RETURNING.
+syntax-alter-table-stmt-p5	12	ALTER TABLE DROP COLUMN succeeds while a view uses the column; SQLite refuses it.
+syntax-alter-table-stmt-p6	12	ALTER TABLE DROP (without COLUMN) succeeds while a view uses the column; SQLite refuses it.
+syntax-column-constraint-n10	13	CREATE TABLE t (a CONSTRAINT c) is a syntax error where SQLite accepts a named empty constraint.
+syntax-comment-p0	14	A result column followed by a trailing -- comment is named without the comment; SQLite's name includes it.
+syntax-comment-p2	14	A result column followed by an unterminated /* comment is named without the comment; SQLite's name includes it.
+probe-prag.maintenance	15	PRAGMA optimize reports no result column where SQLite reports one named optimize.
+temp-schema-names	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+probe-temp.not.main	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+probe-prag.autovacuum	17	PRAGMA auto_vacuum set on a new file reads back 0 after a reopen where SQLite keeps the setting.
+probe-prag.schema.switches	18	PRAGMA writable_schema reads back 0 after it is set on; SQLite reads back 1.
+ms-006	19	UPDATE t SET (a, b) = (3, 4) is refused as unsupported and no capability row says the engine lacks it.
+syntax-update-stmt-p2	19	UPDATE t SET (a, b) = (SELECT 1, 2) is refused as unsupported and no capability row says the engine lacks it.

@@ -1,0 +1,141 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/todo.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE list (id INTEGER PRIMARY KEY, name TEXT)
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, list_id INTEGER, parent_id INTEGER, completed INTEGER, position INTEGER)
+
+statement ok
+INSERT INTO list VALUES (1, 'Home'), (2, 'Work'), (3, 'Empty')
+
+statement ok
+INSERT INTO todo VALUES (1, 1, NULL, 0, 1), (2, 1, NULL, 1, 2), (3, 2, NULL, 0, 1), (4, 1, 1, 0, 1), (5, 9, NULL, 0, 1)
+
+statement ok
+CREATE INDEX todo_list ON todo (list_id)
+
+case left-extra-on-isnull
+
+query II nosort
+SELECT l.id, t.id FROM list l LEFT JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL ORDER BY l.id, t.id
+
+case left-extra-on-equal
+
+query II nosort
+SELECT l.id, t.id FROM list l LEFT JOIN todo t ON t.list_id = l.id AND t.completed = 0 ORDER BY l.id, t.id
+
+setup
+
+statement ok
+CREATE TABLE list (id INTEGER PRIMARY KEY, name TEXT)
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, list_id INTEGER, parent_id INTEGER, completed INTEGER, position INTEGER)
+
+statement ok
+INSERT INTO list VALUES (1, 'Home'), (2, 'Work'), (3, 'Empty')
+
+statement ok
+INSERT INTO todo VALUES (1, 1, NULL, 0, 1), (2, 1, NULL, 1, 2), (3, 2, NULL, 0, 1), (4, 1, 1, 0, 1), (5, 9, NULL, 0, 1)
+
+statement ok
+CREATE INDEX todo_list_pos ON todo (list_id, position)
+
+case left-extra-on-two-column-index
+
+query II nosort
+SELECT l.id, t.id FROM list l LEFT JOIN todo t ON t.list_id = l.id AND t.completed = 0 ORDER BY l.id, t.id
+
+case left-extra-on-two-column-index-isnull
+
+query II nosort
+SELECT l.id, t.id FROM list l LEFT JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL ORDER BY l.id, t.id
+
+case left-extra-on-index-column
+
+query II nosort
+SELECT l.id, t.id FROM list l LEFT JOIN todo t ON t.list_id = l.id AND t.position = 1 ORDER BY l.id, t.id
+
+setup
+
+statement ok
+CREATE TABLE list (id INTEGER PRIMARY KEY, name TEXT)
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, list_id INTEGER, parent_id INTEGER, completed INTEGER, position INTEGER)
+
+statement ok
+INSERT INTO list VALUES (1, 'Home'), (2, 'Work'), (3, 'Empty')
+
+statement ok
+INSERT INTO todo VALUES (1, 1, NULL, 0, 1), (2, 1, NULL, 1, 2), (3, 2, NULL, 0, 1), (4, 1, 1, 0, 1), (5, 9, NULL, 0, 1)
+
+statement ok
+CREATE INDEX todo_list ON todo (list_id)
+
+case left-extra-on-as-inner
+
+query II nosort
+SELECT l.id, t.id FROM list l JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL ORDER BY l.id, t.id
+
+case left-extra-in-where
+
+query II nosort
+SELECT l.id, t.id FROM list l LEFT JOIN todo t ON t.list_id = l.id WHERE t.parent_id IS NULL ORDER BY l.id, t.id
+
+case left-extra-on-count
+
+query II rowsort
+SELECT l.id, count(t.id) FROM list l LEFT JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL GROUP BY l.id ORDER BY l.id
+
+case left-extra-on-reads-outer
+
+query II nosort
+SELECT l.id, t.id FROM list l LEFT JOIN todo t ON t.list_id = l.id AND l.name = 'Home' ORDER BY l.id, t.id
+
+case left-extra-on-three-terms
+
+query III rowsort
+SELECT l.id, t.id, t.position FROM list l LEFT JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL AND t.position > 1 ORDER BY l.id, t.id
+
+case left-extra-on-null-rows
+
+query I nosort
+SELECT l.id FROM list l LEFT JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL WHERE t.id IS NULL ORDER BY l.id
+
+case left-extra-on-chained
+
+query III nosort
+SELECT l.id, t.id, c.id FROM list l LEFT JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL LEFT JOIN todo c ON c.parent_id = t.id AND c.completed = 0 ORDER BY l.id, t.id, c.id
+
+case right-join-index
+
+query II rowsort
+SELECT l.id, t.id FROM list l RIGHT JOIN todo t ON t.list_id = l.id ORDER BY t.id
+
+case full-join-index-extra-on
+
+query TI nosort
+SELECT l.id, t.id FROM list l FULL JOIN todo t ON t.list_id = l.id AND t.parent_id IS NULL ORDER BY l.id, t.id
+
+setup
+
+statement ok
+CREATE TABLE tag (id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO tag (name) VALUES ('outdoor'), ('Repairs'), ('apple'), ('Zebra'), (NULL)
+
+statement ok
+CREATE INDEX tag_name ON tag (name)
+
+case minmax-indexed
+
+query TT rowsort
+SELECT max(name), min(name) FROM tag
+

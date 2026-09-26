@@ -1,0 +1,52 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/uniondup.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case und-001
+
+query R rowsort
+SELECT 1 AS a UNION SELECT 1.0
+
+case und-002
+
+query I rowsort
+SELECT 1.0 AS a UNION SELECT 1
+
+case und-003
+
+query I rowsort
+SELECT 1 AS a UNION SELECT 1.0 UNION SELECT 1
+
+case und-004
+
+query R nosort
+SELECT 2 AS a UNION SELECT 2.0 ORDER BY a
+
+case und-005
+
+query I rowsort
+SELECT 1 AS a INTERSECT SELECT 1.0
+
+case und-006
+
+query T rowsort
+SELECT 1.0 AS a EXCEPT SELECT 1
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(1.0)
+
+case und-007
+
+query IT rowsort
+SELECT DISTINCT a, typeof(a) FROM t
+
+case und-008
+
+query I rowsort
+SELECT count(DISTINCT a) FROM t
+

@@ -1,0 +1,195 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+case probe-txn.commit
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+COMMIT
+
+query I rowsort
+SELECT count(*) FROM t
+
+case probe-txn.rollback
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+ROLLBACK
+
+query I rowsort
+SELECT count(*) FROM t
+
+case probe-txn.modes
+
+statement ok
+BEGIN DEFERRED
+
+statement ok
+COMMIT
+
+statement ok
+BEGIN IMMEDIATE
+
+statement ok
+COMMIT
+
+statement ok
+BEGIN EXCLUSIVE
+
+statement ok
+COMMIT
+
+query T rowsort
+SELECT 'ok'
+
+case probe-txn.savepoint
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+SAVEPOINT s
+
+statement ok
+INSERT INTO t VALUES (2)
+
+statement ok
+ROLLBACK TO s
+
+statement ok
+INSERT INTO t VALUES (3)
+
+statement ok
+RELEASE s
+
+statement ok
+COMMIT
+
+query T rowsort
+SELECT group_concat(a) FROM (SELECT a FROM t ORDER BY a)
+
+case probe-txn.savepoint.nested
+
+statement ok
+SAVEPOINT s1
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+SAVEPOINT s2
+
+statement ok
+INSERT INTO t VALUES (2)
+
+statement ok
+ROLLBACK TO s2
+
+statement ok
+RELEASE s1
+
+query T rowsort
+SELECT group_concat(a) FROM (SELECT a FROM t ORDER BY a)
+
+case probe-txn.ddl.rollback
+
+statement ok
+BEGIN
+
+statement ok
+CREATE TABLE u(a)
+
+statement ok
+ROLLBACK
+
+query I rowsort
+SELECT count(*) FROM sqlite_schema WHERE name='u'
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-txn.drop.rollback
+
+statement ok
+BEGIN
+
+statement ok
+DROP TABLE t
+
+statement ok
+ROLLBACK
+
+query I rowsort
+SELECT count(*) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO t VALUES (3)
+
+case probe-txn.statement.atomic
+
+statement error
+INSERT INTO t SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3
+
+setup
+
+case probe-txn.commit.none
+
+statement error
+COMMIT
+
+case probe-txn.begin.nested
+
+statement ok
+BEGIN
+
+statement error
+BEGIN
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+case probe-txn.end
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+END
+
+query I rowsort
+SELECT count(*) FROM t
+

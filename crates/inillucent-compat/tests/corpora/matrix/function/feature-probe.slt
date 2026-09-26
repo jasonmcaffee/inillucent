@@ -1,0 +1,328 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+case probe-fn.numeric
+
+query IIRRII rowsort
+SELECT abs(-3), sign(-3), round(2.567,2), round(2.5), max(1,9,3), min(1,9,3)
+
+case probe-fn.string1
+
+query ITTIT rowsort
+SELECT length('abcd'), substr('abcdef',2,3), substr('abcdef',-2), instr('abcdef','cd'), replace('aXbXc','X','-')
+
+case probe-fn.string2
+
+query TTTTTT rowsort
+SELECT upper('aBc'), lower('aBc'), trim('  x  '), ltrim('xxaxx','x'), rtrim('xxaxx','x'), trim('xxaxx','x')
+
+case probe-fn.printf
+
+query TTTTT rowsort
+SELECT printf('%05.2f',3.14159), printf('%d-%s',42,'x'), printf('%08.3d',42), format('%.3f',1.0/3), printf('%w','x')
+
+case probe-fn.encoding
+
+query TTTTTI rowsort
+SELECT quote('a''b'), quote(NULL), hex('ab'), unhex('4142'), char(65,66), unicode('A')
+
+case probe-fn.conditional
+
+query IITIT rowsort
+SELECT coalesce(NULL,NULL,3), ifnull(NULL,2), nullif(1,1), nullif(1,2), iif(1>0,'y','n')
+
+case probe-fn.meta
+
+query TTTTTIII rowsort
+SELECT typeof(1), typeof('a'), typeof(1.5), typeof(NULL), typeof(x'41'), likelihood(1,0.5), likely(1), unlikely(1)
+
+case probe-fn.blob
+
+query ITII rowsort
+SELECT length(zeroblob(10)), typeof(zeroblob(10)), length(randomblob(8)), octet_length('café')
+
+case probe-fn.changes
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a)
+
+statement ok
+INSERT INTO t VALUES (1,1),(2,2)
+
+query III rowsort
+SELECT changes(), total_changes(), last_insert_rowid()
+
+statement ok
+UPDATE t SET a=9
+
+query II rowsort
+SELECT changes(), total_changes()
+
+case probe-fn.concat
+
+query TT rowsort
+SELECT concat('a','b',1), concat_ws('-','a','b',NULL,'c')
+
+case probe-fn.match
+
+query III rowsort
+SELECT like('a%','abc'), glob('a*','abc'), like('a\_c','a_c','\')
+
+case probe-fn.version
+
+query IT rowsort
+SELECT length(sqlite_version())>0, typeof(sqlite_version())
+
+case probe-fn.load.extension
+
+statement error
+SELECT load_extension('nosuch')
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-fn.agg.basic
+
+query IIIRRTT rowsort
+SELECT count(*), count(b), sum(a), total(a), avg(a), typeof(sum(a)), typeof(total(a)) FROM t
+
+case probe-fn.agg.text
+
+query IITTT rowsort
+SELECT max(a), min(a), group_concat(b), group_concat(b,'-'), string_agg(b,'+') FROM (SELECT a,b FROM t ORDER BY id)
+
+case probe-fn.agg.distinct
+
+query IIT rowsort
+SELECT count(DISTINCT a), sum(DISTINCT a), group_concat(DISTINCT a) FROM t
+
+case probe-fn.agg.filter
+
+query II rowsort
+SELECT count(*) FILTER (WHERE a>15), sum(a) FILTER (WHERE b<'s') FROM t
+
+case probe-fn.agg.orderby
+
+query T rowsort
+SELECT group_concat(b ORDER BY a DESC) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES (1),(NULL),(3)
+
+case probe-fn.agg.null
+
+query IIIRIIR rowsort
+SELECT count(*), count(a), sum(a), avg(a), max(a), min(a), total(a) FROM t
+
+setup
+
+case probe-fn.time.basic
+
+query TTT rowsort
+SELECT date('2024-03-01 12:34:56'), time('2024-03-01 12:34:56'), datetime('2024-03-01 12:34:56')
+
+case probe-fn.time.epoch
+
+query RITT rowsort
+SELECT julianday('2024-03-01'), unixepoch('2024-03-01'), datetime(1709251200,'unixepoch'), datetime(2460370.5)
+
+case probe-fn.time.strftime
+
+query T rowsort
+SELECT strftime('%Y|%m|%d|%H|%M|%S|%j|%s|%w|%W|%U|%V|%G|%g|%e|%F|%I|%k|%l|%p|%P|%R|%T|%u|%%','2024-03-01 09:05:07')
+
+case probe-fn.time.frac
+
+query T rowsort
+SELECT strftime('%f|%J','2024-03-01 09:05:07.250')
+
+case probe-fn.time.mod1
+
+query TTTT rowsort
+SELECT date('2024-01-31','+1 month'), date('2024-03-01','-1 day'), date('2024-03-01','+1 year'), datetime('2024-03-01','+90 minutes')
+
+case probe-fn.time.mod2
+
+query TTTT rowsort
+SELECT date('2024-03-15','start of month'), date('2024-03-15','start of year'), datetime('2024-03-15 10:00','start of day'), date('2024-03-01','weekday 0')
+
+case probe-fn.time.mod3
+
+query TTT rowsort
+SELECT datetime('2024-03-01 12:00:00','subsec'), date('2460370.5','auto'), datetime('2024-03-01','+1 day','+1 hour')
+
+case probe-fn.time.timediff
+
+query T rowsort
+SELECT timediff('2024-03-01','2023-01-15')
+
+case probe-fn.time.roundtrip
+
+query TT rowsort
+SELECT datetime(julianday('2024-03-01 12:34:56')), date(unixepoch('2024-03-01'),'unixepoch')
+
+case probe-fn.math.trig
+
+query RRRRRRR rowsort
+SELECT round(sin(1),6), round(cos(1),6), round(tan(1),6), round(asin(0.5),6), round(acos(0.5),6), round(atan(1),6), round(atan2(1,2),6)
+
+case probe-fn.math.hyp
+
+query RRRRRR rowsort
+SELECT round(sinh(1),6), round(cosh(1),6), round(tanh(1),6), round(asinh(1),6), round(acosh(2),6), round(atanh(0.5),6)
+
+case probe-fn.math.log
+
+query RRRRRRRR rowsort
+SELECT round(ln(2),6), round(log(10,100),6), round(log2(8),6), round(log10(1000),6), round(exp(1),6), round(pow(2,10),6), round(power(2,3),6), round(sqrt(2),6)
+
+case probe-fn.math.round
+
+query RRRRRRRRR rowsort
+SELECT ceil(1.2), ceiling(1.2), floor(1.8), trunc(1.8), trunc(-1.8), mod(7,3), round(pi(),6), round(degrees(pi()),6), round(radians(180),6)
+
+case probe-fn.json.valid
+
+query TIIII rowsort
+SELECT json(' {"a":1} '), json_valid('{}'), json_valid('{'), json_valid('{a:1}',6), json_valid('{}',4)
+
+case probe-fn.json.build
+
+query TTT rowsort
+SELECT json_array(1,'a',NULL,json_array(2)), json_object('a',1,'b','x'), json_quote('a"b')
+
+case probe-fn.json.extract
+
+query ITTT rowsort
+SELECT json_extract('{"a":{"b":[1,2]}}','$.a.b[1]'), json_extract('{"a":1}','$.a','$.a'), json_type('{"a":[1]}','$.a'), json_type('null')
+
+case probe-fn.json.modify
+
+query TTTT rowsort
+SELECT json_insert('{"a":1}','$.b',2), json_replace('{"a":1}','$.a',9), json_set('{"a":1}','$.a',9,'$.c',3), json_remove('{"a":1,"b":2}','$.a')
+
+case probe-fn.json.misc
+
+query TIIT rowsort
+SELECT json_patch('{"a":1}','{"b":2}'), json_array_length('[1,2,3]'), json_array_length('{"a":[1,2]}','$.a'), json_pretty('{"a":1}')
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-fn.json.group
+
+query TT rowsort
+SELECT json_group_array(a), json_group_object(b,a) FROM (SELECT a,b FROM t ORDER BY id)
+
+setup
+
+case probe-fn.json.each
+
+query TIT rowsort
+SELECT key, value, type FROM json_each('{"a":1,"b":[2,3]}') ORDER BY key
+
+case probe-fn.json.tree
+
+query IT rowsort
+SELECT count(*), group_concat(type) FROM (SELECT type FROM json_tree('{"a":[1,2]}') ORDER BY id)
+
+case probe-fn.json.b
+
+query TTI rowsort
+SELECT json(jsonb('{"a":1}')), typeof(jsonb('{"a":1}')), jsonb_extract(jsonb('{"a":2}'),'$.a')
+
+case probe-fn.json.error
+
+query II rowsort
+SELECT json_error_position('{"a":1}'), json_error_position('{"a":}')
+
+setup
+
+statement ok
+CREATE TABLE t(d TEXT)
+
+statement ok
+INSERT INTO t VALUES ('{"n":1}'),('{"n":2}')
+
+case probe-fn.json.column
+
+query T rowsort
+SELECT group_concat(json_extract(d,'$.n')) FROM (SELECT d FROM t ORDER BY rowid)
+
+query I rowsort
+SELECT count(*) FROM t WHERE d->>'$.n' > 1
+
+setup
+
+case probe-fn.printf.quote
+
+query TTT rowsort
+SELECT printf('%q',"it's"), printf('%Q',"it's"), printf('%Q',NULL)
+
+case probe-fn.substr.negative
+
+query TTTT rowsort
+SELECT substr('abcdef',2), substr('abcdef',-3,2), substr('abcdef',2,-1), substr('abcdef',0,3)
+
+case probe-fn.abs.min
+
+query IRRT rowsort
+SELECT abs(-9223372036854775807), abs(-9.0), abs('abc'), abs(NULL)
+
+case probe-fn.round.digits
+
+query RRRRR rowsort
+SELECT round(1234.5678,-2), round(1.005,2), round(2.5), round(-2.5), round(1e308,2)
+
+case probe-fn.char.edge
+
+query ITT rowsort
+SELECT length(char(0)), char(65,0x1F600), unicode('')
+
+case probe-fn.blob.ops
+
+query III rowsort
+SELECT instr(x'0102030405',x'0304'), length(x'010203'), substr(x'0102030405',2,2)=x'0203'
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES (1),('2'),('abc'),(NULL)
+
+case probe-fn.agg.sum.text
+
+query RTRI rowsort
+SELECT sum(a), typeof(sum(a)), avg(a), count(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER)
+
+statement ok
+INSERT INTO t VALUES (9223372036854775807),(1)
+
+case probe-fn.agg.sum.overflow
+
+statement error
+SELECT sum(a) FROM t
+

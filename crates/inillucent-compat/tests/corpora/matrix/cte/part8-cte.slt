@@ -1,0 +1,142 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/cte.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case cte-001
+
+query I rowsort
+WITH x(a) AS (SELECT 1 UNION ALL SELECT 2) SELECT * FROM x
+
+case cte-002
+
+query I rowsort
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<5) SELECT * FROM n
+
+case cte-003
+
+query I rowsort
+WITH RECURSIVE n(i) AS (SELECT 1 UNION SELECT (i+1)%3 FROM n) SELECT * FROM n ORDER BY i
+
+case cte-004
+
+query I rowsort
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n) SELECT * FROM n LIMIT 4
+
+case cte-005
+
+query I rowsort
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10) SELECT * FROM n LIMIT 3 OFFSET 2
+
+case cte-006
+
+query II rowsort
+WITH x AS (SELECT 1 AS a), y AS (SELECT a+1 AS b FROM x) SELECT * FROM x, y
+
+case cte-007
+
+query II rowsort
+WITH RECURSIVE t(a,b) AS (VALUES(1,1) UNION ALL SELECT b,a+b FROM t WHERE a<20) SELECT * FROM t
+
+case cte-008
+
+query I rowsort
+WITH x(a) AS (VALUES(1),(2),(3)) SELECT sum(a) FROM x
+
+case cte-009
+
+query I rowsort
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3) SELECT count(*) FROM n, n AS m
+
+case cte-010
+
+query I rowsort
+WITH x AS MATERIALIZED (SELECT 1 AS a) SELECT * FROM x
+
+case cte-011
+
+query I rowsort
+WITH x AS NOT MATERIALIZED (SELECT 1 AS a) SELECT * FROM x
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+case cte-012
+
+query I rowsort
+WITH t AS (SELECT 9 AS a) SELECT * FROM t
+
+setup
+
+case cte-013
+
+statement error
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n ORDER BY i LIMIT 3) SELECT * FROM n
+
+case cte-014
+
+query I nosort
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r ORDER BY n DESC LIMIT 1
+
+case cte-015
+
+query I nosort
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r ORDER BY n DESC LIMIT 2
+
+case cte-016
+
+query I nosort
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r ORDER BY n DESC LIMIT 1 OFFSET 1
+
+setup
+
+statement ok
+CREATE TABLE node(id INTEGER, parent INTEGER)
+
+statement ok
+INSERT INTO node VALUES(1,NULL),(2,1),(3,2),(4,3)
+
+case cte-017
+
+query II rowsort
+WITH RECURSIVE w(id,depth) AS (SELECT id,0 FROM node WHERE parent IS NULL UNION ALL SELECT n.id,w.depth+1 FROM node n JOIN w ON n.parent=w.id) SELECT id,depth FROM w ORDER BY depth DESC LIMIT 1
+
+setup
+
+case cte-018
+
+query I nosort
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r WHERE n>1 ORDER BY n DESC LIMIT 1
+
+case cte-019
+
+query I nosort
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT DISTINCT n FROM r ORDER BY n DESC LIMIT 1
+
+case cte-020
+
+query II rowsort
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n,count(*) FROM r GROUP BY n ORDER BY n DESC LIMIT 1
+
+case cte-021
+
+query I nosort
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r ORDER BY n ASC LIMIT 2
+
+setup
+
+statement ok
+CREATE TABLE node(id INTEGER, parent INTEGER)
+
+statement ok
+INSERT INTO node VALUES(1,NULL),(2,1),(3,2),(4,3)
+
+case cte-022
+
+query II nosort
+WITH RECURSIVE w(id,depth) AS (SELECT id,0 FROM node WHERE parent IS NULL UNION ALL SELECT n.id,w.depth+1 FROM node n JOIN w ON n.parent=w.id) SELECT id,depth FROM w ORDER BY depth DESC, id ASC LIMIT 3
+

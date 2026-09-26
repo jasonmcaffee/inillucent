@@ -1,0 +1,39 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/round.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case rnd-001
+
+query RRRR rowsort
+SELECT round(2.675,2), round(1.115,2), round(0.615,2), round(8.835,2)
+
+case rnd-002
+
+query RRRR rowsort
+SELECT round(2.5,0), round(3.5,0), round(-2.5,0), round(0.5,0)
+
+case rnd-003
+
+query RR rowsort
+SELECT round(1.0e15+0.5), round(123456789.987654321,5)
+
+case rnd-004
+
+query RRR rowsort
+SELECT round(2.345,2), round(-2.345,2), round(2.344999999,2)
+
+case rnd-005
+
+query RTR rowsort
+SELECT round(1,2), typeof(round(1,2)), round('2.675',2)
+
+case rnd-006
+
+query RR rowsort
+SELECT round(2.675,-1), round(1234.5,-2)
+
+case rnd-007
+
+query TTT rowsort
+SELECT printf('%.2f',2.675), printf('%.2f',1.115), printf('%.17g',0.1)
+

@@ -102,6 +102,21 @@ name = "nightly"
 purpose = "the long forms: a full day's workload, every released format, both directions"
 cadence = "nightly"
 
+# The SQL statement matrix (tasks/task-2135-sql-statement-matrix-tdd.md).
+# Every statement form, in every pair of contexts on a change and every triple
+# on a merge, on files on both engines, graded against the pinned SQLite
+# 3.53.4. Its budget is kept by the case counts in
+# crates/inillucent-compat/tests/corpora/matrix/counts.toml, never by a clock.
+[[tier]]
+name = "matrix"
+purpose = "every statement form and every pair of contexts, against the pinned SQLite, on files"
+cadence = "change"
+
+[[tier]]
+name = "matrix_deep"
+purpose = "every triple of contexts and every configuration arm"
+cadence = "merge"
+
 # ---------------------------------------------------------------------------
 # What a change outside every crate selects.
 #
@@ -273,6 +288,432 @@ reason = "nothing is compiled from it"
 # ---------------------------------------------------------------------------
 
 # --- smoke: the ten-second answer: a real file opened, written, reopened, read
+
+# ---------------------------------------------------------------------------
+# The statement matrix: one module per statement family, at each cadence.
+# ---------------------------------------------------------------------------
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "lists"
+tier = "matrix"
+covers = ["inillucent-compat"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "select"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "join"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "compound"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "cte"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "window"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "subquery"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "expression"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "function"
+tier = "matrix"
+covers = ["inillucent-engine", "inillucent-scalar"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "insert"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "update"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "delete"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "ddl_table"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "ddl_index"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "ddl_view"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "trigger"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "constraint"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "transaction"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "vtab"
+tier = "matrix"
+covers = ["inillucent-engine", "inillucent-ext", "inillucent-search"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "schema"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "maintenance"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "pragma"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "vector"
+tier = "matrix"
+covers = ["inillucent-engine", "inillucent-ext", "inillucent-search"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix"
+module = "retained"
+tier = "matrix"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "select"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "join"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "compound"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "cte"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "window"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "subquery"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "expression"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "function"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-scalar", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "insert"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "update"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "delete"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "ddl_table"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "ddl_index"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "ddl_view"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "trigger"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "constraint"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "transaction"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "vtab"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-ext", "inillucent-search", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "schema"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "maintenance"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "pragma"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "vector"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-ext", "inillucent-search", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "matrix_deep"
+module = "retained"
+tier = "matrix_deep"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
 
 [[target]]
 package = "inillucent"

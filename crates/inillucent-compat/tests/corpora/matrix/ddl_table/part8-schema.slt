@@ -1,0 +1,60 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/schema.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)
+
+case sch-001
+
+query TTTT rowsort
+SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+case sch-002
+
+query TTT rowsort
+SELECT type,name,tbl_name FROM sqlite_schema ORDER BY name
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE VIEW v AS SELECT * FROM t
+
+case sch-003
+
+query TT rowsort
+SELECT type,name FROM sqlite_master ORDER BY name
+
+setup
+
+statement ok
+CREATE TABLE "t t"("a b")
+
+case sch-004
+
+query T rowsort
+SELECT sql FROM sqlite_schema
+
+setup
+
+statement ok
+CREATE TABLE t(a UNIQUE)
+
+case sch-005
+
+query TTT rowsort
+SELECT type,name,tbl_name FROM sqlite_schema ORDER BY name
+

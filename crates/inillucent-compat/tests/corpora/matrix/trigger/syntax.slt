@@ -1,0 +1,103 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-create-trigger-stmt-p0
+
+statement error
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END
+
+case syntax-create-trigger-stmt-p1
+
+statement error
+CREATE TEMP TRIGGER IF NOT EXISTS main.tr BEFORE UPDATE OF a, b ON t FOR EACH ROW WHEN new.a > 1 BEGIN UPDATE t SET a = 1; DELETE FROM t; END
+
+case syntax-create-trigger-stmt-p2
+
+statement error
+CREATE TRIGGER tr INSTEAD OF DELETE ON v BEGIN SELECT RAISE(ABORT, 'no'); END
+
+case syntax-create-trigger-stmt-n3
+
+statement error
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN END
+
+case syntax-drop-trigger-stmt-p0
+
+statement ok
+DROP TRIGGER tr
+
+case syntax-drop-trigger-stmt-p1
+
+statement ok
+DROP TRIGGER IF EXISTS main.tr
+
+case syntax-drop-trigger-stmt-n2
+
+statement error
+DROP TRIGGER
+
+case syntax-raise-function-p0
+
+statement error
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(IGNORE); END
+
+case syntax-raise-function-p1
+
+statement error
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(ROLLBACK, 'x'); END
+
+case syntax-raise-function-p2
+
+statement error
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(ABORT, 'x'); END
+
+case syntax-raise-function-p3
+
+statement error
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(FAIL, 'x'); END
+
+case syntax-raise-function-n4
+
+statement error
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(ABORT); END
+

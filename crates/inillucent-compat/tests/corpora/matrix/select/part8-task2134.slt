@@ -1,0 +1,96 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2134.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case t2134-jd-001
+
+query RR rowsort
+SELECT julianday('2026-09-25T17:30:00Z'), julianday('2026-09-25T17:30:00Z') - julianday('2026-09-25T08:00:00Z')
+
+case t2134-jd-002
+
+query RRR rowsort
+SELECT julianday('2026-09-25 17:30:00.123'), julianday('2026-09-25 17:30:00+05:30'), julianday('2026-09-25 17:30:00-01:15')
+
+case t2134-jd-003
+
+query RRR rowsort
+SELECT julianday('2026-09-25','+7 hours','+3 minutes','+1.5 seconds'), julianday('2026-09-25','-7 hours'), julianday('2026-09-25T17:30:00Z','+0.1 day')
+
+case t2134-jd-004
+
+query RTR rowsort
+SELECT julianday(2461309.12345678912), strftime('%J','2026-09-25T17:30:00'), (julianday('2026-09-25 17:31:07') - julianday('2026-09-25 08:00:00')) * 24
+
+setup
+
+statement ok
+CREATE TABLE order_line (id INTEGER PRIMARY KEY, order_id INTEGER, item TEXT, quantity INTEGER)
+
+statement ok
+INSERT INTO order_line (order_id, item, quantity) VALUES (1, 'Latte', 1), (1, 'Tea', 1), (2, 'Latte', 1), (3, 'Latte', 1), (3, 'Latte', 1), (4, 'Tea', 3), (5, 'Mocha', 2), (5, 'Mocha', 1), (5, 'Latte', 1)
+
+case t2134-oba-001
+
+query TI rowsort
+SELECT item, sum(quantity) AS quantity FROM order_line GROUP BY item ORDER BY quantity DESC
+
+query II nosort
+SELECT order_id, count(*) AS id FROM order_line GROUP BY order_id ORDER BY id DESC, order_id
+
+query TI nosort
+SELECT item, max(quantity) AS quantity FROM order_line GROUP BY item ORDER BY quantity, item
+
+query TI rowsort
+SELECT item, sum(quantity) AS quantity FROM order_line GROUP BY item HAVING quantity > 1 ORDER BY item
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, q INTEGER, a INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 30, 5), (2, 10, 6), (3, 20, 4)
+
+case t2134-oba-002
+
+query II rowsort
+SELECT id AS q, q AS id FROM t ORDER BY q
+
+query I nosort
+SELECT id AS q FROM t ORDER BY q DESC
+
+query I nosort
+SELECT q AS a FROM t ORDER BY a
+
+query I nosort
+SELECT q AS a FROM t ORDER BY t.a
+
+query I nosort
+SELECT id AS a FROM t ORDER BY "a"
+
+query I nosort
+SELECT id AS "Q" FROM t ORDER BY q DESC
+
+query I nosort
+SELECT id q FROM t ORDER BY q DESC
+
+query II rowsort
+SELECT id AS q, q AS id FROM t ORDER BY q + 0
+
+query IIII rowsort
+SELECT *, id AS q FROM t ORDER BY q DESC
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER)
+
+statement ok
+CREATE TABLE y (id INTEGER, a INTEGER)
+
+case t2134-oba-003
+
+statement error
+SELECT t.a, y.a FROM t, y ORDER BY a
+

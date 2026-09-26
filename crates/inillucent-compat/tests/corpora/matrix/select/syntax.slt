@@ -1,0 +1,219 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-select-stmt-p0
+
+query I rowsort
+SELECT 1
+
+case syntax-select-stmt-p1
+
+query IIII rowsort
+SELECT * FROM t
+
+case syntax-select-stmt-p2
+
+query TTTTTT rowsort
+SELECT DISTINCT a, b AS c, t.* FROM t WHERE a > 1 GROUP BY a HAVING count(*) > 1 ORDER BY a DESC NULLS LAST LIMIT 10 OFFSET 2
+
+case syntax-select-stmt-p3
+
+query T rowsort
+SELECT 1 UNION ALL SELECT 2 UNION SELECT 3 EXCEPT SELECT 4 INTERSECT SELECT 5
+
+case syntax-select-stmt-p4
+
+query I rowsort
+WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c LIMIT 5
+
+case syntax-select-stmt-p5
+
+query II rowsort
+VALUES (1, 2), (3, 4)
+
+case syntax-select-stmt-p6
+
+query I rowsort
+SELECT a FROM t LIMIT 1, 2
+
+case syntax-select-stmt-n7
+
+statement error
+SELECT FROM t
+
+case syntax-select-stmt-n8
+
+statement error
+SELECT * FROM
+
+case syntax-ordering-term-p0
+
+query T nosort
+SELECT a FROM t ORDER BY a
+
+case syntax-ordering-term-p1
+
+query T nosort
+SELECT a FROM t ORDER BY a COLLATE NOCASE DESC NULLS FIRST
+
+case syntax-ordering-term-p2
+
+query I nosort
+SELECT a FROM t ORDER BY 1 ASC NULLS LAST
+
+case syntax-ordering-term-n3
+
+statement error
+SELECT a FROM t ORDER BY
+
+case syntax-result-column-p0
+
+query IIIIIIIIIII rowsort
+SELECT *, t.*, a, a AS b, a b FROM t
+
+case syntax-result-column-n1
+
+statement error
+SELECT * AS x FROM t
+
+case syntax-select-core-p0
+
+query T rowsort
+SELECT ALL a FROM t
+
+case syntax-select-core-p1
+
+query T rowsort
+SELECT DISTINCT a FROM t
+
+case syntax-select-core-p2
+
+query T rowsort
+SELECT a FROM t WINDOW w AS (PARTITION BY a)
+
+case syntax-select-core-p3
+
+query I rowsort
+VALUES (1)
+
+case syntax-table-or-subquery-p0
+
+query IIII rowsort
+SELECT * FROM t
+
+case syntax-table-or-subquery-p1
+
+query IIII rowsort
+SELECT * FROM main.t AS x
+
+case syntax-table-or-subquery-p2
+
+query ITTT rowsort
+SELECT * FROM t INDEXED BY i
+
+case syntax-table-or-subquery-p3
+
+query IIII rowsort
+SELECT * FROM t NOT INDEXED
+
+case syntax-table-or-subquery-p4
+
+statement error
+SELECT * FROM f(1, 2)
+
+case syntax-table-or-subquery-p5
+
+query I rowsort
+SELECT * FROM (SELECT 1) AS x
+
+case syntax-table-or-subquery-p6
+
+query IIIIIIII rowsort
+SELECT * FROM (t, u)
+
+case syntax-table-or-subquery-n7
+
+statement error
+SELECT * FROM (SELECT 1
+
+case syntax-comment-p0
+
+query I rowsort
+SELECT 1 -- trailing
+
+case syntax-comment-p1
+
+query I rowsort
+SELECT /* inline */ 1
+
+case syntax-comment-p2
+
+query I rowsort
+SELECT 1 /* unterminated
+
+case syntax-comment-p3
+
+statement ok
+-- leading
+SELECT 1
+
+case syntax-statement-tail-p0
+
+statement ok
+SELECT 1; SELECT 2
+
+case syntax-statement-tail-p1
+
+query I rowsort
+SELECT 1;
+
+case syntax-statement-tail-p2
+
+statement ok
+;
+
+case syntax-statement-tail-n4
+
+statement error
+SELECT 1 SELECT 2
+

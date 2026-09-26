@@ -1,0 +1,532 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2083.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a , b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+case ix-literal-untyped
+
+query TI rowsort
+SELECT 'eq 3', id FROM h WHERE a = 3 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3', id FROM h WHERE a > 3 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3''', id FROM h WHERE a = '3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3''', id FROM h WHERE a > '3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.0', id FROM h WHERE a = 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.0', id FROM h WHERE a > 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3.0''', id FROM h WHERE a = '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3.0''', id FROM h WHERE a > '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.5', id FROM h WHERE a = 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.5', id FROM h WHERE a > 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''abc''', id FROM h WHERE a = 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''abc''', id FROM h WHERE a > 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'eq x''33''', id FROM h WHERE a = x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'gt x''33''', id FROM h WHERE a > x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'eq NULL', id FROM h WHERE a = NULL ORDER BY id
+
+query TT rowsort
+SELECT 'gt NULL', id FROM h WHERE a > NULL ORDER BY id
+
+query TI rowsort
+SELECT 'eq '' 3''', id FROM h WHERE a = ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt '' 3''', id FROM h WHERE a > ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3e0''', id FROM h WHERE a = '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3e0''', id FROM h WHERE a > '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 0', id FROM h WHERE a = 0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 0', id FROM h WHERE a > 0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''0''', id FROM h WHERE a = '0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''0''', id FROM h WHERE a > '0' ORDER BY id
+
+query TI rowsort
+SELECT 'in', id FROM h WHERE a IN (3, '3', 3.5, 'abc', NULL) ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a INTEGER, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+case ix-literal-integer
+
+query TI rowsort
+SELECT 'eq 3', id FROM h WHERE a = 3 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3', id FROM h WHERE a > 3 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3''', id FROM h WHERE a = '3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3''', id FROM h WHERE a > '3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.0', id FROM h WHERE a = 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.0', id FROM h WHERE a > 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3.0''', id FROM h WHERE a = '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3.0''', id FROM h WHERE a > '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.5', id FROM h WHERE a = 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.5', id FROM h WHERE a > 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''abc''', id FROM h WHERE a = 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''abc''', id FROM h WHERE a > 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'eq x''33''', id FROM h WHERE a = x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'gt x''33''', id FROM h WHERE a > x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'eq NULL', id FROM h WHERE a = NULL ORDER BY id
+
+query TT rowsort
+SELECT 'gt NULL', id FROM h WHERE a > NULL ORDER BY id
+
+query TI rowsort
+SELECT 'eq '' 3''', id FROM h WHERE a = ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt '' 3''', id FROM h WHERE a > ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3e0''', id FROM h WHERE a = '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3e0''', id FROM h WHERE a > '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 0', id FROM h WHERE a = 0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 0', id FROM h WHERE a > 0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''0''', id FROM h WHERE a = '0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''0''', id FROM h WHERE a > '0' ORDER BY id
+
+query TI rowsort
+SELECT 'in', id FROM h WHERE a IN (3, '3', 3.5, 'abc', NULL) ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a TEXT, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+case ix-literal-text
+
+query TI rowsort
+SELECT 'eq 3', id FROM h WHERE a = 3 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3', id FROM h WHERE a > 3 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3''', id FROM h WHERE a = '3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3''', id FROM h WHERE a > '3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.0', id FROM h WHERE a = 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.0', id FROM h WHERE a > 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3.0''', id FROM h WHERE a = '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3.0''', id FROM h WHERE a > '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.5', id FROM h WHERE a = 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.5', id FROM h WHERE a > 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''abc''', id FROM h WHERE a = 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''abc''', id FROM h WHERE a > 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'eq x''33''', id FROM h WHERE a = x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'gt x''33''', id FROM h WHERE a > x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'eq NULL', id FROM h WHERE a = NULL ORDER BY id
+
+query TT rowsort
+SELECT 'gt NULL', id FROM h WHERE a > NULL ORDER BY id
+
+query TI rowsort
+SELECT 'eq '' 3''', id FROM h WHERE a = ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt '' 3''', id FROM h WHERE a > ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3e0''', id FROM h WHERE a = '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3e0''', id FROM h WHERE a > '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 0', id FROM h WHERE a = 0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 0', id FROM h WHERE a > 0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''0''', id FROM h WHERE a = '0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''0''', id FROM h WHERE a > '0' ORDER BY id
+
+query TI rowsort
+SELECT 'in', id FROM h WHERE a IN (3, '3', 3.5, 'abc', NULL) ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a REAL, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+case ix-literal-real
+
+query TI rowsort
+SELECT 'eq 3', id FROM h WHERE a = 3 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3', id FROM h WHERE a > 3 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3''', id FROM h WHERE a = '3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3''', id FROM h WHERE a > '3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.0', id FROM h WHERE a = 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.0', id FROM h WHERE a > 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3.0''', id FROM h WHERE a = '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3.0''', id FROM h WHERE a > '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.5', id FROM h WHERE a = 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.5', id FROM h WHERE a > 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''abc''', id FROM h WHERE a = 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''abc''', id FROM h WHERE a > 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'eq x''33''', id FROM h WHERE a = x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'gt x''33''', id FROM h WHERE a > x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'eq NULL', id FROM h WHERE a = NULL ORDER BY id
+
+query TT rowsort
+SELECT 'gt NULL', id FROM h WHERE a > NULL ORDER BY id
+
+query TI rowsort
+SELECT 'eq '' 3''', id FROM h WHERE a = ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt '' 3''', id FROM h WHERE a > ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3e0''', id FROM h WHERE a = '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3e0''', id FROM h WHERE a > '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 0', id FROM h WHERE a = 0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 0', id FROM h WHERE a > 0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''0''', id FROM h WHERE a = '0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''0''', id FROM h WHERE a > '0' ORDER BY id
+
+query TI rowsort
+SELECT 'in', id FROM h WHERE a IN (3, '3', 3.5, 'abc', NULL) ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a NUMERIC, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+case ix-literal-numeric
+
+query TI rowsort
+SELECT 'eq 3', id FROM h WHERE a = 3 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3', id FROM h WHERE a > 3 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3''', id FROM h WHERE a = '3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3''', id FROM h WHERE a > '3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.0', id FROM h WHERE a = 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.0', id FROM h WHERE a > 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3.0''', id FROM h WHERE a = '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3.0''', id FROM h WHERE a > '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.5', id FROM h WHERE a = 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.5', id FROM h WHERE a > 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''abc''', id FROM h WHERE a = 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''abc''', id FROM h WHERE a > 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'eq x''33''', id FROM h WHERE a = x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'gt x''33''', id FROM h WHERE a > x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'eq NULL', id FROM h WHERE a = NULL ORDER BY id
+
+query TT rowsort
+SELECT 'gt NULL', id FROM h WHERE a > NULL ORDER BY id
+
+query TI rowsort
+SELECT 'eq '' 3''', id FROM h WHERE a = ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt '' 3''', id FROM h WHERE a > ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3e0''', id FROM h WHERE a = '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3e0''', id FROM h WHERE a > '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 0', id FROM h WHERE a = 0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 0', id FROM h WHERE a > 0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''0''', id FROM h WHERE a = '0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''0''', id FROM h WHERE a > '0' ORDER BY id
+
+query TI rowsort
+SELECT 'in', id FROM h WHERE a IN (3, '3', 3.5, 'abc', NULL) ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a BLOB, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+case ix-literal-blob
+
+query TI rowsort
+SELECT 'eq 3', id FROM h WHERE a = 3 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3', id FROM h WHERE a > 3 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3''', id FROM h WHERE a = '3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3''', id FROM h WHERE a > '3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.0', id FROM h WHERE a = 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.0', id FROM h WHERE a > 3.0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3.0''', id FROM h WHERE a = '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3.0''', id FROM h WHERE a > '3.0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 3.5', id FROM h WHERE a = 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 3.5', id FROM h WHERE a > 3.5 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''abc''', id FROM h WHERE a = 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''abc''', id FROM h WHERE a > 'abc' ORDER BY id
+
+query TI rowsort
+SELECT 'eq x''33''', id FROM h WHERE a = x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'gt x''33''', id FROM h WHERE a > x'33' ORDER BY id
+
+query TT rowsort
+SELECT 'eq NULL', id FROM h WHERE a = NULL ORDER BY id
+
+query TT rowsort
+SELECT 'gt NULL', id FROM h WHERE a > NULL ORDER BY id
+
+query TI rowsort
+SELECT 'eq '' 3''', id FROM h WHERE a = ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'gt '' 3''', id FROM h WHERE a > ' 3' ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''3e0''', id FROM h WHERE a = '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''3e0''', id FROM h WHERE a > '3e0' ORDER BY id
+
+query TI rowsort
+SELECT 'eq 0', id FROM h WHERE a = 0 ORDER BY id
+
+query TI rowsort
+SELECT 'gt 0', id FROM h WHERE a > 0 ORDER BY id
+
+query TI rowsort
+SELECT 'eq ''0''', id FROM h WHERE a = '0' ORDER BY id
+
+query TI rowsort
+SELECT 'gt ''0''', id FROM h WHERE a > '0' ORDER BY id
+
+query TI rowsort
+SELECT 'in', id FROM h WHERE a IN (3, '3', 3.5, 'abc', NULL) ORDER BY id
+

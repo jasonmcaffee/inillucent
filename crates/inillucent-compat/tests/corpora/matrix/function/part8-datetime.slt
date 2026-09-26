@@ -1,0 +1,129 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/datetime.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case dt-001
+
+query TTT rowsort
+SELECT date('2020-02-29'), time('2020-02-29 13:45:01'), datetime('2020-02-29 13:45:01')
+
+case dt-002
+
+query RRR rowsort
+SELECT julianday('2020-01-01'), julianday('1970-01-01'), julianday('2020-01-01 12:00:00')
+
+case dt-003
+
+query III rowsort
+SELECT unixepoch('2020-01-01'), unixepoch('1969-12-31 23:59:59'), unixepoch('2020-01-01T00:00:00Z')
+
+case dt-004
+
+query TTT rowsort
+SELECT datetime(0,'unixepoch'), datetime(1577836800,'unixepoch'), date(2440587.5)
+
+case dt-005
+
+query TTT rowsort
+SELECT date('2020-01-31','+1 month'), date('2020-01-31','+1 month','-1 day'), date('2020-03-31','-1 month')
+
+case dt-006
+
+query TTT rowsort
+SELECT date('2020-01-01','+1 year'), date('2020-02-29','+1 year'), date('2019-02-28','+1 day')
+
+case dt-007
+
+query TTT rowsort
+SELECT date('2020-01-15','start of month'), date('2020-01-15','start of year'), datetime('2020-01-15 10:11:12','start of day')
+
+case dt-008
+
+query TTT rowsort
+SELECT date('2020-01-15','weekday 0'), date('2020-01-15','weekday 3'), date('2020-01-15','weekday 6')
+
+case dt-009
+
+query TTTT rowsort
+SELECT strftime('%Y-%m-%d %H:%M:%S','2020-06-05 07:08:09'), strftime('%j','2020-06-05'), strftime('%W','2020-06-05'), strftime('%w','2020-06-05')
+
+case dt-010
+
+query TTT rowsort
+SELECT strftime('%s','2020-01-01'), strftime('%J','2020-01-01'), strftime('%f','2020-01-01 00:00:01.234')
+
+case dt-011
+
+query TTT rowsort
+SELECT strftime('%%','2020-01-01'), strftime('%Y%m%d','2020-01-01'), strftime('%d/%m/%Y','2020-01-01')
+
+case dt-012
+
+query TTTT rowsort
+SELECT date('2020-13-01'), date('not a date'), date('2020-02-30'), time('25:00:00')
+
+case dt-013
+
+query T rowsort
+SELECT datetime('2020-01-01','+1 hour','+30 minutes','+15 seconds')
+
+case dt-014
+
+query TT rowsort
+SELECT datetime('2020-01-01 00:00:00','+1.5 days'), datetime('2020-01-01','+36 hours')
+
+case dt-015
+
+query TT rowsort
+SELECT date('2020-01-01','+1 month','+1 month'), date('2020-01-01','+2 months')
+
+case dt-016
+
+query RT rowsort
+SELECT julianday('2020-01-01','+0.5 day'), datetime(2458850.0)
+
+case dt-017
+
+query TTT rowsort
+SELECT strftime('%Y','1900-01-01'), strftime('%Y','0001-01-01'), date('9999-12-31','+1 day')
+
+case dt-018
+
+query TI rowsort
+SELECT datetime('2020-01-01 12:00:00','utc'), datetime('2020-01-01 12:00:00','localtime') IS NOT NULL
+
+case dt-019
+
+query TT rowsort
+SELECT timediff('2020-01-02','2020-01-01'), timediff('2020-01-01','2020-01-02')
+
+case dt-020
+
+query TTT rowsort
+SELECT date('2020-06-05','floor'), date('2020-01-31','+1 month','ceiling'), date('2020-01-31','ceiling','+1 month')
+
+case dt-021
+
+query TT rowsort
+SELECT strftime('%Y-%m-%d','2020-01-01 24:00:00'), datetime('2020-01-01 23:59:60')
+
+case dt-022
+
+query TTT rowsort
+SELECT date(1577836800,'auto'), date('1577836800','auto'), datetime('2020-01-01','subsec')
+
+case dt-023
+
+query TT rowsort
+SELECT datetime('2020-01-01T00:00:00.500'), strftime('%f','2020-01-01T00:00:00.500')
+
+case dt-024
+
+query R rowsort
+SELECT julianday('2020-01-01 00:00:00') - julianday('2019-12-31 00:00:00')
+
+case dt-025
+
+query II rowsort
+SELECT date('now') IS NOT NULL, length(date('now'))
+

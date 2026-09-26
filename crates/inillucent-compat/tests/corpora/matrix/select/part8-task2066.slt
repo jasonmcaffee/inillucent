@@ -1,0 +1,104 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2066.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case t2066-001
+
+query TTT rowsort
+SELECT date('2024-1-1'), date('2024-01-1'), date('2024-1-01')
+
+case t2066-002
+
+query TTT rowsort
+SELECT date('02024-01-01'), date('2024-001-01'), date('2024-01-001')
+
+case t2066-003
+
+query TT rowsort
+SELECT date(' 2024-01-01'), date('2024-01-01 ')
+
+case t2066-004
+
+query TTT rowsort
+SELECT time('1:2:3'), time('01:02:03'), time('01:02:03.5')
+
+case t2066-005
+
+query TT rowsort
+SELECT datetime('2024-01-01 1:00:00'), datetime('2024-01-01 01:00:00')
+
+case t2066-006
+
+query T rowsort
+SELECT printf('%.20f', 1.0/3)
+
+case t2066-007
+
+query T rowsort
+SELECT printf('%.20f', 2.0/3)
+
+case t2066-008
+
+query T rowsort
+SELECT printf('%.25f', 1.0/7)
+
+case t2066-009
+
+query TTT rowsort
+SELECT printf('%.20f', 1.0), printf('%.4f', 1.0/3), printf('%.0f', 2.5)
+
+case t2066-010
+
+query T rowsort
+SELECT strftime('%J','2020-01-01')
+
+case t2066-011
+
+query II rowsort
+SELECT 'a%b' LIKE 'a\%b' ESCAPE '\', 'a_b' LIKE 'a\_b' ESCAPE '\'
+
+case t2066-012
+
+statement error
+SELECT 'a%b' LIKE 'a%b' ESCAPE ''
+
+case t2066-013
+
+statement error
+SELECT like('a%b','a%b','ab')
+
+case t2066-014
+
+statement error
+SELECT 'a%b' LIKE 'a%b' ESCAPE 'ab'
+
+case t2066-015
+
+query II rowsort
+SELECT length(randomblob(2000000)), length(zeroblob(2000000))
+
+case t2066-016
+
+query III rowsort
+SELECT length(randomblob(1)), length(randomblob(0)), length(randomblob(-1))
+
+setup
+
+statement ok
+CREATE TABLE t (a INTEGER CHECK (a > 0), b INTEGER CHECK (b > 100))
+
+case t2066-017
+
+statement error
+INSERT INTO t VALUES (1, 5)
+
+setup
+
+statement ok
+CREATE TABLE t (a INTEGER, b INTEGER, CONSTRAINT first CHECK (a > 0), CONSTRAINT second CHECK (b > 100))
+
+case t2066-018
+
+statement error
+INSERT INTO t VALUES (1, 5)
+

@@ -1,0 +1,208 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/rowid.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES('x')
+
+case rid-001
+
+query III rowsort
+SELECT rowid, oid, _rowid_ FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t VALUES(NULL,'x')
+
+case rid-002
+
+query II rowsort
+SELECT a, rowid FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t VALUES(-5,'x')
+
+statement ok
+INSERT INTO t(b) VALUES('y')
+
+case rid-003
+
+query I nosort
+SELECT a FROM t ORDER BY a
+
+setup
+
+case rid-004
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t VALUES(9223372036854775807,'x')
+
+statement ok
+INSERT INTO t(b) VALUES('y')
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY AUTOINCREMENT, b)
+
+statement ok
+INSERT INTO t(b) VALUES('x')
+
+case rid-005
+
+statement ok
+DELETE FROM t
+
+statement ok
+INSERT INTO t(b) VALUES('y')
+
+query I rowsort
+SELECT a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t(b) VALUES('x')
+
+case rid-006
+
+statement ok
+DELETE FROM t
+
+statement ok
+INSERT INTO t(b) VALUES('y')
+
+query I rowsort
+SELECT a FROM t
+
+setup
+
+case rid-007
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+query I rowsort
+SELECT last_insert_rowid()
+
+case rid-008
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO t VALUES(42)
+
+query I rowsort
+SELECT last_insert_rowid()
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY AUTOINCREMENT)
+
+statement ok
+INSERT INTO t VALUES(10)
+
+case rid-009
+
+query I rowsort
+SELECT seq FROM sqlite_sequence WHERE name='t'
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case rid-010
+
+statement ok
+UPDATE t SET rowid=100
+
+query II rowsort
+SELECT rowid, a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t VALUES(1,'x')
+
+case rid-011
+
+statement ok
+UPDATE t SET a=2
+
+query II rowsort
+SELECT rowid, a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INT PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t VALUES(5,'x')
+
+case rid-012
+
+query II rowsort
+SELECT rowid, a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY DESC, b)
+
+statement ok
+INSERT INTO t VALUES(5,'x')
+
+case rid-013
+
+query II rowsort
+SELECT rowid, a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+case rid-014
+
+statement ok
+DELETE FROM t WHERE rowid=1
+
+query II rowsort
+SELECT rowid,a FROM t
+

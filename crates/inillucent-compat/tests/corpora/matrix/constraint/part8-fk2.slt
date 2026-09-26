@@ -1,0 +1,107 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/fk2.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case dfk-001
+
+statement ok
+PRAGMA foreign_keys=ON
+
+statement ok
+CREATE TABLE p(id INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE ch(pid INTEGER REFERENCES p(id))
+
+statement ok
+INSERT INTO p VALUES(1)
+
+statement ok
+INSERT INTO ch VALUES(1)
+
+statement error
+DROP TABLE p
+
+case dfk-002
+
+statement ok
+PRAGMA foreign_keys=ON
+
+statement ok
+CREATE TABLE p(id INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE ch(pid INTEGER REFERENCES p(id))
+
+statement ok
+DROP TABLE p
+
+query I rowsort
+SELECT count(*) FROM ch
+
+case dfk-003
+
+statement ok
+PRAGMA foreign_keys=ON
+
+statement ok
+CREATE TABLE p(id INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE ch(pid INTEGER REFERENCES p(id) ON DELETE CASCADE)
+
+statement ok
+INSERT INTO p VALUES(1)
+
+statement ok
+INSERT INTO ch VALUES(1)
+
+statement ok
+DROP TABLE p
+
+query I rowsort
+SELECT count(*) FROM ch
+
+case dfk-004
+
+statement ok
+PRAGMA foreign_keys=ON
+
+statement ok
+CREATE TABLE p(id INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE ch(pid INTEGER REFERENCES p(id))
+
+statement ok
+INSERT INTO p VALUES(1)
+
+statement ok
+INSERT INTO ch VALUES(1)
+
+statement error
+UPDATE p SET id=2
+
+case dfk-005
+
+statement ok
+PRAGMA foreign_keys=ON
+
+statement ok
+CREATE TABLE p(id INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE ch(pid INTEGER REFERENCES p(id))
+
+statement ok
+INSERT INTO p VALUES(1)
+
+statement ok
+INSERT INTO ch VALUES(1)
+
+statement ok
+ALTER TABLE p RENAME TO p2
+
+query I rowsort
+SELECT count(*) FROM ch
+

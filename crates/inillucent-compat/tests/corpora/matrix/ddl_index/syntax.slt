@@ -1,0 +1,130 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-create-index-stmt-p0
+
+statement ok
+DROP INDEX i
+
+statement ok
+CREATE INDEX i ON t (a)
+
+case syntax-create-index-stmt-p1
+
+statement ok
+DROP INDEX i
+
+statement ok
+CREATE UNIQUE INDEX IF NOT EXISTS main.i ON t (a COLLATE NOCASE DESC, b ASC)
+
+case syntax-create-index-stmt-p2
+
+statement ok
+DROP INDEX i
+
+statement ok
+CREATE INDEX i ON t (a + b) WHERE a IS NOT NULL
+
+case syntax-create-index-stmt-n3
+
+statement ok
+DROP INDEX i
+
+statement error
+CREATE INDEX i ON t
+
+case syntax-create-index-stmt-n4
+
+statement ok
+DROP INDEX i
+
+statement error
+CREATE INDEX ON t (a)
+
+case syntax-drop-index-stmt-p0
+
+statement ok
+DROP INDEX i
+
+case syntax-drop-index-stmt-p1
+
+statement ok
+DROP INDEX IF EXISTS main.i
+
+case syntax-drop-index-stmt-n2
+
+statement error
+DROP INDEX
+
+case syntax-indexed-column-p0
+
+statement ok
+DROP INDEX i
+
+statement ok
+CREATE INDEX i ON t (a)
+
+case syntax-indexed-column-p1
+
+statement ok
+DROP INDEX i
+
+statement ok
+CREATE INDEX i ON t (a COLLATE NOCASE)
+
+case syntax-indexed-column-p2
+
+statement ok
+DROP INDEX i
+
+statement ok
+CREATE INDEX i ON t (a DESC)
+
+case syntax-indexed-column-p3
+
+statement ok
+DROP INDEX i
+
+statement ok
+CREATE INDEX i ON t (a + 1)
+

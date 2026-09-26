@@ -1,0 +1,68 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-compound-operator-p0
+
+query I rowsort
+SELECT 1 UNION SELECT 2
+
+case syntax-compound-operator-p1
+
+query I rowsort
+SELECT 1 UNION ALL SELECT 2
+
+case syntax-compound-operator-p2
+
+query T rowsort
+SELECT 1 INTERSECT SELECT 2
+
+case syntax-compound-operator-p3
+
+query I rowsort
+SELECT 1 EXCEPT SELECT 2
+
+case syntax-compound-operator-n4
+
+statement error
+SELECT 1 UNION
+

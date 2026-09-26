@@ -1,0 +1,163 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/collation.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case coll-001
+
+query IIII rowsort
+SELECT 'a' = 'A' COLLATE NOCASE, 'a' = 'A', 'a ' = 'a' COLLATE RTRIM, 'a ' = 'a'
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES('b'),('A'),('a'),('B')
+
+case coll-002
+
+query T nosort
+SELECT a FROM t ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT)
+
+statement ok
+INSERT INTO t VALUES('b'),('A'),('a'),('B')
+
+case coll-003
+
+query T nosort
+SELECT a FROM t ORDER BY a COLLATE NOCASE, a
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE UNIQUE)
+
+statement ok
+INSERT INTO t VALUES('a')
+
+case coll-004
+
+statement error
+INSERT INTO t VALUES('A')
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE RTRIM)
+
+statement ok
+INSERT INTO t VALUES('a '),('a'),('b')
+
+case coll-005
+
+query TI rowsort
+SELECT a, count(*) FROM t GROUP BY a ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+INSERT INTO t VALUES('B'),('a')
+
+case coll-006
+
+query T rowsort
+SELECT a FROM t WHERE a = 'A'
+
+setup
+
+case coll-007
+
+query II rowsort
+SELECT 'a' COLLATE NOCASE = 'A', ('a' = 'A') COLLATE NOCASE
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES('A'),('a')
+
+case coll-008
+
+query T rowsort
+SELECT DISTINCT a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE, b TEXT)
+
+statement ok
+INSERT INTO t VALUES('A','a')
+
+case coll-009
+
+query II rowsort
+SELECT a=b, b=a FROM t
+
+setup
+
+case coll-010
+
+query II rowsort
+SELECT 'é' = 'É' COLLATE NOCASE, 'STRASSE' = 'strasse' COLLATE NOCASE
+
+setup
+
+statement ok
+CREATE TABLE t(a COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES('a'),('B')
+
+case coll-011
+
+query T rowsort
+SELECT group_concat(a) FROM (SELECT a FROM t ORDER BY a)
+
+setup
+
+case coll-012
+
+query I rowsort
+SELECT 1 COLLATE NOCASE = 1
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT)
+
+statement ok
+INSERT INTO t VALUES('a '),('a')
+
+case coll-013
+
+query II rowsort
+SELECT count(DISTINCT a COLLATE RTRIM), count(DISTINCT a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES('a'),('B'),('b'),('A')
+
+case coll-014
+
+query T nosort
+SELECT a FROM t WHERE a BETWEEN 'A' AND 'B' ORDER BY a, rowid
+

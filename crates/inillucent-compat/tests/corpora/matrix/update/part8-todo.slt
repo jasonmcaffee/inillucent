@@ -1,0 +1,137 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/todo.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case update-from-derived-count
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, position INTEGER)
+
+statement ok
+INSERT INTO todo VALUES (1, 0), (2, 0), (3, 0)
+
+statement ok
+CREATE TABLE ord (id INTEGER, pos INTEGER)
+
+statement ok
+INSERT INTO ord VALUES (3, 20), (1, 21), (2, 22)
+
+statement ok
+UPDATE todo SET position = p.pos FROM (SELECT id, pos FROM ord) AS p WHERE todo.id = p.id
+
+query II rowsort
+SELECT changes(), total_changes()
+
+query II rowsort
+SELECT * FROM todo ORDER BY id
+
+case update-from-join
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, position INTEGER)
+
+statement ok
+INSERT INTO todo VALUES (1, 0), (2, 0), (3, 0)
+
+statement ok
+CREATE TABLE a (x, y)
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE TABLE b (x, z)
+
+statement ok
+INSERT INTO b VALUES (1, 100), (2, 200), (3, 300)
+
+statement ok
+UPDATE todo SET position = a.y + b.z FROM a JOIN b ON b.x = a.x WHERE todo.id = a.x
+
+query I rowsort
+SELECT changes()
+
+query II rowsort
+SELECT * FROM todo ORDER BY id
+
+case update-from-join-using
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, position INTEGER)
+
+statement ok
+INSERT INTO todo VALUES (1, 0), (2, 0), (3, 0)
+
+statement ok
+CREATE TABLE a (x, y)
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE TABLE b (x, z)
+
+statement ok
+INSERT INTO b VALUES (1, 100), (2, 200), (3, 300)
+
+statement ok
+UPDATE todo SET position = b.z FROM a JOIN b USING (x) WHERE todo.id = x + 1
+
+query I rowsort
+SELECT changes()
+
+query II rowsort
+SELECT * FROM todo ORDER BY id
+
+case update-from-left-join
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, position INTEGER)
+
+statement ok
+INSERT INTO todo VALUES (1, 0), (2, 0), (3, 0)
+
+statement ok
+CREATE TABLE a (x, y)
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE TABLE b (x, z)
+
+statement ok
+INSERT INTO b VALUES (1, 100), (2, 200), (3, 300)
+
+statement ok
+UPDATE todo SET position = coalesce(b.z, -1) FROM a LEFT JOIN b ON b.x = a.x + 5 WHERE todo.id = a.x
+
+query I rowsort
+SELECT changes()
+
+query II rowsort
+SELECT * FROM todo ORDER BY id
+
+case total-changes
+
+statement ok
+CREATE TABLE t (a)
+
+statement ok
+INSERT INTO t VALUES (1), (2)
+
+query I rowsort
+SELECT total_changes()
+
+statement ok
+UPDATE t SET a = a + 1
+
+query I rowsort
+SELECT total_changes()
+
+statement ok
+UPDATE t SET a = a + 1
+
+query II rowsort
+SELECT total_changes(), changes()
+

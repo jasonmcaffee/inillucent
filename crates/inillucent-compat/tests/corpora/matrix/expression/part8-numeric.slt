@@ -1,0 +1,174 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/numeric.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case num-001
+
+query IIIIII rowsort
+SELECT 7/2, -7/2, 7%2, -7%2, 7%-2, -7%-2
+
+case num-002
+
+query RRTT rowsort
+SELECT 7/2.0, 7.0/2, typeof(7/2), typeof(7/2.0)
+
+case num-003
+
+query TTTT rowsort
+SELECT 1/0, 1%0, 1.0/0, typeof(1/0)
+
+case num-004
+
+query R rowsort
+SELECT 9223372036854775807 + 1
+
+case num-005
+
+query R rowsort
+SELECT -9223372036854775807 - 2
+
+case num-006
+
+query R rowsort
+SELECT 9223372036854775807 * 2
+
+case num-007
+
+statement error
+SELECT abs(-9223372036854775807), abs(-9223372036854775808)
+
+case num-008
+
+query R rowsort
+SELECT -9223372036854775808 / -1
+
+case num-009
+
+query RIR rowsort
+SELECT 0.1 + 0.2, 0.1 + 0.2 = 0.3, 0.3
+
+case num-010
+
+query RRRRR rowsort
+SELECT 1e21, 1e-7, 1e15, 1e16, 1e17
+
+case num-011
+
+query RRITT rowsort
+SELECT -0.0, 0.0, -0.0 = 0.0, 1/(-0.0), 1/0.0
+
+case num-012
+
+query TTTT rowsort
+SELECT CAST(1.0 AS TEXT), CAST(1.5 AS TEXT), CAST(1e21 AS TEXT), CAST(-0.0 AS TEXT)
+
+case num-013
+
+query IIII rowsort
+SELECT CAST('1.5' AS INTEGER), CAST('1.9' AS INTEGER), CAST(-1.9 AS INTEGER), CAST(1.9 AS INTEGER)
+
+case num-014
+
+query IIIT rowsort
+SELECT CAST('abc' AS INTEGER), CAST('12abc' AS INTEGER), CAST('' AS INTEGER), CAST(NULL AS INTEGER)
+
+case num-015
+
+query ITTT rowsort
+SELECT CAST(x'3132' AS INTEGER), CAST(x'3132' AS TEXT), typeof(CAST(1 AS BLOB)), hex(CAST(1 AS BLOB))
+
+case num-016
+
+query II rowsort
+SELECT CAST('9223372036854775808' AS INTEGER), CAST('-9223372036854775809' AS INTEGER)
+
+case num-017
+
+query RRRRRT rowsort
+SELECT round(2.5), round(-2.5), round(3.5), round(2.4567, 2), round(1.0), typeof(round(1.0))
+
+case num-018
+
+query RRR rowsort
+SELECT round(1e300, 2), round(0.5), round(-0.5)
+
+case num-019
+
+query IIIIII rowsort
+SELECT 3 & 5, 3 | 5, ~3, 1 << 3, 16 >> 2, -1 >> 1
+
+case num-020
+
+query III rowsort
+SELECT 1 << 63, 1 << 64, -1 << 1
+
+case num-021
+
+query III rowsort
+SELECT 5 / 2 * 2, 5 % 2 * 3, 2 + 3 * 4
+
+case num-022
+
+query TTTI rowsort
+SELECT typeof(1+1), typeof(1+1.0), typeof('1'+'1'), '1'+'1'
+
+case num-023
+
+query RTRT rowsort
+SELECT 1.0 * 1, typeof(1.0*1), 4.0/2, typeof(4.0/2)
+
+case num-024
+
+query ITRT rowsort
+SELECT max(1, 1.0), typeof(max(1,1.0)), min(1,1.0), typeof(min(1,1.0))
+
+case num-025
+
+query RI rowsort
+SELECT CAST(9223372036854775807 AS REAL), CAST(CAST(9223372036854775807 AS REAL) AS INTEGER)
+
+case num-026
+
+query RRT rowsort
+SELECT 1e400, -1e400, typeof(1e400)
+
+case num-027
+
+query II rowsort
+SELECT CAST(1e400 AS INTEGER), CAST(-1e400 AS INTEGER)
+
+case num-028
+
+query TTTTTT rowsort
+SELECT printf('%d', 1.9), printf('%s', 1.0), printf('%f', 1), printf('%.2f', 1.005), printf('%x', 255), printf('%%')
+
+case num-029
+
+query TTTTT rowsort
+SELECT printf('%5d|', 42), printf('%-5d|', 42), printf('%05.2f', 3.14159), printf('%e', 1234.5), printf('%g', 0.00001)
+
+case num-030
+
+query TTTT rowsort
+SELECT printf('%d %d', 1), printf('%d', 'abc'), printf('%s', NULL), printf('%!.15g', 0.1)
+
+case num-031
+
+query IIII rowsort
+SELECT 2.0 = 2, 2.0 > 1, '2.0' = 2, CAST('2.0' AS NUMERIC) = 2
+
+case num-032
+
+query RT rowsort
+SELECT total(a), typeof(total(a)) FROM (SELECT 1 AS a UNION ALL SELECT 2)
+
+case num-033
+
+statement error
+SELECT sum(a), typeof(sum(a)) FROM (SELECT 9223372036854775807 AS a UNION ALL SELECT 1)
+
+case num-034
+
+query RT rowsort
+SELECT avg(a), typeof(avg(a)) FROM (SELECT 1 AS a UNION ALL SELECT 2)
+

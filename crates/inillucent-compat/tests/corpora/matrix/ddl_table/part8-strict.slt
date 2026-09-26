@@ -1,0 +1,119 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/strict.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER) STRICT
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case str-001-3
+
+query IT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER) STRICT
+
+case str-002-3
+
+statement error
+INSERT INTO t VALUES('x')
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT) STRICT
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case str-003-3
+
+query TT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER) STRICT
+
+statement ok
+INSERT INTO t VALUES('12')
+
+case str-004-3
+
+query IT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+case str-005-3
+
+statement error
+CREATE TABLE t(a VARCHAR) STRICT
+
+setup
+
+statement ok
+CREATE TABLE t(a ANY) STRICT
+
+statement ok
+INSERT INTO t VALUES(1),('x'),(1.5)
+
+case str-006-3
+
+query IT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INT NOT NULL) STRICT
+
+case str-007-3
+
+statement error
+INSERT INTO t VALUES(NULL)
+
+setup
+
+statement ok
+CREATE TABLE t(a REAL) STRICT
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case str-008-3
+
+query RT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY) STRICT, WITHOUT ROWID
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case str-009-3
+
+query I rowsort
+SELECT * FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a BLOB) STRICT
+
+case str-010-3
+
+statement error
+INSERT INTO t VALUES('x')
+

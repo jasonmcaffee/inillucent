@@ -1,0 +1,320 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT, c REAL, d BLOB, e NUMERIC)
+
+case probe-ddl.table.basic
+
+query T rowsort
+SELECT sql FROM sqlite_schema WHERE name='t'
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE TABLE IF NOT EXISTS t(a)
+
+case probe-ddl.table.ifnotexists
+
+query I rowsort
+SELECT count(*) FROM sqlite_schema WHERE name='t'
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE d AS SELECT a, b FROM t WHERE a>15
+
+case probe-ddl.table.as.select
+
+query T rowsort
+SELECT sql FROM sqlite_schema WHERE name='d'
+
+query I rowsort
+SELECT count(*) FROM d
+
+setup
+
+statement ok
+CREATE TABLE t(k TEXT PRIMARY KEY, v) WITHOUT ROWID
+
+case probe-ddl.table.without.rowid
+
+query T rowsort
+SELECT sql FROM sqlite_schema WHERE name='t'
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT) STRICT
+
+statement ok
+INSERT INTO t VALUES (1,'x')
+
+case probe-ddl.table.strict
+
+statement error
+INSERT INTO t VALUES ('abc','y')
+
+setup
+
+statement ok
+CREATE TABLE t(a ANY) STRICT
+
+statement ok
+INSERT INTO t VALUES (1),('x'),(2.5)
+
+case probe-ddl.table.strict.any
+
+query T rowsort
+SELECT group_concat(typeof(a)) FROM (SELECT typeof(a) a FROM t)
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER GENERATED ALWAYS AS (a*2) VIRTUAL)
+
+statement ok
+INSERT INTO t(a) VALUES (3)
+
+case probe-ddl.table.generated.virtual
+
+query II rowsort
+SELECT a,b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER GENERATED ALWAYS AS (a*2) STORED)
+
+statement ok
+INSERT INTO t(a) VALUES (3)
+
+case probe-ddl.table.generated.stored
+
+query II rowsort
+SELECT a,b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER DEFAULT 5, b TEXT DEFAULT 'q', c INTEGER DEFAULT (2+3))
+
+statement ok
+INSERT INTO t DEFAULT VALUES
+
+case probe-ddl.table.default
+
+query ITI rowsort
+SELECT a,b,c FROM t
+
+setup
+
+statement ok
+CREATE TABLE t("left" INTEGER, [right] TEXT, `order` INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1,'x',2)
+
+case probe-ddl.table.quoted
+
+query ITI rowsort
+SELECT "left", [right], `order` FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a, b)
+
+statement ok
+INSERT INTO t VALUES (1,'x')
+
+case probe-ddl.table.typeless
+
+query TT rowsort
+SELECT typeof(a), typeof(b) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+case probe-ddl.table.drop
+
+statement ok
+DROP TABLE t
+
+statement ok
+DROP TABLE IF EXISTS t
+
+query I rowsort
+SELECT count(*) FROM sqlite_schema WHERE name='t'
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER, PRIMARY KEY(a,b))
+
+statement ok
+INSERT INTO t VALUES (1,1),(1,2)
+
+case probe-ddl.table.pk.composite
+
+statement error
+INSERT INTO t VALUES (1,1)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-alter.rename.table
+
+statement ok
+ALTER TABLE t RENAME TO t2
+
+query I rowsort
+SELECT count(*) FROM t2
+
+case probe-alter.rename.column
+
+statement ok
+ALTER TABLE t RENAME COLUMN b TO bb
+
+query T rowsort
+SELECT bb FROM t WHERE id=1
+
+case probe-alter.add.column
+
+statement ok
+ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 7
+
+query I rowsort
+SELECT c FROM t WHERE id=1
+
+case probe-alter.drop.column
+
+statement ok
+ALTER TABLE t DROP COLUMN b
+
+query T rowsort
+SELECT sql FROM sqlite_schema WHERE name='t'
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE VIEW v AS SELECT a FROM t
+
+case probe-alter.rename.propagates
+
+statement ok
+ALTER TABLE t RENAME TO t2
+
+query T rowsort
+SELECT sql FROM sqlite_schema WHERE name='v'
+
+setup
+
+statement ok
+CREATE TABLE t(a DEFAULT CURRENT_TIMESTAMP, b DEFAULT CURRENT_DATE, c DEFAULT CURRENT_TIME)
+
+statement ok
+INSERT INTO t DEFAULT VALUES
+
+case probe-ddl.default.timestamp
+
+query IIIT rowsort
+SELECT length(a), length(b), length(c), typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE u(a)
+
+case probe-ddl.check.subquery
+
+statement error
+CREATE TABLE t(a INTEGER CHECK (a IN (SELECT a FROM u)))
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY DESC, a)
+
+statement ok
+INSERT INTO t VALUES (1,'x')
+
+case probe-ddl.pk.desc
+
+query IT rowsort
+SELECT id, typeof(id) FROM t
+
+query I rowsort
+SELECT count(*) FROM pragma_index_list('t')
+
+setup
+
+statement ok
+CREATE TABLE t(k TEXT PRIMARY KEY, v) WITHOUT ROWID
+
+statement ok
+INSERT INTO t VALUES ('a',1)
+
+case probe-ddl.without.rowid.rowid
+
+statement error
+SELECT rowid FROM t
+
+setup
+
+case probe-ddl.without.rowid.nopk
+
+statement error
+CREATE TABLE t(a, b) WITHOUT ROWID
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-alter.add.notnull
+
+statement ok
+ALTER TABLE t ADD COLUMN c INTEGER NOT NULL DEFAULT 3
+
+query T rowsort
+SELECT group_concat(c) FROM (SELECT c FROM t ORDER BY id)
+
+case probe-alter.add.notnull.nodefault
+
+statement error
+ALTER TABLE t ADD COLUMN c INTEGER NOT NULL
+
+case probe-alter.add.unique
+
+statement error
+ALTER TABLE t ADD COLUMN c INTEGER UNIQUE
+

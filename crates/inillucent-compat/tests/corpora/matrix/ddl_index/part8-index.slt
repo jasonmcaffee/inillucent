@@ -1,0 +1,102 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/index.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+INSERT INTO t VALUES(1,2)
+
+case idx-001
+
+query II rowsort
+SELECT * FROM t INDEXED BY i WHERE a=1
+
+case idx-002
+
+query II rowsort
+SELECT * FROM t NOT INDEXED WHERE a=1
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+case idx-003
+
+statement error
+SELECT * FROM t INDEXED BY nosuch WHERE a=1
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE INDEX i ON t(a) WHERE b>0
+
+statement ok
+INSERT INTO t VALUES(1,2),(3,-1)
+
+case idx-004
+
+query I rowsort
+SELECT a FROM t WHERE b>0 AND a=1
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE INDEX i ON t(abs(a))
+
+statement ok
+INSERT INTO t VALUES(-3)
+
+case idx-005
+
+query I rowsort
+SELECT a FROM t WHERE abs(a)=3
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE UNIQUE INDEX i ON t(a,b)
+
+statement ok
+INSERT INTO t VALUES(1,2)
+
+case idx-006
+
+statement error
+INSERT INTO t VALUES(1,2)
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE INDEX i ON t(a DESC)
+
+statement ok
+INSERT INTO t VALUES(1),(3),(2)
+
+case idx-007
+
+query I nosort
+SELECT a FROM t ORDER BY a DESC
+

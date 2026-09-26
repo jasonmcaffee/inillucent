@@ -1,0 +1,109 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/like.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case like-001
+
+query IIII rowsort
+SELECT 'abc' LIKE 'a_c', 'abc' LIKE 'a__c', 'a%c' LIKE 'a\%c' ESCAPE '\', 'abc' LIKE 'a\%c' ESCAPE '\'
+
+case like-002
+
+query III rowsort
+SELECT 'a_c' LIKE 'a\_c' ESCAPE '\', 'abc' LIKE 'a\_c' ESCAPE '\', 'a\c' LIKE 'a\\c' ESCAPE '\'
+
+case like-003
+
+query III rowsort
+SELECT 'É' LIKE 'é', 'I' LIKE 'i', '中' LIKE '中'
+
+case like-004
+
+query TTT rowsort
+SELECT NULL LIKE 'a', 'a' LIKE NULL, 'a' LIKE 'a' ESCAPE NULL
+
+case like-005
+
+query III rowsort
+SELECT 1 LIKE '1', 1.5 LIKE '1.5', x'4142' LIKE 'AB'
+
+case like-006
+
+query IIII rowsort
+SELECT 'abc' GLOB 'a?c', 'abc' GLOB '[a-c]bc', 'abc' GLOB '[^a]bc', 'a*c' GLOB 'a[*]c'
+
+case like-007
+
+query IIII rowsort
+SELECT 'abc' GLOB '*', '' GLOB '*', '' LIKE '%', 'abc' GLOB 'a**c'
+
+case like-008
+
+query IIT rowsort
+SELECT 'abc' NOT LIKE 'a%', 'abc' NOT GLOB 'a*', NULL NOT LIKE 'a'
+
+case like-009
+
+query III rowsort
+SELECT like('a%','abc'), like('a\%c','a%c','\'), glob('a*','abc')
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES('ABC')
+
+case like-010
+
+query II rowsort
+SELECT a LIKE 'abc', a = 'abc' FROM t
+
+setup
+
+case like-011
+
+query III rowsort
+SELECT 'abc' LIKE 'A%', 'ABC' LIKE 'a%', 'é' LIKE 'É'
+
+case like-012
+
+query II rowsort
+SELECT 'a[b' GLOB 'a[[]b', 'a]b' GLOB 'a]b'
+
+case like-013
+
+query II rowsort
+SELECT '100%' LIKE '%!%' ESCAPE '!', '100x' LIKE '%!%' ESCAPE '!'
+
+case like-014
+
+query III rowsort
+SELECT 'abc' LIKE '%%%', 'abc' LIKE '%b%', 'abc' LIKE '_%_'
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES('abc'),('ABC'),('aBc')
+
+case like-015
+
+query T nosort
+SELECT a FROM t WHERE a LIKE 'abc' ORDER BY a
+
+setup
+
+case like-016
+
+statement error
+SELECT 'abc' MATCH 'a'
+
+case like-017
+
+statement error
+SELECT 'abc' REGEXP 'a'
+

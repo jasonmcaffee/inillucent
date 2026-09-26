@@ -1,0 +1,133 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/alter.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case alt-001
+
+statement ok
+ALTER TABLE t ADD COLUMN b DEFAULT 7
+
+query II rowsort
+SELECT a,b FROM t
+
+case alt-002
+
+statement ok
+ALTER TABLE t ADD COLUMN b
+
+query ITT rowsort
+SELECT a,b,typeof(b) FROM t
+
+case alt-003
+
+statement ok
+ALTER TABLE t RENAME TO u
+
+query I rowsort
+SELECT a FROM u
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+INSERT INTO t VALUES(1,2)
+
+case alt-004
+
+statement ok
+ALTER TABLE t RENAME COLUMN b TO c
+
+query I rowsort
+SELECT c FROM t
+
+case alt-005
+
+statement ok
+ALTER TABLE t DROP COLUMN b
+
+query I rowsort
+SELECT * FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a PRIMARY KEY, b)
+
+case alt-006
+
+statement error
+ALTER TABLE t DROP COLUMN a
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+case alt-007
+
+statement ok
+ALTER TABLE t ADD COLUMN b NOT NULL
+
+case alt-008
+
+statement error
+ALTER TABLE t ADD COLUMN b UNIQUE
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE VIEW v AS SELECT a FROM t
+
+case alt-009
+
+statement ok
+ALTER TABLE t RENAME TO u
+
+query T rowsort
+SELECT sql FROM sqlite_schema WHERE name='v'
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE INDEX i ON t(b)
+
+case alt-010
+
+statement ok
+ALTER TABLE t RENAME COLUMN b TO c
+
+query T rowsort
+SELECT sql FROM sqlite_schema WHERE name='i'
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case alt-011
+
+statement ok
+ALTER TABLE t ADD COLUMN b INTEGER DEFAULT '5'
+
+query IT rowsort
+SELECT b, typeof(b) FROM t
+

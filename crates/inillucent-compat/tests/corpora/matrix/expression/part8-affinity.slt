@@ -1,0 +1,268 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/affinity.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case aff-001
+
+query IIIIT rowsort
+SELECT '10' < 9, '10' < '9', 10 < '9', '10' = 10, typeof('10'+0)
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER)
+
+statement ok
+INSERT INTO t VALUES('10'),('9')
+
+case aff-002
+
+query IT rowsort
+SELECT a, typeof(a) FROM t ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT)
+
+statement ok
+INSERT INTO t VALUES(10),(9)
+
+case aff-003
+
+query TT rowsort
+SELECT a, typeof(a) FROM t ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT)
+
+statement ok
+INSERT INTO t VALUES('10'),('9')
+
+case aff-004
+
+query T nosort
+SELECT a FROM t WHERE a < 9 ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER)
+
+statement ok
+INSERT INTO t VALUES('abc')
+
+case aff-005
+
+query TT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a NUMERIC)
+
+statement ok
+INSERT INTO t VALUES('10'),('10.5'),('abc'),(1.0)
+
+case aff-006
+
+query IT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a REAL)
+
+statement ok
+INSERT INTO t VALUES(1),('2'),('x')
+
+case aff-007
+
+query RT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a BLOB)
+
+statement ok
+INSERT INTO t VALUES(1),('2')
+
+case aff-008
+
+query IT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a VARCHAR(10))
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case aff-009
+
+query T rowsort
+SELECT typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a FLOATING POINT)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case aff-010
+
+query T rowsort
+SELECT typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a BIGINT)
+
+statement ok
+INSERT INTO t VALUES('1')
+
+case aff-011
+
+query T rowsort
+SELECT typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a DATETIME)
+
+statement ok
+INSERT INTO t VALUES('2020-01-01')
+
+case aff-012
+
+query T rowsort
+SELECT typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a,b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case aff-013
+
+query III rowsort
+SELECT a=b, a<b, b<a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,'1')
+
+case aff-014
+
+query I rowsort
+SELECT a=b FROM t
+
+setup
+
+case aff-015
+
+query IIITI rowsort
+SELECT 1 < 'a', 'a' < x'00', x'00' < 1, NULL < 1, 1.5 < 2
+
+case aff-016
+
+query TIII rowsort
+SELECT hex(x'01') , x'01' = x'01', x'01' < x'02', x'0101' > x'02'
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2.5),('a'),(x'00'),(NULL)
+
+case aff-017
+
+query T nosort
+SELECT typeof(a) FROM t ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(1.0),('1')
+
+case aff-018
+
+query IT nosort
+SELECT DISTINCT a, typeof(a) FROM t ORDER BY typeof(a), a
+
+setup
+
+case aff-019
+
+query IIII rowsort
+SELECT '1' = 1, '1.0' = 1.0, '1' = 1.0, CAST('1' AS INTEGER) = 1
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t VALUES('5','x')
+
+case aff-020
+
+query IT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+case aff-021
+
+query IITT rowsort
+SELECT 2 = 2.0, 2 IS 2.0, typeof(2), typeof(2.0)
+
+setup
+
+statement ok
+CREATE TABLE t(a INT)
+
+statement ok
+INSERT INTO t VALUES(9223372036854775807),('9223372036854775808')
+
+case aff-022
+
+query IT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+case aff-023
+
+query IIIRIT rowsort
+SELECT '  10  ' + 0, '10abc' + 0, 'abc' + 0, '1e3' + 0, '0x10' + 0, typeof('1e3'+0)
+
+case aff-024
+
+query IIIRR rowsort
+SELECT '+5'+0, '-5'+0, '. 5'+0, '.5'+0, '5.'+0
+

@@ -1,0 +1,17 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2089.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C')
+
+case collate-partition-by
+
+query II rowsort
+SELECT id, count(*) OVER (PARTITION BY s COLLATE NOCASE || '') FROM t ORDER BY id
+

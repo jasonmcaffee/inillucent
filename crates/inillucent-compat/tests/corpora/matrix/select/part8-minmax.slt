@@ -1,0 +1,52 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/minmax.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case mmx-001
+
+query RTIT rowsort
+SELECT min(1,1.0), typeof(min(1,1.0)), max(1,1.0), typeof(max(1,1.0))
+
+case mmx-002
+
+query ITRT rowsort
+SELECT min(1.0,1), typeof(min(1.0,1)), max(1.0,1), typeof(max(1.0,1))
+
+case mmx-003
+
+query TIT rowsort
+SELECT min('a','a'), max(2,2.0), typeof(max(2,2.0))
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(1.0)
+
+case mmx-004
+
+query ITIT rowsort
+SELECT min(a), typeof(min(a)), max(a), typeof(max(a)) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1.0),(1)
+
+case mmx-005
+
+query RTRT rowsort
+SELECT min(a), typeof(min(a)), max(a), typeof(max(a)) FROM t
+
+setup
+
+case mmx-006
+
+query RI rowsort
+SELECT min(1,2,1.0), max(1,1.0,1)
+

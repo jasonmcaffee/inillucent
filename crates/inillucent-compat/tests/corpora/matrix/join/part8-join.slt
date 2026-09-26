@@ -1,0 +1,146 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/join.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE l(id INTEGER, v TEXT)
+
+statement ok
+CREATE TABLE r(id INTEGER, w TEXT)
+
+statement ok
+INSERT INTO l VALUES(1,'a'),(2,'b'),(3,'c')
+
+statement ok
+INSERT INTO r VALUES(1,'x'),(1,'y'),(4,'z')
+
+case join-001
+
+query ITIT rowsort
+SELECT * FROM l JOIN r ON l.id=r.id ORDER BY l.id, r.w
+
+case join-002
+
+query ITIT rowsort
+SELECT * FROM l LEFT JOIN r ON l.id=r.id ORDER BY l.id, r.w
+
+case join-003
+
+query ITIT rowsort
+SELECT * FROM l RIGHT JOIN r ON l.id=r.id ORDER BY r.id, r.w
+
+case join-004
+
+query TTIT rowsort
+SELECT * FROM l FULL OUTER JOIN r ON l.id=r.id ORDER BY l.id, r.id, r.w
+
+case join-005
+
+query ITIT rowsort
+SELECT * FROM l CROSS JOIN r ORDER BY l.id, r.id, r.w
+
+case join-006
+
+query ITT rowsort
+SELECT * FROM l JOIN r USING(id) ORDER BY id, w
+
+case join-007
+
+query ITT rowsort
+SELECT * FROM l LEFT JOIN r USING(id) ORDER BY id, w
+
+case join-008
+
+query ITT rowsort
+SELECT * FROM l NATURAL JOIN r ORDER BY l.id
+
+case join-009
+
+query ITIT rowsort
+SELECT * FROM l LEFT JOIN r ON l.id=r.id AND r.w='y' ORDER BY l.id
+
+case join-010
+
+query ITIT rowsort
+SELECT * FROM l LEFT JOIN r ON l.id=r.id WHERE r.w='y' ORDER BY l.id
+
+case join-011
+
+query I rowsort
+SELECT count(*) FROM l a1 JOIN l a2 ON a1.id < a2.id
+
+case join-012
+
+query ITIT rowsort
+SELECT * FROM l JOIN r ON l.id+1 = r.id ORDER BY l.id
+
+case join-013
+
+query II rowsort
+SELECT l.id, count(r.id) FROM l LEFT JOIN r ON l.id=r.id GROUP BY l.id ORDER BY l.id
+
+case join-014
+
+query ITIT rowsort
+SELECT * FROM l, r WHERE l.id=r.id ORDER BY l.id, r.w
+
+case join-015
+
+query ITTT rowsort
+SELECT * FROM l LEFT JOIN r ON 0 ORDER BY l.id
+
+case join-016
+
+query II rowsort
+SELECT * FROM (SELECT 1 AS id) x LEFT JOIN (SELECT 1 AS id, 2 AS y) z USING(id)
+
+case join-017
+
+query II nosort
+SELECT l.id, r.id FROM l LEFT JOIN r ON l.id=r.id ORDER BY l.id, r.id
+
+case join-018
+
+query I rowsort
+SELECT count(*) FROM l JOIN r JOIN l AS l2
+
+setup
+
+statement ok
+CREATE TABLE p(a)
+
+statement ok
+CREATE TABLE q(a)
+
+statement ok
+INSERT INTO p VALUES(NULL),(1)
+
+statement ok
+INSERT INTO q VALUES(NULL),(1)
+
+case join-019
+
+query I rowsort
+SELECT count(*) FROM p JOIN q ON p.a=q.a
+
+setup
+
+statement ok
+CREATE TABLE l(id INTEGER, v TEXT)
+
+statement ok
+CREATE TABLE r(id INTEGER, w TEXT)
+
+statement ok
+INSERT INTO l VALUES(1,'a'),(2,'b'),(3,'c')
+
+statement ok
+INSERT INTO r VALUES(1,'x'),(1,'y'),(4,'z')
+
+case join-020
+
+query ITITIT rowsort
+SELECT * FROM l LEFT JOIN r ON l.id=r.id LEFT JOIN l AS l3 ON l3.id=r.id ORDER BY l.id, r.w
+

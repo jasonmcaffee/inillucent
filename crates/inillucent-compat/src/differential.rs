@@ -186,7 +186,27 @@ pub fn tagged(value: &OwnedDatum) -> TaggedValue {
 /// almost right: a failed statement still reports the connection state after
 /// it, and a query that produced no rows still reports its column names.
 pub fn observe(connection: &Connection<'_>, sql: &str, query: bool) -> Observation {
+    observe_detailed(connection, sql, query).0
+}
+
+/// Runs one statement on inillucent and reports it the way the oracle would,
+/// with the engine's own error beside the observation.
+///
+/// The observation carries only what the protocol can carry, which is the two
+/// result codes. The statement matrix also needs to know whether a refusal was
+/// the engine's own "not built yet", which only the `DbError` says, so this
+/// returns it rather than a second function running the statement again.
+///
+/// @param connection - the session to run it on
+/// @param sql - one or more statements
+/// @param query - whether to collect rows and column names
+pub fn observe_detailed(
+    connection: &Connection<'_>,
+    sql: &str,
+    query: bool,
+) -> (Observation, Option<inillucent_base::DbError>) {
     let mut observation = Observation::default();
+    let mut error = None;
     let outcome = (|| -> Result<(Vec<Vec<TaggedValue>>, Vec<String>), inillucent_base::DbError> {
         let mut rows = Vec::new();
         let mut columns = Vec::new();
@@ -235,16 +255,21 @@ pub fn observe(connection: &Connection<'_>, sql: &str, query: bool) -> Observati
             observation.code = failure.code().value();
             observation.extended = failure.extended().value();
             observation.message = failure.message().to_string();
+            error = Some(failure);
         }
     }
     observation.changes = connection.changes().unwrap_or_default();
     observation.total_changes = connection.total_changes().unwrap_or_default();
     observation.last_insert_rowid = connection.last_insert_rowid().unwrap_or_default();
     observation.autocommit = connection.autocommit().unwrap_or_default();
-    observation
+    (observation, error)
 }
 
-/// Compares one observation, saying whether the cumulative counters count.
+//// Compares one observation, saying whether the cumulative counters count.
+///
+/// Panics with the first difference [`observation_differences`] finds, which
+/// is what every hand written differential suite wants: stop at the statement
+/// that disagreed and say how.
 pub fn compare_with_counters(
     label: &str,
     sql: &str,
@@ -253,84 +278,164 @@ pub fn compare_with_counters(
     query: bool,
     counters: bool,
 ) {
-    assert_eq!(
-        candidate.ok,
-        reference.ok,
-        "{label} `{sql}`: inillucent {} and SQLite {}\n  inillucent: {}\n  SQLite:  {}",
-        if candidate.ok { "succeeded" } else { "failed" },
-        if reference.ok { "succeeded" } else { "failed" },
-        candidate.message,
-        reference.message
-    );
+    if let Some(first) =
+        observation_differences(label, sql, candidate, reference, query, counters).first()
+    {
+        panic!("{first}");
+    }
+}
+
+/// Returns every way two observations of one statement disagree, as messages.
+///
+/// **One comparison, used by two callers that report differently.** The hand
+/// written suites stop at the first difference, and the statement matrix
+/// records every difference of every case and asserts once at the end of a
+/// group. Before the matrix this was a list of `assert_eq!` calls, and the
+/// matrix would have had to copy it to get a result it could keep: a second
+/// copy that could compare less than the first and look green.
+///
+/// The order is the order the assertions used to run in, so the first message
+/// is the one a hand written suite always printed.
+///
+/// @param label - what to call this comparison in a message
+/// @param sql - the statement, for the message
+/// @param candidate - this engine's observation
+/// @param reference - the oracle's
+/// @param query - whether the rows and column names are compared
+/// @param counters - whether the cumulative counters are still comparable,
+///   which a module in play makes false
+pub fn observation_differences(
+    label: &str,
+    sql: &str,
+    candidate: &Observation,
+    reference: &Observation,
+    query: bool,
+    counters: bool,
+) -> Vec<String> {
+    observation_differences_counting(label, sql, candidate, reference, query, counters, true)
+}
+
+/// [`observation_differences`], with `changes()` left out when `changes` is
+/// false.
+///
+/// **For the statements between a `CREATE VIRTUAL TABLE` and the next write.**
+/// A module fills its shadow tables with statements of its own while it is
+/// created, and SQLite's `changes()` then holds what the last of them did
+/// until the caller's next `INSERT`, `UPDATE` or `DELETE` replaces it. That is
+/// a fact about FTS5's internals, and the statement matrix found it as a
+/// difference on every `CREATE TRIGGER` that followed an FTS5 table.
+///
+/// @param label - what to call this comparison in a message
+/// @param sql - the statement, for the message
+/// @param candidate - this engine's observation
+/// @param reference - the oracle's
+/// @param query - whether the rows and column names are compared
+/// @param counters - whether the cumulative counters are still comparable
+/// @param changes - whether `changes()` is comparable
+pub fn observation_differences_counting(
+    label: &str,
+    sql: &str,
+    candidate: &Observation,
+    reference: &Observation,
+    query: bool,
+    counters: bool,
+    changes: bool,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    if candidate.ok != reference.ok {
+        found.push(format!(
+            "{label} `{sql}`: inillucent {} and SQLite {}\n  inillucent: {}\n  SQLite:  {}",
+            if candidate.ok { "succeeded" } else { "failed" },
+            if reference.ok { "succeeded" } else { "failed" },
+            candidate.message,
+            reference.message
+        ));
+        return found;
+    }
     if !reference.ok {
-        assert_eq!(
-            candidate.code, reference.code,
-            "{label} `{sql}`: primary code\n  inillucent: {} ({})\n  SQLite:  {} ({})",
-            candidate.code, candidate.message, reference.code, reference.message
-        );
-        assert_eq!(
-            candidate.extended, reference.extended,
-            "{label} `{sql}`: extended code\n  inillucent: {} ({})\n  SQLite:  {} ({})",
-            candidate.extended, candidate.message, reference.extended, reference.message
-        );
+        if candidate.code != reference.code {
+            found.push(format!(
+                "{label} `{sql}`: primary code\n  inillucent: {} ({})\n  SQLite:  {} ({})",
+                candidate.code, candidate.message, reference.code, reference.message
+            ));
+        }
+        if candidate.extended != reference.extended {
+            found.push(format!(
+                "{label} `{sql}`: extended code\n  inillucent: {} ({})\n  SQLite:  {} ({})",
+                candidate.extended, candidate.message, reference.extended, reference.message
+            ));
+        }
         // **A `RAISE` is graded on its message too.** The message is what the
         // trigger's author wrote for the caller to read, and since it can be an
         // expression over the row (`RAISE(ABORT, 'too big: ' || NEW.n)`) it is
         // a computed answer like any other. Every other failure's text is the
         // engine's own wording and is not compared.
-        if reference.extended == inillucent_sql::dml::codes::TRIGGER {
-            assert_eq!(
-                candidate.message, reference.message,
-                "{label} `{sql}`: RAISE message"
-            );
+        if reference.extended == inillucent_sql::dml::codes::TRIGGER
+            && candidate.message != reference.message
+        {
+            found.push(format!(
+                "{label} `{sql}`: RAISE message\n  inillucent: {}\n  SQLite:  {}",
+                candidate.message, reference.message
+            ));
         }
         // **The rows are not compared and the counters are**, which is why this
-        // returns here rather than skipping the whole tail. A failed statement
-        // produced no rows to compare, but it has counters and they are a
-        // question with a right answer: `UPDATE OR FAIL` keeps the rows it
-        // wrote, so `changes()` moves and `total_changes()` moves with it,
-        // while an `ABORT` puts them back and neither moves. Returning early
-        // used to skip that grading entirely, which is how the pair could read
-        // `0 | 0` for every failed statement with no differential case ever
-        // catching it.
-        compare_counters(label, sql, candidate, reference, counters);
-        return;
+        // does not return before them. A failed statement produced no rows to
+        // compare, but it has counters and they are a question with a right
+        // answer: `UPDATE OR FAIL` keeps the rows it wrote, so `changes()`
+        // moves and `total_changes()` moves with it, while an `ABORT` puts them
+        // back and neither moves. Returning early used to skip that grading
+        // entirely, which is how the pair could read `0 | 0` for every failed
+        // statement with no differential case ever catching it.
+        counter_differences(
+            &mut found, label, sql, candidate, reference, counters, changes,
+        );
+        return found;
     }
     if query {
-        assert_eq!(
-            candidate.rows, reference.rows,
-            "{label} `{sql}`: rows\n  inillucent: {:?}\n  SQLite:  {:?}",
-            candidate.rows, reference.rows
-        );
-        assert_eq!(
-            candidate.columns, reference.columns,
-            "{label} `{sql}`: column names",
-        );
+        if candidate.rows != reference.rows {
+            found.push(format!(
+                "{label} `{sql}`: rows\n  inillucent: {:?}\n  SQLite:  {:?}",
+                candidate.rows, reference.rows
+            ));
+        }
+        if candidate.columns != reference.columns {
+            found.push(format!(
+                "{label} `{sql}`: column names\n  inillucent: {:?}\n  SQLite:  {:?}",
+                candidate.columns, reference.columns
+            ));
+        }
     }
-    compare_counters(label, sql, candidate, reference, counters);
+    counter_differences(
+        &mut found, label, sql, candidate, reference, counters, changes,
+    );
+    found
 }
 
 /// Compares the three counters and the autocommit flag.
 ///
 /// Split out so a statement that **failed** is graded on them too: it has no
-/// rows to compare and every other assertion above is about rows, but the
+/// rows to compare and every other comparison above is about rows, but the
 /// counters after a failure are a question with a right answer - and one this
 /// engine got wrong in both directions, reading `0 | 0` for every failed
 /// statement regardless of whether `UPDATE OR FAIL` should have kept the rows
 /// it wrote or `ABORT` should have put them back.
 ///
-/// @param label - what to call this comparison in a failure
+/// @param found - where each difference is added
+/// @param label - what to call this comparison in a message
 /// @param sql - the statement, for the message
 /// @param candidate - this engine's observation
 /// @param reference - the oracle's
 /// @param counters - whether the cumulative counters are still comparable,
 ///   which a module in play makes false
-fn compare_counters(
+/// @param changes - whether `changes()` is comparable
+fn counter_differences(
+    found: &mut Vec<String>,
     label: &str,
     sql: &str,
     candidate: &Observation,
     reference: &Observation,
     counters: bool,
+    changes: bool,
 ) {
     // A `CREATE VIRTUAL TABLE` leaves the counters holding whatever the module
     // did to its own shadow tables while it was being made, which is a fact
@@ -339,29 +444,40 @@ fn compare_counters(
         .trim_start()
         .get(..21)
         .is_some_and(|head| head.eq_ignore_ascii_case("CREATE VIRTUAL TABLE "));
-    if !module_create {
-        assert_eq!(
-            candidate.changes, reference.changes,
-            "{label} `{sql}`: changes()",
+    let mut check = |name: &str, ours: String, theirs: String| {
+        if ours != theirs {
+            found.push(format!(
+                "{label} `{sql}`: {name}\n  inillucent: {ours}\n  SQLite:  {theirs}"
+            ));
+        }
+    };
+    if changes && !module_create {
+        check(
+            "changes()",
+            candidate.changes.to_string(),
+            reference.changes.to_string(),
         );
     }
     if counters && !module_create {
-        assert_eq!(
-            candidate.total_changes, reference.total_changes,
-            "{label} `{sql}`: total_changes()",
+        check(
+            "total_changes()",
+            candidate.total_changes.to_string(),
+            reference.total_changes.to_string(),
         );
-        assert_eq!(
-            candidate.last_insert_rowid, reference.last_insert_rowid,
-            "{label} `{sql}`: last_insert_rowid()",
+        check(
+            "last_insert_rowid()",
+            candidate.last_insert_rowid.to_string(),
+            reference.last_insert_rowid.to_string(),
         );
     }
-    assert_eq!(
-        candidate.autocommit, reference.autocommit,
-        "{label} `{sql}`: autocommit",
+    check(
+        "autocommit",
+        candidate.autocommit.to_string(),
+        reference.autocommit.to_string(),
     );
 }
 
-/// Runs a scenario against both engines and compares every reply.
+// Runs a scenario against both engines and compares every reply.
 ///
 /// Returns how many statements were compared, so a scenario that stopped early
 /// cannot look like one that passed. Zero means the oracle was not built.

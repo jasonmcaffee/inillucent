@@ -1,0 +1,73 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/withoutrowid.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT PRIMARY KEY, b) WITHOUT ROWID
+
+statement ok
+INSERT INTO t VALUES('x',1),('a',2)
+
+case wor-001
+
+query TI rowsort
+SELECT * FROM t ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT PRIMARY KEY, b) WITHOUT ROWID
+
+statement ok
+INSERT INTO t VALUES('x',1)
+
+case wor-002
+
+statement error
+SELECT rowid FROM t
+
+setup
+
+case wor-003
+
+statement error
+CREATE TABLE t(a,b) WITHOUT ROWID
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT PRIMARY KEY, b) WITHOUT ROWID
+
+statement ok
+INSERT INTO t VALUES('x',1)
+
+case wor-004
+
+statement error
+INSERT INTO t VALUES('x',2)
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT PRIMARY KEY, b) WITHOUT ROWID
+
+case wor-005
+
+statement error
+INSERT INTO t VALUES(NULL,1)
+
+setup
+
+statement ok
+CREATE TABLE t(a,b, PRIMARY KEY(a,b)) WITHOUT ROWID
+
+statement ok
+INSERT INTO t VALUES(1,2),(1,3)
+
+case wor-006
+
+query II rowsort
+SELECT * FROM t ORDER BY a,b
+

@@ -1,0 +1,37 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2134.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE sale (day TEXT, item TEXT, cents INTEGER)
+
+statement ok
+INSERT INTO sale VALUES ('2026-09-20', 'Latte', 1050), ('2026-09-20', 'Croissant', 375), ('2026-09-21', 'Latte', 525)
+
+case t2134-jga-001
+
+query T nosort
+SELECT json_object('day', day, 'items', json_group_array(item)) FROM sale GROUP BY day ORDER BY day
+
+query T rowsort
+SELECT json_array(json_group_array(item)) FROM sale
+
+query T rowsort
+SELECT json_object('by', json_group_object(item, cents)) FROM sale WHERE day = '2026-09-20'
+
+query T rowsort
+SELECT json_object('b', jsonb_group_array(item)) FROM sale WHERE day = '2026-09-21'
+
+case t2134-jga-002
+
+query T rowsort
+SELECT json_array(json_group_array(item) FILTER (WHERE cents > 500)) FROM sale
+
+query T rowsort
+SELECT json_array(json_group_array(item), 'x') FROM sale GROUP BY day HAVING json_array_length(json_group_array(item)) > 1
+
+query TT rowsort
+SELECT json_group_array(item) -> 0, json_quote(json_group_array(item)) FROM sale
+

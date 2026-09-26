@@ -1,0 +1,65 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/returning.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+case ret-001
+
+query IT rowsort
+INSERT INTO t(b) VALUES('x') RETURNING a,b
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t(b) VALUES('x')
+
+case ret-002
+
+query IT rowsort
+UPDATE t SET b='y' RETURNING *
+
+case ret-003
+
+query IT rowsort
+DELETE FROM t RETURNING a,b
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+case ret-004
+
+query I rowsort
+INSERT INTO t(b) VALUES('x'),('y') RETURNING a*10 AS m
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b DEFAULT 7)
+
+case ret-005
+
+query II rowsort
+INSERT INTO t DEFAULT VALUES RETURNING a,b
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case ret-006
+
+query II rowsort
+UPDATE t SET a=a+1 RETURNING a, rowid
+

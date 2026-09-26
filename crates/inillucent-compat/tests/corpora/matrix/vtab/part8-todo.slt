@@ -1,0 +1,90 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/todo.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case update-from-json-each
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, position INTEGER)
+
+statement ok
+INSERT INTO todo VALUES (1, 0), (2, 0), (3, 0)
+
+statement ok
+UPDATE todo SET position = j.key + 1 FROM json_each('[3,1,2]') AS j WHERE todo.id = j.value
+
+query I rowsort
+SELECT changes()
+
+query II rowsort
+SELECT * FROM todo ORDER BY id
+
+case update-from-derived-json-each
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, position INTEGER)
+
+statement ok
+INSERT INTO todo VALUES (1, 0), (2, 0), (3, 0)
+
+statement ok
+UPDATE todo SET position = p.pos FROM (SELECT value AS id, key + 10 AS pos FROM json_each('[3,1,2]')) AS p WHERE todo.id = p.id
+
+query I rowsort
+SELECT changes()
+
+query II rowsort
+SELECT * FROM todo ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, position INTEGER)
+
+statement ok
+INSERT INTO todo VALUES (1, 0), (2, 0), (3, 0)
+
+case update-from-series
+
+statement error
+UPDATE todo SET position = g.value FROM generate_series(1, 3) AS g WHERE g.value = todo.id + 1
+
+case where-equality-json-each
+
+query II rowsort
+SELECT todo.id, j.key FROM todo, json_each('[3,1,2]') AS j WHERE todo.id = j.value ORDER BY todo.id
+
+case where-equality-series
+
+statement error
+SELECT t.id, g.value FROM todo t, generate_series(1, 3) AS g WHERE t.id = g.value ORDER BY t.id
+
+case where-equality-json-each-first
+
+query II rowsort
+SELECT todo.id, j.key FROM json_each('[3,1,2]') AS j, todo WHERE j.value = todo.id AND todo.position = 0 ORDER BY todo.id
+
+setup
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, position INTEGER)
+
+statement ok
+INSERT INTO todo VALUES (1, 1), (2, 2)
+
+case update-set-correlated-json-each
+
+statement ok
+UPDATE todo SET position = (SELECT key + 1 FROM json_each('[2,1]') WHERE value = todo.id) WHERE id IN (SELECT value FROM json_each('[2,1]'))
+
+query II rowsort
+SELECT * FROM todo ORDER BY id
+
+case update-set-json-each-count
+
+statement ok
+UPDATE todo SET position = (SELECT count(*) FROM json_each('[1,2,3]'))
+
+query II rowsort
+SELECT * FROM todo ORDER BY id
+

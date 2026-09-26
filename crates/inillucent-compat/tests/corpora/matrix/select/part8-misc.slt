@@ -1,0 +1,73 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/misc.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case msc-001
+
+query TTT rowsort
+SELECT iif(1,'a','b'), iif(0,'a','b'), iif(NULL,'a','b')
+
+case msc-002
+
+query TT rowsort
+SELECT CASE WHEN 1 THEN 'a' WHEN 1 THEN 'b' END, CASE 2 WHEN 1 THEN 'a' END
+
+case msc-003
+
+query TIIIII rowsort
+SELECT typeof(1=1), 1=1, 1<>1, NOT 1, NOT 0, NOT 'a'
+
+case msc-004
+
+query ITTI rowsort
+SELECT -'5', +'5', typeof(-'5'), - -5
+
+case msc-005
+
+query III rowsort
+SELECT 'a' IN ('a','b'), 'a' IN ('A'), 1 IN ('1')
+
+case msc-006
+
+query II rowsort
+SELECT sqlite_version() IS NOT NULL, length(sqlite_version())>0
+
+case msc-007
+
+query II rowsort
+SELECT changes(), total_changes()
+
+case msc-008
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+statement ok
+UPDATE t SET a=a
+
+query I rowsort
+SELECT changes()
+
+case msc-009
+
+query III rowsort
+SELECT likelihood(1,0.5), likely(1), unlikely(1)
+
+case msc-010
+
+query II rowsort
+SELECT nullif(1,1) IS NULL, coalesce(NULL,NULL,NULL) IS NULL
+
+case msc-011
+
+query TI rowsort
+SELECT typeof(CAST(NULL AS TEXT)), CAST(NULL AS TEXT) IS NULL
+
+case msc-012
+
+query III rowsort
+SELECT 1 == 1, 1 != 2, 'a' || NULL IS NULL
+

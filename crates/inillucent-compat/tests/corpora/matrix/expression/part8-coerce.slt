@@ -1,0 +1,98 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/coerce.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case s2n-001
+
+query RRIRRR rowsort
+SELECT '.5'+0, '.0'+0, '.'+0, '-.5'+0, '+.5'+0, '.5e2'+0
+
+case s2n-002
+
+query RRRRR rowsort
+SELECT '0.5'+0, '00.5'+0, '5e-1'+0, '5E-1'+0, ' .5 '+0
+
+case s2n-003
+
+query TTRT rowsort
+SELECT typeof('.5'+0), typeof('.5'*1), '.5'*2, '.5'||''
+
+case s2n-004
+
+query RRIR rowsort
+SELECT abs('.5'), round('.5'), '.5' > 0, '.5' + '.5'
+
+setup
+
+statement ok
+CREATE TABLE t(a NUMERIC)
+
+statement ok
+INSERT INTO t VALUES('.5')
+
+case s2n-005
+
+query RT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a REAL)
+
+statement ok
+INSERT INTO t VALUES('.5')
+
+case s2n-006
+
+query RT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER)
+
+statement ok
+INSERT INTO t VALUES('.5')
+
+case s2n-007
+
+query RT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+case s2n-008
+
+query IIIIII rowsort
+SELECT '1e'+0, '1e+'+0, 'e1'+0, 'inf'+0, 'nan'+0, '0x1'+0
+
+case s2n-009
+
+query IRT rowsort
+SELECT '9223372036854775807'+0, '9223372036854775808'+0, typeof('9223372036854775808'+0)
+
+case s2n-010
+
+query IIR rowsort
+SELECT CAST('.5' AS INTEGER), CAST('.9' AS INTEGER), CAST(' .5' AS REAL)
+
+case s2n-011
+
+query TII rowsort
+SELECT max('.5', 0), min('.5', 0), '.5' BETWEEN 0 AND 1
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case s2n-012
+
+query I rowsort
+SELECT count(*) FROM t WHERE a > '.5'
+

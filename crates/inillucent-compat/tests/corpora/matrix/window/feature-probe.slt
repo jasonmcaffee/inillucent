@@ -1,0 +1,67 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-win.rank
+
+query IIII rowsort
+SELECT id, row_number() OVER w, rank() OVER w, dense_rank() OVER w FROM t WINDOW w AS (ORDER BY a) ORDER BY id
+
+case probe-win.dist
+
+query IIRR rowsort
+SELECT id, ntile(2) OVER (ORDER BY a), round(cume_dist() OVER (ORDER BY a),3), round(percent_rank() OVER (ORDER BY a),3) FROM t ORDER BY id
+
+case probe-win.lag
+
+query ITI rowsort
+SELECT id, lag(a) OVER (ORDER BY id), lead(a,1,-1) OVER (ORDER BY id) FROM t ORDER BY id
+
+case probe-win.value
+
+query IIII rowsort
+SELECT id, first_value(a) OVER w, last_value(a) OVER w, nth_value(a,2) OVER w FROM t WINDOW w AS (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) ORDER BY id
+
+case probe-win.partition
+
+query III rowsort
+SELECT id, a, count(*) OVER (PARTITION BY a) FROM t ORDER BY id
+
+case probe-win.frame.rows
+
+query II rowsort
+SELECT id, sum(a) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t ORDER BY id
+
+case probe-win.frame.range
+
+query II rowsort
+SELECT id, sum(a) OVER (ORDER BY a RANGE BETWEEN 10 PRECEDING AND 10 FOLLOWING) FROM t ORDER BY id
+
+case probe-win.frame.groups
+
+query II rowsort
+SELECT id, sum(a) OVER (ORDER BY a GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t ORDER BY id
+
+case probe-win.frame.exclude
+
+query II rowsort
+SELECT id, sum(a) OVER (ORDER BY a ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW) FROM t ORDER BY id
+
+case probe-win.filter
+
+query II rowsort
+SELECT id, count(*) FILTER (WHERE a>15) OVER (ORDER BY id) FROM t ORDER BY id
+
+case probe-win.named
+
+query IIR rowsort
+SELECT id, sum(a) OVER w, avg(a) OVER w FROM t WINDOW w AS (ORDER BY id) ORDER BY id
+

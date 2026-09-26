@@ -1,0 +1,105 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/pragma.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case prg-001
+
+statement ok
+PRAGMA user_version=7
+
+query I rowsort
+PRAGMA user_version
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT NOT NULL DEFAULT 'x')
+
+case prg-002
+
+query ITTITI rowsort
+SELECT cid,name,type,"notnull",dflt_value,pk FROM pragma_table_info('t')
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE UNIQUE INDEX i ON t(a)
+
+case prg-003
+
+query TITI rowsort
+SELECT name,"unique",origin,partial FROM pragma_index_list('t')
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE INDEX i ON t(b,a)
+
+case prg-004
+
+query IIT rowsort
+SELECT seqno,cid,name FROM pragma_index_info('i')
+
+setup
+
+case prg-005
+
+query T rowsort
+PRAGMA encoding
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+case prg-006
+
+query T rowsort
+PRAGMA integrity_check
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY)
+
+case prg-007
+
+query TTI rowsort
+SELECT name,type,pk FROM pragma_table_xinfo('t')
+
+setup
+
+case prg-008
+
+statement ok
+PRAGMA case_sensitive_like=ON
+
+query I rowsort
+SELECT 'a' LIKE 'A'
+
+setup
+
+statement ok
+CREATE TABLE t(a GENERATED ALWAYS AS (1) VIRTUAL, b)
+
+case prg-009
+
+query TI rowsort
+SELECT name, hidden FROM pragma_table_xinfo('t')
+
+setup
+
+case prg-010
+
+query I rowsort
+PRAGMA foreign_keys
+
+query I rowsort
+PRAGMA recursive_triggers
+

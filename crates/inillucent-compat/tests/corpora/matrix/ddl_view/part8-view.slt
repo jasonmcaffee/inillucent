@@ -1,0 +1,97 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/view.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+statement ok
+CREATE VIEW v AS SELECT a*2 AS d FROM t
+
+case view-001
+
+query I rowsort
+SELECT * FROM v ORDER BY d
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+statement ok
+CREATE VIEW v(x) AS SELECT a FROM t
+
+case view-002
+
+query I rowsort
+SELECT x FROM v
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE VIEW v AS SELECT * FROM t
+
+case view-003
+
+statement error
+INSERT INTO v VALUES(1)
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case view-004
+
+statement ok
+CREATE TEMP VIEW v AS SELECT count(*) c FROM t
+
+query I rowsort
+SELECT * FROM v
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+statement ok
+CREATE VIEW v AS SELECT a FROM t WHERE a>1
+
+case view-005
+
+query II rowsort
+SELECT * FROM v JOIN t ON t.a=v.a
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE VIEW v AS SELECT a FROM t
+
+case view-006
+
+statement ok
+DROP TABLE t
+
+statement error
+SELECT * FROM v
+

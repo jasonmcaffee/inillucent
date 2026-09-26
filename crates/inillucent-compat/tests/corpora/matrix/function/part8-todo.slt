@@ -1,0 +1,84 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/todo.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO todo VALUES (1), (2)
+
+case json-group-array-object
+
+query T rowsort
+SELECT json_group_array(json_object('id', id)) FROM todo
+
+case json-group-object-object
+
+query T rowsort
+SELECT json_group_object('k' || id, json_object('id', id)) FROM todo
+
+case json-group-array-array
+
+query T rowsort
+SELECT json_group_array(json_array(id, 'a')) FROM todo
+
+setup
+
+statement ok
+CREATE TABLE d (b TEXT)
+
+statement ok
+INSERT INTO d VALUES ('{"a":[1,2]}'), ('{"a":"x"}')
+
+case json-group-array-extract
+
+query T rowsort
+SELECT json_group_array(json_extract(b, '$.a')) FROM d
+
+setup
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO todo VALUES (1), (2)
+
+case json-group-array-ordered
+
+query T rowsort
+SELECT json_group_array(json_object('id', id) ORDER BY id DESC) FROM todo
+
+setup
+
+statement ok
+CREATE TABLE d (b TEXT)
+
+statement ok
+INSERT INTO d VALUES ('{"a":1}')
+
+case json-group-array-plain-text
+
+query T rowsort
+SELECT json_group_array(b) FROM d
+
+setup
+
+statement ok
+CREATE TABLE tag (id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO tag (name) VALUES ('outdoor'), ('Repairs'), ('apple'), ('Zebra'), (NULL)
+
+case agg-order-column-collation
+
+query T rowsort
+SELECT json_group_array(name ORDER BY name) FROM tag
+
+case agg-order-nulls-last
+
+query T rowsort
+SELECT json_group_array(name ORDER BY name NULLS LAST) FROM tag
+

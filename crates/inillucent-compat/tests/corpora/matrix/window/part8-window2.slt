@@ -1,0 +1,52 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/window2.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(g TEXT, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7)
+
+case wex-001
+
+query TIT rowsort
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW) FROM t ORDER BY g,v
+
+case wex-002
+
+query TII rowsort
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE TIES) FROM t ORDER BY g,v
+
+case wex-003
+
+query TIT rowsort
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE GROUP) FROM t ORDER BY g,v
+
+case wex-004
+
+query TII rowsort
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE NO OTHERS) FROM t ORDER BY g,v
+
+case wex-005
+
+query TII rowsort
+SELECT g,v,count(*) OVER (ORDER BY v ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW) FROM t ORDER BY g,v
+
+case wex-006
+
+query TII rowsort
+SELECT g,v,count(*) OVER (ORDER BY v GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE TIES) FROM t ORDER BY g,v
+
+case wex-007
+
+query TII rowsort
+SELECT g,v,sum(v) OVER (ORDER BY v ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM t ORDER BY g,v
+
+case wex-008
+
+statement error
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v EXCLUDE NO OTHERS) FROM t ORDER BY g,v
+

@@ -1,0 +1,113 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2094.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C')
+
+case agg-max-collate
+
+query IT rowsort
+SELECT max(s COLLATE NOCASE) = 'C' AS eq, max(s COLLATE NOCASE) AS v FROM t
+
+case agg-min-collate
+
+query II rowsort
+SELECT min(s COLLATE NOCASE) = 'a' AS eq, 'a' = min(s COLLATE NOCASE) AS swapped FROM t
+
+case agg-column-collation-stays-inside
+
+query IT rowsort
+SELECT max(n) = 'C' AS eq, max(n) AS v FROM t
+
+case agg-group-concat-collate
+
+query I rowsort
+SELECT group_concat(s COLLATE NOCASE) = 'A,B,C,A,B,C' AS eq FROM t
+
+case agg-second-argument-collate
+
+query I rowsort
+SELECT group_concat(s, ',' COLLATE NOCASE) = 'A,B,C,A,B,C' AS eq FROM t
+
+case agg-order-by-collate-does-not-count
+
+query I rowsort
+SELECT group_concat(s ORDER BY s COLLATE NOCASE) = 'A,A,B,B,C,C' AS eq FROM t
+
+case agg-filter-collate-does-not-count
+
+query I rowsort
+SELECT max(s) FILTER (WHERE s <> 'x' COLLATE NOCASE) = 'C' AS eq FROM t
+
+case agg-collate-through-concat
+
+query I rowsort
+SELECT max(s COLLATE NOCASE) || '' = 'C' AS eq FROM t
+
+case agg-having-collate
+
+query I rowsort
+SELECT count(*) FROM t GROUP BY id > 0 HAVING max(s COLLATE NOCASE) = 'C'
+
+case agg-left-binary-wins
+
+query II rowsort
+SELECT max(s COLLATE BINARY) = max(n COLLATE NOCASE) AS eq, max(s) = max(s COLLATE NOCASE) AS plain_left FROM t
+
+setup
+
+case case-when-collate
+
+query II rowsort
+SELECT CASE 'a' WHEN 'A' COLLATE NOCASE THEN 1 ELSE 0 END AS v, CASE 'a' WHEN 'b' THEN 2 WHEN 'A' COLLATE NOCASE THEN 1 ELSE 0 END AS second
+
+case case-base-collate-wins
+
+query II rowsort
+SELECT CASE 'a' COLLATE NOCASE WHEN 'A' THEN 1 ELSE 0 END AS base, CASE 'a' COLLATE BINARY WHEN 'A' COLLATE NOCASE THEN 1 ELSE 0 END AS both
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C')
+
+case case-when-column-collation
+
+query IIII rowsort
+SELECT id, CASE n WHEN 'a' THEN 1 ELSE 0 END AS base_col, CASE 'A' WHEN n THEN 1 ELSE 0 END AS when_col, CASE s WHEN n THEN 1 ELSE 0 END AS both_col FROM t ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE u (id INTEGER PRIMARY KEY, i INTEGER, x TEXT)
+
+statement ok
+INSERT INTO u VALUES (1, 1, '1')
+
+case case-when-affinity
+
+query IIII rowsort
+SELECT CASE '1' WHEN 1 THEN 1 ELSE 0 END AS lit, CASE i WHEN '1' THEN 1 ELSE 0 END AS base_int, CASE '1' WHEN i THEN 1 ELSE 0 END AS when_int, CASE x WHEN 1 THEN 1 ELSE 0 END AS base_text FROM u
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C')
+
+case case-searched-unchanged
+
+query II rowsort
+SELECT id, CASE WHEN s = 'a' COLLATE NOCASE THEN 1 WHEN s = 'b' THEN 2 ELSE 0 END AS v FROM t ORDER BY id
+

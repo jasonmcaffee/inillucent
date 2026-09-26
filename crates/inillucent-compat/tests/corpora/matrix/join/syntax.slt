@@ -1,0 +1,113 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-join-clause-p0
+
+query IIII rowsort
+SELECT * FROM a, b
+
+case syntax-join-clause-p1
+
+query IIII rowsort
+SELECT * FROM a JOIN b
+
+case syntax-join-clause-p2
+
+query IIII rowsort
+SELECT * FROM a INNER JOIN b ON a.x = b.x
+
+case syntax-join-clause-p3
+
+query IIII rowsort
+SELECT * FROM a CROSS JOIN b
+
+case syntax-join-clause-p4
+
+query IIT rowsort
+SELECT * FROM a LEFT JOIN b USING (x)
+
+case syntax-join-clause-p5
+
+query IIII rowsort
+SELECT * FROM a LEFT OUTER JOIN b ON 1
+
+case syntax-join-clause-p6
+
+query IIII rowsort
+SELECT * FROM a RIGHT JOIN b ON 1
+
+case syntax-join-clause-p7
+
+query IIII rowsort
+SELECT * FROM a FULL OUTER JOIN b ON 1
+
+case syntax-join-clause-p8
+
+query II rowsort
+SELECT * FROM a NATURAL JOIN b
+
+case syntax-join-clause-p9
+
+query IIIIII rowsort
+SELECT * FROM (a JOIN b ON 1) JOIN c ON 1
+
+case syntax-join-clause-n10
+
+statement error
+SELECT * FROM a JOIN
+
+case syntax-join-constraint-p0
+
+query IIII rowsort
+SELECT * FROM a JOIN b ON a.x = b.x
+
+case syntax-join-constraint-p1
+
+query II rowsort
+SELECT * FROM a JOIN b USING (x, y)
+
+case syntax-join-constraint-n2
+
+statement error
+SELECT * FROM a JOIN b USING x
+

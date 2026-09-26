@@ -1,0 +1,65 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2134.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case t2134-tvf-001
+
+query TI rowsort
+SELECT s.key, r.value FROM json_each('{"a":[1,2],"b":[3]}') s, json_each(s.value) r
+
+query TI rowsort
+SELECT t.value, r.value FROM json_each('[[1,2],[3]]') t, json_each(t.value) r
+
+query TI rowsort
+SELECT s.key, r.value FROM json_each('{"a":[1,2],"b":[3]}') s, json_tree(s.value) r WHERE r.type = 'integer'
+
+query TTI rowsort
+SELECT a.key, b.key, c.value FROM json_each('{"x":{"y":[1,2]},"z":{"w":[3]}}') a, json_each(a.value) b, json_each(b.value) c
+
+statement error
+SELECT s.value, g.value FROM json_each('[2,3]') s, generate_series(1, s.value) g
+
+setup
+
+statement ok
+CREATE TABLE ingredient (id INTEGER PRIMARY KEY, on_hand INTEGER)
+
+statement ok
+INSERT INTO ingredient VALUES (1, 100), (2, 500), (3, 7)
+
+case t2134-tvf-002
+
+query II rowsort
+SELECT i.id, c.value ->> '$.counted' FROM json_each('[{"ingredient_id":1,"counted":90},{"ingredient_id":2,"counted":500}]') c JOIN ingredient i ON i.id = c.value ->> '$.ingredient_id'
+
+query I rowsort
+SELECT i.id FROM ingredient i, json_each('[{"ingredient_id":1},{"ingredient_id":3}]') c WHERE i.id = c.value ->> '$.ingredient_id'
+
+query I rowsort
+SELECT i.id FROM json_each('[{"ingredient_id":1},{"ingredient_id":3}]') c, ingredient i WHERE i.id = json_extract(c.value, '$.ingredient_id')
+
+setup
+
+case t2134-tvf-003
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('red apple'), ('green pear'), ('red cherry')
+
+statement ok
+CREATE TABLE q (word TEXT)
+
+statement ok
+INSERT INTO q VALUES ('red'), ('pear')
+
+query TT nosort
+SELECT q.word, f.body FROM q, f WHERE f MATCH q.word ORDER BY 1, 2
+
+query TI rowsort
+SELECT q.word, count(*) FROM q JOIN f ON f MATCH q.word GROUP BY q.word ORDER BY 1
+
+query TT nosort
+SELECT j.value, f.body FROM json_each('["red","pear"]') j, f WHERE f MATCH j.value ORDER BY 1, 2
+

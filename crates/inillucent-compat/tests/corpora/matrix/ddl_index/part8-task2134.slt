@@ -1,0 +1,36 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2134.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE payment (id INTEGER PRIMARY KEY, at TEXT NOT NULL, business_day TEXT GENERATED ALWAYS AS (date(at)) VIRTUAL)
+
+statement ok
+INSERT INTO payment (at) VALUES ('2026-09-20 10:00:00'), ('2026-09-20 11:00:00')
+
+statement ok
+CREATE INDEX payment_day ON payment (business_day)
+
+case t2134-vgi-002
+
+query IIIT rowsort
+EXPLAIN QUERY PLAN SELECT id FROM payment WHERE business_day = '2026-09-20'
+
+query IIT rowsort
+PRAGMA index_info(payment_day)
+
+setup
+
+statement ok
+CREATE TABLE g (a INTEGER, b INTEGER GENERATED ALWAYS AS (a * 2) VIRTUAL)
+
+statement ok
+INSERT INTO g (a) VALUES (1), (1)
+
+case t2134-vgi-004
+
+statement error
+CREATE UNIQUE INDEX gb ON g (b)
+

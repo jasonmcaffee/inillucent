@@ -1,0 +1,250 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/null.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case null-001
+
+query TTII rowsort
+SELECT NULL = NULL, NULL <> NULL, NULL IS NULL, NULL IS NOT NULL
+
+case null-002
+
+query TTTTT rowsort
+SELECT 1 = NULL, 1 < NULL, 1 > NULL, NULL + 1, NULL || 'a'
+
+case null-003
+
+query ITTIT rowsort
+SELECT NULL AND 0, NULL AND 1, NULL OR 0, NULL OR 1, NOT NULL
+
+case null-004
+
+query IIIII rowsort
+SELECT 1 IS 1, 1 IS NULL, NULL IS NULL, 'a' IS 'a', 1 IS NOT 2
+
+case null-005
+
+query ITTI rowsort
+SELECT 1 IN (1,2,NULL), 3 IN (1,2,NULL), 3 NOT IN (1,2,NULL), 1 NOT IN (1,2,NULL)
+
+case null-006
+
+query TTII rowsort
+SELECT NULL IN (1,2), NULL NOT IN (1,2), NULL IN (), NULL NOT IN ()
+
+case null-007
+
+query II rowsort
+SELECT 1 IN (), 1 NOT IN ()
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2),(NULL)
+
+case null-008
+
+query TTI rowsort
+SELECT 3 IN (SELECT a FROM t), 3 NOT IN (SELECT a FROM t), 1 IN (SELECT a FROM t)
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(NULL),(1),(2),(NULL)
+
+case null-009
+
+query IIIRRII rowsort
+SELECT count(*), count(a), sum(a), avg(a), total(a), min(a), max(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(NULL),(NULL)
+
+case null-010
+
+query IITRTTTTT rowsort
+SELECT count(*), count(a), sum(a), total(a), avg(a), min(a), max(a), typeof(sum(a)), typeof(total(a)) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(NULL),(1),(NULL),(1)
+
+case null-011
+
+query T nosort
+SELECT DISTINCT a FROM t ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(NULL),(1),(2),(NULL)
+
+case null-012
+
+query TI rowsort
+SELECT a, count(*) FROM t GROUP BY a ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(2),(NULL),(1)
+
+case null-013
+
+query T nosort
+SELECT a FROM t ORDER BY a
+
+case null-014
+
+query I nosort
+SELECT a FROM t ORDER BY a DESC
+
+case null-015
+
+query I nosort
+SELECT a FROM t ORDER BY a NULLS LAST
+
+case null-016
+
+query T nosort
+SELECT a FROM t ORDER BY a DESC NULLS FIRST
+
+setup
+
+case null-017
+
+query ITTTIT rowsort
+SELECT coalesce(NULL,NULL,3,4), ifnull(NULL,'x'), ifnull('y','x'), nullif(1,1), nullif(1,2), nullif(NULL,1)
+
+case null-018
+
+query TT rowsort
+SELECT coalesce(NULL,NULL), typeof(coalesce(NULL,NULL))
+
+case null-019
+
+query TTT rowsort
+SELECT nullif('a','A'), nullif('a','a'), typeof(nullif(1,2))
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+INSERT INTO t VALUES(1,NULL),(NULL,1)
+
+case null-020
+
+query IT rowsort
+SELECT a,b FROM t WHERE a IS NOT b
+
+setup
+
+case null-021
+
+query IIT rowsort
+SELECT CASE WHEN NULL THEN 1 ELSE 2 END, CASE NULL WHEN NULL THEN 1 ELSE 2 END, CASE 1 WHEN 1 THEN NULL END
+
+case null-022
+
+query TTTT rowsort
+SELECT NULL BETWEEN 1 AND 2, 1 BETWEEN NULL AND 2, 1 BETWEEN 0 AND NULL, 3 BETWEEN 0 AND NULL
+
+setup
+
+statement ok
+CREATE TABLE t(a UNIQUE)
+
+statement ok
+INSERT INTO t VALUES(NULL),(NULL)
+
+case null-023
+
+query I rowsort
+SELECT count(*) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+INSERT INTO t VALUES(NULL,1),(NULL,2)
+
+case null-024
+
+query II rowsort
+SELECT count(DISTINCT a), count(DISTINCT b) FROM t
+
+setup
+
+case null-025
+
+query T rowsort
+SELECT group_concat(x) FROM (SELECT NULL AS x UNION ALL SELECT 'a' UNION ALL SELECT NULL UNION ALL SELECT 'b')
+
+case null-026
+
+query TTTT rowsort
+SELECT max(NULL, 1), min(NULL, 1), max(1,2,NULL), min(1,2,NULL)
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case null-027
+
+statement error
+SELECT a FROM t HAVING count(*) > 0
+
+setup
+
+case null-028
+
+query T rowsort
+SELECT sum(a) FROM (SELECT 1 AS a WHERE 0)
+
+case null-029
+
+query TT rowsort
+SELECT (SELECT 1 WHERE 0), typeof((SELECT 1 WHERE 0))
+
+setup
+
+statement ok
+CREATE TABLE t(a NOT NULL DEFAULT 5)
+
+statement ok
+INSERT INTO t DEFAULT VALUES
+
+case null-030
+
+query I rowsort
+SELECT a FROM t
+

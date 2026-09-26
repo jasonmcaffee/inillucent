@@ -1,0 +1,88 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/todo.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE tag (id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO tag (name) VALUES ('outdoor'), ('Repairs'), ('apple'), ('Zebra'), (NULL)
+
+case agg-order-group-concat
+
+query T rowsort
+SELECT group_concat(name, ',' ORDER BY name) FROM tag
+
+case agg-order-explicit-nocase
+
+query T rowsort
+SELECT group_concat(name, ',' ORDER BY name COLLATE NOCASE) FROM tag
+
+case agg-order-explicit-binary
+
+query T rowsort
+SELECT group_concat(name, ',' ORDER BY name COLLATE BINARY DESC) FROM tag
+
+case minmax-column-collation
+
+query TT rowsort
+SELECT max(name), min(name) FROM tag
+
+case minmax-explicit-binary
+
+query TT rowsort
+SELECT max(name COLLATE BINARY), min(name COLLATE BINARY) FROM tag
+
+case minmax-grouped
+
+query ITT rowsort
+SELECT id % 2, max(name), min(name) FROM tag GROUP BY id % 2 ORDER BY 1
+
+case minmax-bare-column
+
+query IT rowsort
+SELECT id, max(name) FROM tag
+
+setup
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, title TEXT)
+
+statement ok
+CREATE TABLE log (id INTEGER PRIMARY KEY, what TEXT)
+
+case temp-trigger-fires
+
+statement ok
+CREATE TEMP TRIGGER t8 AFTER INSERT ON todo BEGIN INSERT INTO log (what) VALUES (NEW.title); END
+
+statement ok
+INSERT INTO todo (title) VALUES ('second')
+
+query IT rowsort
+SELECT * FROM log
+
+setup
+
+case temp-schema-names
+
+statement ok
+CREATE TEMP TABLE scratch (x)
+
+query T rowsort
+SELECT name FROM sqlite_temp_schema
+
+query T rowsort
+SELECT name FROM temp.sqlite_master
+
+query T rowsort
+SELECT name FROM temp.sqlite_schema
+
+query T rowsort
+SELECT name FROM sqlite_temp_master
+
+query I rowsort
+SELECT count(*) FROM sqlite_schema WHERE name = 'scratch'
+

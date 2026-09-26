@@ -1,0 +1,103 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-delete-stmt-p0
+
+statement ok
+DELETE FROM t
+
+case syntax-delete-stmt-p1
+
+statement ok
+DELETE FROM main.t AS x WHERE x.a = 1
+
+case syntax-delete-stmt-p2
+
+statement ok
+WITH c AS (SELECT 1) DELETE FROM t WHERE a IN (SELECT 1 FROM c)
+
+case syntax-delete-stmt-p3
+
+query IIII rowsort
+DELETE FROM t RETURNING *
+
+case syntax-delete-stmt-n4
+
+statement error
+DELETE t
+
+case syntax-delete-stmt-n5
+
+statement error
+DELETE FROM
+
+case syntax-delete-stmt-limited-p0
+
+statement ok
+DELETE FROM t WHERE a > 1 ORDER BY a LIMIT 5
+
+case syntax-delete-stmt-limited-p1
+
+statement ok
+DELETE FROM t LIMIT 5 OFFSET 2
+
+case syntax-qualified-table-name-p0
+
+statement ok
+DELETE FROM main.t AS x INDEXED BY i
+
+case syntax-qualified-table-name-p1
+
+statement ok
+DELETE FROM t NOT INDEXED
+
+case syntax-qualified-table-name-p2
+
+statement ok
+UPDATE t AS x SET a = 1
+
+case syntax-qualified-table-name-n3
+
+statement error
+DELETE FROM t INDEXED
+

@@ -1,0 +1,129 @@
+# Differences between inillucent and the pinned SQLite 3.53.4 oracle that are
+# not defects.
+#
+# Read by `statement_matrix::known`. A rule matches a failing statement by
+# construct rather than by case id: every word in `contains` must appear in the
+# statement, ignoring case; `detail`, when given, must appear in the description
+# of the difference, which holds each engine's error message; and `kinds`, when
+# given, limits the rule to those kinds of difference. A defect never goes
+# here. A defect goes in `known.list` with its number on the board.
+#
+# Most of these are one fact: the oracle is the SQLite library as the
+# amalgamation builds it, and the corpora the matrix took its first cases from
+# ran through the `sqlite3` shell, which compiles in extensions the library
+# does not have and switches off double quoted strings. Each such construct is
+# still graded: the `vtab` and `function` families hold `oracle none` cases
+# whose answers were recorded from the pinned shell.
+
+[[rule]]
+name = "generate-series-is-a-shell-extension"
+detail = "no such table: generate_series"
+kinds = ["outcome", "fixture", "reopen"]
+reason = "generate_series is ext/misc/series.c, which shell.c compiles in and the library does not. The vtab family grades it against answers recorded from the pinned shell."
+
+[[rule]]
+name = "regexp-is-a-shell-extension"
+detail = "no such function: REGEXP"
+kinds = ["outcome"]
+reason = "REGEXP comes from ext/misc/regexp.c, which shell.c compiles in and the library does not."
+
+[[rule]]
+name = "geopoly-is-a-compile-option"
+detail = "no such module: geopoly"
+kinds = ["outcome"]
+reason = "The oracle is built without SQLITE_ENABLE_GEOPOLY."
+
+[[rule]]
+name = "fts4-is-a-compile-option"
+detail = "no such module: fts4"
+kinds = ["outcome"]
+reason = "The oracle is built without SQLITE_ENABLE_FTS4; inillucent answers fts4 with its FTS5 engine."
+
+[[rule]]
+name = "dbpage-is-a-compile-option"
+detail = "no such table: sqlite_dbpage"
+kinds = ["outcome"]
+reason = "The oracle is built without SQLITE_ENABLE_DBPAGE_VTAB."
+
+[[rule]]
+name = "sqlite-offset-is-a-compile-option"
+detail = "no such function: sqlite_offset"
+kinds = ["outcome"]
+reason = "The oracle is built without SQLITE_ENABLE_OFFSET_SQL_FUNC."
+
+[[rule]]
+name = "shell-collations"
+contains = ["collation_list"]
+kinds = ["rows"]
+reason = "The shell registers the decimal and uint collations from its own extensions; inillucent registers them too. The library has only BINARY, NOCASE and RTRIM."
+
+[[rule]]
+name = "double-quoted-strings-are-off"
+detail = "should this be a string literal in single-quotes?"
+kinds = ["outcome"]
+reason = "inillucent runs with double quoted string literals off, which is what the sqlite3 shell does since 3.41 and what SQLite recommends (SQLITE_DQS=0). The oracle library is built with the default, which reads an unknown double quoted name as a string."
+
+[[rule]]
+name = "default-page-size"
+contains = ["page_size"]
+kinds = ["rows", "reopen"]
+reason = "inillucent builds a file at 32,768 byte pages by default and SQLite at 4,096. The sqlite_page arm runs both at 4,096. docs/feature-comparison.md, the page size."
+
+[[rule]]
+name = "default-page-count"
+contains = ["page_count"]
+kinds = ["rows", "reopen"]
+reason = "Follows from the page size: the same data fills a different number of pages."
+
+[[rule]]
+name = "default-cache-size"
+contains = ["cache_size"]
+kinds = ["rows", "reopen"]
+reason = "inillucent's default cache is sized for its 32,768 byte pages: -131072, against SQLite's -2000."
+
+[[rule]]
+name = "default-busy-timeout"
+contains = ["busy_timeout"]
+kinds = ["rows", "reopen"]
+reason = "inillucent waits 5,000 ms for a lock by default and SQLite does not wait. docs/architecture-overview.md."
+
+[[rule]]
+name = "file-names"
+contains = ["database_list"]
+kinds = ["rows", "reopen"]
+reason = "The two engines open two different files, sqlite.db and inillucent.rdb, so the path column differs by construction."
+
+[[rule]]
+name = "limited-delete-without-rowid"
+contains = ["LIMIT"]
+detail = "no such column: rowid"
+kinds = ["outcome"]
+reason = "A DELETE or UPDATE with LIMIT is sent to the oracle as a rowid IN subquery (limited.rs), which a WITHOUT ROWID table cannot answer."
+
+[[rule]]
+name = "limited-update-from"
+contains = ["UPDATE", "FROM", "LIMIT"]
+detail = "syntax error"
+kinds = ["outcome"]
+reason = "An UPDATE ... FROM with LIMIT cannot be rewritten into a rowid subquery, and the pinned build has no UPDATE ... LIMIT."
+
+[[rule]]
+name = "limited-returning"
+contains = ["LIMIT", "RETURNING"]
+detail = "syntax error"
+kinds = ["outcome"]
+reason = "A limited DELETE or UPDATE with RETURNING cannot be rewritten into a rowid subquery, and the pinned build has no DELETE ... LIMIT."
+
+[[rule]]
+name = "vacuum-into-moves-sqlite-last-insert-rowid"
+contains = ["VACUUM", "INTO"]
+detail = "last_insert_rowid()"
+kinds = ["counters"]
+reason = "SQLite's VACUUM INTO copies the file with INSERT statements of its own, and they move last_insert_rowid() to the last row they copied. inillucent copies pages, runs no INSERT, and leaves the counter where the caller's own last INSERT put it."
+
+[[rule]]
+name = "random-rowid-after-the-largest"
+cases = ["rid-004", "rwe-001"]
+detail = "last_insert_rowid()"
+kinds = ["counters", "fixture"]
+reason = "Once a table holds rowid 9223372036854775807, both engines choose the next rowid at random, as SQLite documents. The two draws are not meant to agree; the rows that follow are compared."

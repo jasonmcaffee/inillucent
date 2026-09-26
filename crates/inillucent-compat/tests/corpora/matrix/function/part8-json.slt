@@ -1,0 +1,104 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/json.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case js-001
+
+query ITI rowsort
+SELECT json_extract('{"a":1,"b":[1,2]}','$.a'), json_extract('{"a":1}','$.b'), json_extract('[1,2,3]','$[1]')
+
+case js-002
+
+query TT rowsort
+SELECT json_extract('{"a":1,"b":2}','$.a','$.b'), typeof(json_extract('{"a":1}','$.a'))
+
+case js-003
+
+query TTI rowsort
+SELECT json_array(1,'a',NULL,2.5), json_object('a',1,'b','x'), json_array_length('[1,2,3]')
+
+case js-004
+
+query IIIT rowsort
+SELECT json_valid('{"a":1}'), json_valid('{'), json_valid('1'), json_valid(NULL)
+
+case js-005
+
+query TTT rowsort
+SELECT json_type('{"a":1}'), json_type('{"a":1}','$.a'), json_type('[1]','$[0]')
+
+case js-006
+
+query TTT rowsort
+SELECT json('{ "a" : 1 }'), json_quote('a'), json_quote(1)
+
+case js-007
+
+query TIT rowsort
+SELECT key, value, type FROM json_each('{"a":1,"b":"x"}') ORDER BY key
+
+case js-008
+
+query TTT rowsort
+SELECT fullkey, path, atom FROM json_tree('{"a":[1]}') ORDER BY fullkey
+
+case js-009
+
+query TITT rowsort
+SELECT '{"a":1}' -> '$.a', '{"a":1}' ->> '$.a', typeof('{"a":1}' -> '$.a'), typeof('{"a":1}' ->> '$.a')
+
+case js-010
+
+query TIT rowsort
+SELECT '[1,2]' -> 0, '[1,2]' ->> 1, '{"a":1}' -> 'a'
+
+case js-011
+
+query TTT rowsort
+SELECT json_insert('{"a":1}','$.b',2), json_replace('{"a":1}','$.a',9), json_set('{"a":1}','$.a',9,'$.b',3)
+
+case js-012
+
+query TT rowsort
+SELECT json_remove('{"a":1,"b":2}','$.a'), json_patch('{"a":1}','{"b":2}')
+
+case js-013
+
+query TT rowsort
+SELECT json_group_array(a), json_group_object(a,b) FROM (SELECT 'x' AS a, 1 AS b UNION ALL SELECT 'y', 2)
+
+case js-014
+
+query TTT rowsort
+SELECT json_extract('{"a":"x"}','$.a'), json_extract('{"a":[1]}','$.a'), json_extract('{"a":null}','$.a')
+
+case js-015
+
+query III rowsort
+SELECT json_array_length('{"a":1}'), json_array_length('[1,2]','$'), json_array_length('[[1,2]]','$[0]')
+
+case js-016
+
+query II rowsort
+SELECT json_error_position('{"a":}'), json_valid('[1,]')
+
+case js-017
+
+query I nosort
+SELECT value FROM json_each('[10,20,30]') ORDER BY value
+
+case js-018
+
+query TT rowsort
+SELECT json_object('a',json_array(1,2)), json_object('a',json('[1,2]'))
+
+case js-019
+
+query II rowsort
+SELECT json_extract('[1,2,3]','$[#-1]'), json_extract('{"a":{"b":2}}','$.a.b')
+
+case js-020
+
+query T rowsort
+SELECT json_pretty('{"a":1}')
+

@@ -1,0 +1,118 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-analyze-stmt-p0
+
+statement ok
+ANALYZE
+
+case syntax-analyze-stmt-p1
+
+statement ok
+ANALYZE main
+
+case syntax-analyze-stmt-p2
+
+statement ok
+ANALYZE main.t
+
+case syntax-analyze-stmt-n3
+
+statement error
+ANALYZE main.
+
+case syntax-reindex-stmt-p0
+
+statement ok
+REINDEX
+
+case syntax-reindex-stmt-p1
+
+statement ok
+REINDEX NOCASE
+
+case syntax-reindex-stmt-p2
+
+statement ok
+REINDEX main.t
+
+case syntax-vacuum-stmt-p0
+
+statement ok
+VACUUM
+
+case syntax-vacuum-stmt-p1
+
+statement ok
+VACUUM main
+
+case syntax-vacuum-stmt-p2
+
+statement ok
+VACUUM INTO '%SCRATCH%/copy.db'
+
+case syntax-vacuum-stmt-p3
+
+statement ok
+VACUUM main INTO '%SCRATCH%/copy.db'
+
+case syntax-vacuum-stmt-n4
+
+statement error
+VACUUM INTO
+
+case syntax-explain-stmt-p0
+
+query ITIIITIT rowsort
+EXPLAIN SELECT 1
+
+case syntax-explain-stmt-p1
+
+query IIIT rowsort
+EXPLAIN QUERY PLAN SELECT 1
+
+case syntax-explain-stmt-n2
+
+statement error
+EXPLAIN QUERY SELECT 1
+

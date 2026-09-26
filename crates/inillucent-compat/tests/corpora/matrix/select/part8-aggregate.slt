@@ -1,0 +1,194 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/aggregate.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(g,v)
+
+statement ok
+INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL)
+
+case agg-001
+
+query TT rowsort
+SELECT g, group_concat(v) FROM t GROUP BY g ORDER BY g
+
+case agg-002
+
+query TT rowsort
+SELECT g, group_concat(v,'-') FROM t GROUP BY g ORDER BY g
+
+case agg-003
+
+query T rowsort
+SELECT group_concat(DISTINCT v) FROM t
+
+case agg-004
+
+query T rowsort
+SELECT group_concat(v ORDER BY v DESC) FROM t
+
+case agg-005
+
+query IIII rowsort
+SELECT count(DISTINCT v), count(v), count(*), count(DISTINCT g) FROM t
+
+case agg-006
+
+query IRRIITT rowsort
+SELECT sum(v), total(v), avg(v), min(v), max(v), typeof(sum(v)), typeof(total(v)) FROM t
+
+case agg-007
+
+query IR rowsort
+SELECT sum(DISTINCT v), avg(DISTINCT v) FROM t
+
+case agg-008
+
+query TI rowsort
+SELECT g, count(*) FROM t GROUP BY g HAVING count(*)>1 ORDER BY g
+
+case agg-009
+
+query T rowsort
+SELECT max(v) FROM t WHERE g='c'
+
+case agg-010
+
+query TI rowsort
+SELECT g, v FROM t GROUP BY g ORDER BY g
+
+case agg-011
+
+query TII rowsort
+SELECT g, max(v), v FROM t GROUP BY g ORDER BY g
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),('x'),(2.5),(NULL),(x'00')
+
+case agg-012
+
+query ITTT rowsort
+SELECT min(a), max(a), typeof(min(a)), typeof(max(a)) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),('x'),(2.5)
+
+case agg-013
+
+query RRR rowsort
+SELECT sum(a), total(a), avg(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(g,v)
+
+statement ok
+INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL)
+
+case agg-014
+
+query II rowsort
+SELECT count(*) FILTER (WHERE v>1), sum(v) FILTER (WHERE g='a') FROM t
+
+case agg-015
+
+query T nosort
+SELECT g FROM t GROUP BY g HAVING sum(v) IS NULL ORDER BY g
+
+setup
+
+case agg-016
+
+query ITTT rowsort
+SELECT count(*), sum(a), avg(a), group_concat(a) FROM (SELECT 1 AS a WHERE 0)
+
+setup
+
+statement ok
+CREATE TABLE t(g,v)
+
+statement ok
+INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL)
+
+case agg-017
+
+query TI rowsort
+SELECT g, count(*) FROM t GROUP BY 1 ORDER BY 1
+
+case agg-018
+
+query TI rowsort
+SELECT upper(g) AS u, count(*) FROM t GROUP BY u ORDER BY u
+
+setup
+
+case agg-019
+
+query T rowsort
+SELECT group_concat(a,'') FROM (SELECT 'x' AS a UNION ALL SELECT 'y')
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+case agg-020
+
+query I rowsort
+SELECT sum(a) OVER () FROM t
+
+setup
+
+case agg-021
+
+query RT rowsort
+SELECT avg(a), typeof(avg(a)) FROM (SELECT 2 AS a UNION ALL SELECT 4)
+
+case agg-022
+
+query T rowsort
+SELECT string_agg(a,',') FROM (SELECT 'x' AS a UNION ALL SELECT 'y')
+
+setup
+
+statement ok
+CREATE TABLE t(g,v)
+
+statement ok
+INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL)
+
+case agg-023
+
+query I rowsort
+SELECT count(DISTINCT g||v) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(9223372036854775807),(1)
+
+case agg-024
+
+statement error
+SELECT sum(a) FROM t
+

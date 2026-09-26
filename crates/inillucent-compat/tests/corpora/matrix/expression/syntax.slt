@@ -1,0 +1,243 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-type-name-p0
+
+query I rowsort
+SELECT CAST(1 AS INTEGER)
+
+case syntax-type-name-p1
+
+query I rowsort
+SELECT CAST(1 AS UNSIGNED BIG INT)
+
+case syntax-type-name-p2
+
+query T rowsort
+SELECT CAST(1 AS VARCHAR(10))
+
+case syntax-type-name-p3
+
+query I rowsort
+SELECT CAST(1 AS DECIMAL(10, 5))
+
+case syntax-type-name-p4
+
+query R rowsort
+SELECT CAST(1 AS FLOAT(-1))
+
+case syntax-type-name-p5
+
+query I rowsort
+SELECT CAST(1 AS)
+
+case syntax-type-name-n6
+
+statement error
+SELECT CAST(1 AS 1)
+
+case syntax-expr-p0
+
+query I rowsort
+SELECT 1 + 2 * 3 - 4 / 5 % 6
+
+case syntax-expr-p1
+
+statement error
+SELECT a || b, a -> b, a ->> b
+
+case syntax-expr-p2
+
+statement error
+SELECT ~a, -a, +a, NOT a
+
+case syntax-expr-p3
+
+statement error
+SELECT a & b | c << d >> e
+
+case syntax-expr-p4
+
+statement error
+SELECT a < b, a <= b, a > b, a >= b, a = b, a == b, a <> b, a != b
+
+case syntax-expr-p5
+
+statement error
+SELECT a IS b, a IS NOT b, a IS DISTINCT FROM b, a IS NOT DISTINCT FROM b
+
+case syntax-expr-p6
+
+statement error
+SELECT a ISNULL, a NOTNULL, a NOT NULL, a IS NULL, a IS NOT NULL
+
+case syntax-expr-p7
+
+statement error
+SELECT a BETWEEN 1 AND 2, a NOT BETWEEN 1 AND 2
+
+case syntax-expr-p8
+
+statement error
+SELECT a IN (1, 2), a NOT IN (), a IN t, a IN main.t, a IN (SELECT 1)
+
+case syntax-expr-p9
+
+statement error
+SELECT a LIKE 'x' ESCAPE '\', a NOT LIKE 'x', a GLOB 'x', a REGEXP 'x', a MATCH 'x'
+
+case syntax-expr-p10
+
+statement error
+SELECT CASE WHEN a THEN 1 ELSE 2 END, CASE a WHEN 1 THEN 2 END
+
+case syntax-expr-p11
+
+statement error
+SELECT CAST(a AS TEXT), a COLLATE NOCASE
+
+case syntax-expr-p12
+
+query III rowsort
+SELECT (SELECT 1), EXISTS (SELECT 1), NOT EXISTS (SELECT 1)
+
+case syntax-expr-p13
+
+statement error
+SELECT (1, 2)
+
+case syntax-expr-p14
+
+query TTTTT rowsort
+SELECT ?, ?1, :name, @name, $name
+
+case syntax-expr-p15
+
+query TRIRI rowsort
+SELECT x'00ff', 1.5e10, 0x1f, .5, 1_000
+
+case syntax-expr-p16
+
+query TTT rowsort
+SELECT CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP
+
+case syntax-expr-p17
+
+statement error
+SELECT main.t.a, t.a, a
+
+case syntax-expr-n18
+
+statement error
+SELECT 1 +
+
+case syntax-expr-n19
+
+statement error
+SELECT a BETWEEN 1
+
+case syntax-expr-n20
+
+statement error
+SELECT CASE END
+
+case syntax-literal-value-p0
+
+query IRTTTIIT rowsort
+SELECT 1, 1.5, 'text', x'0a', NULL, TRUE, FALSE, CURRENT_TIMESTAMP
+
+case syntax-literal-value-n1
+
+statement error
+SELECT x'0'
+
+case syntax-literal-value-n2
+
+statement error
+SELECT x'zz'
+
+case syntax-numeric-literal-p0
+
+query IRRRRRRIII rowsort
+SELECT 1, 1., .1, 1.5, 1e10, 1E+10, 1e-10, 0x1f, 0XFF, 1_000_000
+
+case syntax-numeric-literal-n1
+
+statement error
+SELECT 1abc
+
+case syntax-numeric-literal-n2
+
+statement error
+SELECT 0x
+
+case syntax-quoted-identifier-p0
+
+statement error
+SELECT "a", [b], `c`, d FROM t
+
+case syntax-quoted-identifier-p1
+
+query T rowsort
+SELECT "a""b" FROM t
+
+case syntax-quoted-identifier-p2
+
+statement error
+SELECT key, match, rows, abort FROM t
+
+case syntax-quoted-identifier-n3
+
+statement error
+SELECT "a FROM t
+
+case syntax-quoted-identifier-n4
+
+statement error
+SELECT [a FROM t
+
+case syntax-bind-parameter-tcl-suffix-p0
+
+query T rowsort
+SELECT $name(suffix)
+

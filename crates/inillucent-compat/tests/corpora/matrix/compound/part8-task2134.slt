@@ -1,0 +1,38 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2134.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT)
+
+statement ok
+INSERT INTO orders VALUES (1, 'open'), (2, 'paid'), (3, 'paid'), (4, 'PAID'), (5, 'void')
+
+statement ok
+CREATE TABLE customer (id INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO customer VALUES (1), (2)
+
+case t2134-pd-003
+
+query I rowsort
+SELECT count(*) FROM (SELECT DISTINCT status FROM orders) WHERE status = 'paid'
+
+query I rowsort
+SELECT count(*) FROM (SELECT DISTINCT status COLLATE NOCASE AS status FROM orders) WHERE status = 'paid' COLLATE BINARY
+
+query I rowsort
+SELECT count(*) FROM (SELECT id FROM orders ORDER BY id LIMIT 3) WHERE id > 1
+
+query TI rowsort
+SELECT * FROM (SELECT status, count(*) AS n FROM orders GROUP BY status) WHERE n > 1 ORDER BY status
+
+query I rowsort
+SELECT count(*) FROM (SELECT id FROM orders UNION ALL SELECT id FROM customer) WHERE id < 3
+
+query I rowsort
+SELECT count(*) FROM (SELECT id, random() AS r FROM orders) WHERE id = 3
+

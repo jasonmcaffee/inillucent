@@ -1,0 +1,62 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/index2.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+case ixb-001
+
+statement error
+SELECT * FROM t INDEXED BY nosuch WHERE a=1
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+INSERT INTO t VALUES(1,2)
+
+case ixb-002
+
+query II rowsort
+SELECT * FROM t INDEXED BY i WHERE b=2
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+INSERT INTO t VALUES(1,2)
+
+case ixb-003
+
+statement error
+DELETE FROM t INDEXED BY nosuch WHERE a=1
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+INSERT INTO t VALUES(1,2)
+
+case ixb-004
+
+statement error
+UPDATE t INDEXED BY nosuch SET b=3 WHERE a=1
+

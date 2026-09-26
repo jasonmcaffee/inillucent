@@ -1,0 +1,101 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/default.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER DEFAULT '5')
+
+statement ok
+INSERT INTO t DEFAULT VALUES
+
+case dfa-001
+
+query IT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT DEFAULT 5)
+
+statement ok
+INSERT INTO t DEFAULT VALUES
+
+case dfa-002
+
+query TT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case dfa-003
+
+statement ok
+ALTER TABLE t ADD COLUMN b TEXT DEFAULT 5
+
+query TT rowsort
+SELECT b, typeof(b) FROM t
+
+case dfa-004
+
+statement ok
+ALTER TABLE t ADD COLUMN b REAL DEFAULT '5'
+
+query RT rowsort
+SELECT b, typeof(b) FROM t
+
+case dfa-005
+
+statement ok
+ALTER TABLE t ADD COLUMN b INTEGER DEFAULT 5
+
+query IT rowsort
+SELECT b, typeof(b) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER DEFAULT (1+1))
+
+statement ok
+INSERT INTO t DEFAULT VALUES
+
+case dfa-006
+
+query I rowsort
+SELECT a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a NUMERIC DEFAULT '1.0')
+
+statement ok
+INSERT INTO t DEFAULT VALUES
+
+case dfa-007
+
+query IT rowsort
+SELECT a, typeof(a) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a,b INTEGER)
+
+statement ok
+INSERT INTO t(a) VALUES(1)
+
+case dfa-008
+
+query TT rowsort
+SELECT b, typeof(b) FROM t
+

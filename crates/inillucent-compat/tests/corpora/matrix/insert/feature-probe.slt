@@ -1,0 +1,414 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+INSERT INTO t VALUES (1,'x'),(2,'y')
+
+case probe-dml.insert.values
+
+query I rowsort
+SELECT count(*) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE d(a INTEGER)
+
+statement ok
+INSERT INTO d SELECT a FROM t WHERE a>15
+
+case probe-dml.insert.select
+
+query I rowsort
+SELECT count(*) FROM d
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER DEFAULT 7, b TEXT DEFAULT 'z')
+
+statement ok
+INSERT INTO t DEFAULT VALUES
+
+case probe-dml.insert.default
+
+query IT rowsort
+SELECT a,b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-dml.insert.or.ignore
+
+statement ok
+INSERT OR IGNORE INTO t VALUES (1,99,'zz')
+
+query I rowsort
+SELECT a FROM t WHERE id=1
+
+case probe-dml.insert.or.replace
+
+statement ok
+INSERT OR REPLACE INTO t VALUES (1,99,'zz')
+
+query IT rowsort
+SELECT a,b FROM t WHERE id=1
+
+case probe-dml.insert.or.rollback
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (6,60,'u')
+
+statement error
+INSERT OR ROLLBACK INTO t VALUES (1,99,'zz')
+
+case probe-dml.insert.or.fail
+
+statement error
+INSERT OR FAIL INTO t VALUES (6,60,'u'),(1,99,'zz'),(7,70,'v')
+
+case probe-dml.insert.or.abort
+
+statement error
+INSERT OR ABORT INTO t VALUES (6,60,'u'),(1,99,'zz')
+
+case probe-dml.replace
+
+statement ok
+REPLACE INTO t VALUES (1,99,'zz')
+
+query I rowsort
+SELECT a FROM t WHERE id=1
+
+case probe-dml.update
+
+statement ok
+UPDATE t SET b='z' WHERE a=20
+
+query T rowsort
+SELECT group_concat(b) FROM (SELECT b FROM t ORDER BY id)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, tid INTEGER, w TEXT)
+
+statement ok
+INSERT INTO u VALUES (1,1,'aa'),(2,2,'bb'),(3,9,'cc')
+
+case probe-dml.update.from
+
+statement ok
+UPDATE t SET b = u.w FROM u WHERE u.tid = t.id
+
+query T rowsort
+SELECT group_concat(b) FROM (SELECT b FROM t ORDER BY id)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a TEXT UNIQUE)
+
+statement ok
+INSERT INTO t VALUES (1,'x'),(2,'y')
+
+case probe-dml.update.or.ignore
+
+statement ok
+UPDATE OR IGNORE t SET a='x' WHERE id=2
+
+query T rowsort
+SELECT group_concat(a) FROM (SELECT a FROM t ORDER BY id)
+
+case probe-dml.update.or.replace
+
+statement ok
+UPDATE OR REPLACE t SET a='x' WHERE id=2
+
+query T rowsort
+SELECT group_concat(id||a) FROM (SELECT id,a FROM t ORDER BY id)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-dml.delete
+
+statement ok
+DELETE FROM t WHERE a=20
+
+query I rowsort
+SELECT count(*) FROM t
+
+case probe-dml.delete.all
+
+statement ok
+DELETE FROM t
+
+query I rowsort
+SELECT count(*) FROM t
+
+case probe-dml.delete.limit
+
+statement ok
+DELETE FROM t ORDER BY a DESC LIMIT 2
+
+query I rowsort
+SELECT count(*) FROM t
+
+case probe-dml.update.limit
+
+statement ok
+UPDATE t SET b='z' ORDER BY a DESC LIMIT 1
+
+query T rowsort
+SELECT group_concat(b) FROM (SELECT b FROM t ORDER BY id)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a)
+
+case probe-dml.returning.insert
+
+query II rowsort
+INSERT INTO t VALUES (1,10),(2,20) RETURNING id, a
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-dml.returning.updel
+
+query II rowsort
+UPDATE t SET a=a+1 WHERE id=1 RETURNING id, a
+
+query I rowsort
+DELETE FROM t WHERE id=2 RETURNING id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a)
+
+case probe-dml.returning.expr
+
+query I rowsort
+INSERT INTO t VALUES (1,10) RETURNING a*2 AS doubled
+
+setup
+
+statement ok
+CREATE TABLE t(k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID
+
+statement ok
+INSERT INTO t VALUES ('b','2'),('a','1')
+
+case probe-dml.insert.without.rowid
+
+query T rowsort
+SELECT group_concat(k||v) FROM (SELECT k,v FROM t ORDER BY k)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+INSERT INTO t VALUES (1,99,'zz') ON CONFLICT(id) DO NOTHING
+
+case probe-upsert.nothing
+
+query I rowsort
+SELECT a FROM t WHERE id=1
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+INSERT INTO t VALUES (1,99,'zz') ON CONFLICT(id) DO UPDATE SET a=excluded.a
+
+case probe-upsert.update
+
+query IT rowsort
+SELECT a,b FROM t WHERE id=1
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+INSERT INTO t VALUES (1,99,'zz') ON CONFLICT(id) DO UPDATE SET a=excluded.a WHERE t.a > 500
+
+case probe-upsert.update.where
+
+query I rowsort
+SELECT a FROM t WHERE id=1
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, k TEXT UNIQUE, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1,'a',1)
+
+statement ok
+INSERT INTO t VALUES (2,'a',2) ON CONFLICT(k) DO UPDATE SET v=v+excluded.v
+
+case probe-upsert.secondary
+
+query T rowsort
+SELECT group_concat(id||k||v) FROM (SELECT id,k,v FROM t ORDER BY id)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+INSERT INTO t VALUES (1,99,'zz') ON CONFLICT DO NOTHING
+
+case probe-upsert.no.target
+
+query I rowsort
+SELECT a FROM t WHERE id=1
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, k TEXT UNIQUE, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1,'a',1)
+
+statement ok
+INSERT INTO t VALUES (1,'b',2) ON CONFLICT(k) DO UPDATE SET v=9 ON CONFLICT(id) DO UPDATE SET v=8
+
+case probe-upsert.two.clauses
+
+query T rowsort
+SELECT group_concat(id||k||v) FROM (SELECT id,k,v FROM t ORDER BY id)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-upsert.returning
+
+query II rowsort
+INSERT INTO t VALUES (1,99,'zz') ON CONFLICT(id) DO UPDATE SET a=excluded.a RETURNING id, a
+
+setup
+
+statement ok
+CREATE TABLE t(k TEXT PRIMARY KEY, v INTEGER) WITHOUT ROWID
+
+statement ok
+INSERT INTO t VALUES ('a',1)
+
+statement ok
+INSERT INTO t VALUES ('a',2) ON CONFLICT(k) DO UPDATE SET v=v+excluded.v
+
+case probe-dml.upsert.without.rowid
+
+query TI rowsort
+SELECT k,v FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER)
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, b INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1,0),(2,0)
+
+statement ok
+INSERT INTO u VALUES (1,7),(2,9)
+
+case probe-dml.update.correlated
+
+statement ok
+UPDATE t SET a = (SELECT b FROM u WHERE u.id = t.id)
+
+query T rowsort
+SELECT group_concat(a) FROM (SELECT a FROM t ORDER BY id)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE log(m)
+
+statement ok
+CREATE TRIGGER ti AFTER INSERT ON t BEGIN INSERT INTO log VALUES (new.id); END
+
+case probe-dml.returning.trigger
+
+query I rowsort
+INSERT INTO t VALUES (6,60,'u') RETURNING id
+
+query I rowsort
+SELECT count(*) FROM log
+

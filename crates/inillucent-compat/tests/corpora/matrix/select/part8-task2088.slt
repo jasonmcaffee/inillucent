@@ -1,0 +1,57 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2088.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100)
+
+case between-high-nocase
+
+query I nosort
+SELECT id FROM t WHERE s BETWEEN 'a' AND 'B' COLLATE NOCASE ORDER BY id
+
+case between-low-nocase
+
+query I nosort
+SELECT id FROM t WHERE s BETWEEN 'A' COLLATE NOCASE AND 'b' ORDER BY id
+
+case between-high-binary-on-nocase-column
+
+query I nosort
+SELECT id FROM t WHERE n BETWEEN 'a' AND 'B' COLLATE BINARY ORDER BY id
+
+case between-not-high-nocase
+
+query I nosort
+SELECT id FROM t WHERE s NOT BETWEEN 'a' AND 'B' COLLATE NOCASE ORDER BY id
+
+setup
+
+case between-values
+
+query III rowsort
+SELECT 'b' BETWEEN 'a' AND 'B' COLLATE NOCASE AS hi, 'b' BETWEEN 'A' COLLATE NOCASE AND 'B' AS lo, 'B' BETWEEN 'a' COLLATE NOCASE AND 'b' COLLATE BINARY AS both
+
+case between-affinity
+
+query II rowsort
+SELECT '5' BETWEEN 1 AND CAST('9' AS INTEGER) AS hi, '5' BETWEEN CAST('1' AS INTEGER) AND 9 AS lo
+
+setup
+
+statement ok
+CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT)
+
+statement ok
+INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c')
+
+case between-ticket-repro
+
+query I nosort
+SELECT id FROM p WHERE s BETWEEN 'a' AND 'B' COLLATE NOCASE ORDER BY id
+

@@ -1,0 +1,142 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2089.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case collate-concat-left
+
+query III rowsort
+SELECT ('a' COLLATE NOCASE || 'x') = 'AX' AS l, 'AX' = ('a' COLLATE NOCASE || 'x') AS r, ('a' || 'x' COLLATE NOCASE) = 'AX' AS inner_right
+
+case collate-concat-left-operand-wins
+
+query II rowsort
+SELECT ('a' COLLATE NOCASE || 'b' COLLATE BINARY) = 'AB' AS nocase_first, ('a' COLLATE BINARY || 'b' COLLATE NOCASE) = 'AB' AS binary_first
+
+case collate-explicit-left-beats-right
+
+query II rowsort
+SELECT ('AX' COLLATE BINARY) = ('a' COLLATE NOCASE || 'x') AS binary_left, ('a' COLLATE NOCASE || 'x') = ('AX' COLLATE BINARY) AS nocase_left
+
+case collate-outer-wins
+
+query I rowsort
+SELECT ('a' COLLATE NOCASE || 'x') COLLATE BINARY = 'AX' AS v
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C')
+
+case collate-concat-column
+
+query I nosort
+SELECT id FROM t WHERE (s COLLATE NOCASE || '') = 'a' ORDER BY id
+
+case collate-implicit-not-through-concat
+
+query I nosort
+SELECT id FROM t WHERE n || '' = 'a' ORDER BY id
+
+case collate-concat-column-binary
+
+query I nosort
+SELECT id FROM t WHERE (n COLLATE BINARY || '') = 'a' ORDER BY id
+
+setup
+
+case collate-function-argument
+
+query III rowsort
+SELECT upper('a' COLLATE NOCASE) = 'a' AS up, substr('xa' COLLATE NOCASE, 2) = 'A' AS sub, coalesce(NULL, 'a' COLLATE NOCASE) = 'A' AS co
+
+case collate-cast-explicit
+
+query I rowsort
+SELECT CAST('a' COLLATE NOCASE AS TEXT) = 'A' AS v
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C')
+
+case collate-cast-column
+
+query I nosort
+SELECT id FROM t WHERE CAST(n AS TEXT) = 'a' ORDER BY id
+
+case collate-unary-plus-column
+
+query I nosort
+SELECT id FROM t WHERE +n = 'a' ORDER BY id
+
+setup
+
+case collate-case-then
+
+query I rowsort
+SELECT CASE WHEN 1 THEN 'a' COLLATE NOCASE END = 'A' AS v
+
+case collate-in-list
+
+query II rowsort
+SELECT 'ax' IN ('A' COLLATE NOCASE || 'X') AS rhs, ('a' COLLATE NOCASE || 'x') IN ('AX') AS lhs
+
+case collate-between-bound
+
+query I rowsort
+SELECT 'AX' BETWEEN ('a' COLLATE NOCASE || 'x') AND 'ZZ' AS v
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C')
+
+case collate-order-by
+
+query T nosort
+SELECT s FROM t ORDER BY s COLLATE NOCASE || '', id
+
+case collate-count-distinct
+
+query I rowsort
+SELECT count(DISTINCT s COLLATE NOCASE || '') FROM t
+
+case collate-aggregate-result
+
+query I rowsort
+SELECT max(s COLLATE NOCASE) = 'C' FROM t
+
+setup
+
+case collate-case-base-when
+
+query I rowsort
+SELECT CASE 'a' WHEN 'A' COLLATE NOCASE THEN 1 ELSE 0 END AS v
+
+case collate-ticket-repro-values
+
+query II rowsort
+SELECT 'B' = 'b' || '' COLLATE NOCASE AS inner, 'B' = ('b' || '') COLLATE NOCASE AS outer
+
+setup
+
+statement ok
+CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT)
+
+statement ok
+INSERT INTO p VALUES (7, 'a'), (8, 'B')
+
+case collate-ticket-repro-table
+
+query I rowsort
+SELECT id FROM p WHERE s = 'b' || '' COLLATE NOCASE
+

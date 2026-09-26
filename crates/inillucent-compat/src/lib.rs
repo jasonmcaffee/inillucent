@@ -68,6 +68,9 @@ pub mod report;
 pub mod results;
 pub mod selection;
 pub mod slt;
+// Every statement form in every context, on files, against the pinned SQLite
+// (task-2135's design, built in task-2137).
+pub mod statement_matrix;
 pub mod stories;
 // Running one child and knowing when to stop waiting for it. `Command::output`
 // waits for the child's pipes to close rather than for the child to exit, which

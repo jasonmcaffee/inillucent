@@ -1,0 +1,72 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2134.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 1), (2, 2), (5, 5)
+
+statement ok
+CREATE VIEW risky AS SELECT id, CASE WHEN id = 5 THEN a ELSE abs(-9223372036854775807 - 1) END AS x FROM t
+
+case t2134-pd-001
+
+query II rowsort
+SELECT * FROM risky WHERE id = 5
+
+query II rowsort
+SELECT * FROM (SELECT id, CASE WHEN id = 5 THEN a ELSE abs(-9223372036854775807 - 1) END AS x FROM t) WHERE id > 4
+
+setup
+
+statement ok
+CREATE TABLE customer (id INTEGER PRIMARY KEY, name TEXT)
+
+statement ok
+CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER, status TEXT)
+
+statement ok
+CREATE TABLE order_line (id INTEGER PRIMARY KEY, order_id INTEGER, quantity INTEGER)
+
+case t2134-pd-002
+
+statement ok
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO customer SELECT i, 'c' || i FROM n
+
+statement ok
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200) INSERT INTO orders SELECT i, CASE WHEN i % 7 = 0 THEN NULL ELSE i % 40 + 1 END, CASE i % 3 WHEN 0 THEN 'open' WHEN 1 THEN 'paid' ELSE 'void' END FROM n
+
+statement ok
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 600) INSERT INTO order_line SELECT i, i % 200 + 1, i % 4 + 1 FROM n
+
+statement ok
+CREATE VIEW order_summary AS SELECT o.id, o.status, c.name AS customer_name, (SELECT sum(quantity) FROM order_line l WHERE l.order_id = o.id) AS items FROM orders o LEFT JOIN customer c ON c.id = o.customer_id
+
+statement ok
+CREATE VIEW v_plain AS SELECT o.id, o.status, c.name AS customer_name FROM orders o LEFT JOIN customer c ON c.id = o.customer_id
+
+query ITTI rowsort
+SELECT * FROM order_summary WHERE id = 57
+
+query ITT rowsort
+SELECT * FROM v_plain WHERE id = 57
+
+query II rowsort
+SELECT count(*), sum(items) FROM order_summary WHERE status = 'paid' AND customer_name IS NULL
+
+query ITTI rowsort
+SELECT * FROM order_summary WHERE items > 10 ORDER BY id LIMIT 3
+
+query IT rowsort
+SELECT v.id, v.customer_name FROM v_plain v JOIN customer c ON c.name = v.customer_name WHERE v.id BETWEEN 10 AND 14 ORDER BY v.id
+
+query IT nosort
+SELECT c.id, v.id FROM customer c LEFT JOIN v_plain v ON v.customer_name = c.name AND v.id < 5 WHERE c.id < 4 ORDER BY 1, 2
+
+query TT rowsort
+SELECT c.id, v.id FROM customer c LEFT JOIN v_plain v ON v.customer_name = c.name WHERE v.id IS NULL AND c.id < 3 ORDER BY 1
+

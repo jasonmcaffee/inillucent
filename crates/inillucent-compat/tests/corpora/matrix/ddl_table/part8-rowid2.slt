@@ -1,0 +1,120 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/rowid2.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t VALUES(9223372036854775807,'x')
+
+statement ok
+INSERT INTO t(b) VALUES('y')
+
+case rwe-001
+
+query I rowsort
+SELECT count(*) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY AUTOINCREMENT, b)
+
+statement ok
+INSERT INTO t VALUES(9223372036854775807,'x')
+
+case rwe-002
+
+statement error
+INSERT INTO t(b) VALUES('y')
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case rwe-003
+
+statement ok
+UPDATE t SET rowid=100
+
+query II rowsort
+SELECT rowid,a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t(rowid,a) VALUES(50,'x')
+
+case rwe-004
+
+query IT rowsort
+SELECT rowid,a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t(oid,a) VALUES(50,'x')
+
+case rwe-005
+
+query IT rowsort
+SELECT rowid,a FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1)
+
+case rwe-006
+
+query II rowsort
+SELECT rowid+0, rowid*2 FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+case rwe-007
+
+statement ok
+DELETE FROM t WHERE rowid IN (SELECT rowid FROM t LIMIT 1)
+
+query I rowsort
+SELECT count(*) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t VALUES(-9223372036854775808,'x')
+
+statement ok
+INSERT INTO t(b) VALUES('y')
+
+case rwe-008
+
+query I nosort
+SELECT a FROM t ORDER BY a
+

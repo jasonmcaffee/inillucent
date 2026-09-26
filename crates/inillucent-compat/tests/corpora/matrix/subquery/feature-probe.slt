@@ -1,0 +1,129 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-subq.scalar
+
+query II rowsort
+SELECT id, (SELECT max(a) FROM t) FROM t ORDER BY id LIMIT 2
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, tid INTEGER, w TEXT)
+
+statement ok
+INSERT INTO u VALUES (1,1,'aa'),(2,2,'bb'),(3,9,'cc')
+
+case probe-subq.in
+
+query I nosort
+SELECT id FROM t WHERE id IN (SELECT tid FROM u) ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE a(x)
+
+statement ok
+CREATE TABLE b(y)
+
+statement ok
+INSERT INTO a VALUES (1),(2)
+
+statement ok
+INSERT INTO b VALUES (1),(NULL)
+
+case probe-subq.notin.null
+
+query T nosort
+SELECT x FROM a WHERE x NOT IN (SELECT y FROM b) ORDER BY x
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, tid INTEGER, w TEXT)
+
+statement ok
+INSERT INTO u VALUES (1,1,'aa'),(2,2,'bb'),(3,9,'cc')
+
+case probe-subq.exists
+
+query I nosort
+SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.tid=t.id) ORDER BY id
+
+query I nosort
+SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE u.tid=t.id) ORDER BY id
+
+case probe-subq.correlated
+
+query II rowsort
+SELECT t.id, (SELECT count(*) FROM u WHERE u.tid = t.id) FROM t ORDER BY t.id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-subq.derived
+
+query I nosort
+SELECT s.a FROM (SELECT a FROM t WHERE a > 15) s ORDER BY s.a
+
+case probe-subq.rowvalue
+
+query I rowsort
+SELECT id FROM t WHERE (a, b) = (20, 'q')
+
+case probe-subq.rowvalue.in
+
+query I nosort
+SELECT id FROM t WHERE (a,b) IN (VALUES (20,'q'),(30,'r')) ORDER BY id
+
+case probe-subq.rowvalue.subq
+
+query I rowsort
+SELECT id FROM t WHERE (a,b) = (SELECT a,b FROM t WHERE id=3)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, tid INTEGER, w TEXT)
+
+statement ok
+INSERT INTO u VALUES (1,1,'aa'),(2,2,'bb'),(3,9,'cc')
+
+case probe-subq.correlated.limit
+
+query IT rowsort
+SELECT t.id, (SELECT w FROM u WHERE u.tid=t.id ORDER BY u.id LIMIT 1) FROM t ORDER BY t.id
+

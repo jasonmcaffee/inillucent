@@ -1,0 +1,182 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/upsert.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,10,'a'),(2,20,'b')
+
+statement ok
+INSERT INTO t VALUES(1,99,'z') ON CONFLICT(id) DO UPDATE SET v=excluded.v
+
+case ups-001
+
+query IIT rowsort
+SELECT * FROM t ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,10,'a'),(2,20,'b')
+
+statement ok
+INSERT INTO t VALUES(1,99,'z') ON CONFLICT(id) DO NOTHING
+
+case ups-002
+
+query IIT rowsort
+SELECT * FROM t ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,10,'a'),(2,20,'b')
+
+statement ok
+INSERT INTO t VALUES(1,99,'z') ON CONFLICT DO UPDATE SET v=v+excluded.v
+
+case ups-003
+
+query IIT rowsort
+SELECT * FROM t ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,10,'a'),(2,20,'b')
+
+statement ok
+INSERT INTO t VALUES(1,99,'z') ON CONFLICT(id) DO UPDATE SET v=excluded.v WHERE t.v>1000
+
+case ups-004
+
+query IIT rowsort
+SELECT * FROM t ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,10,'a'),(2,20,'b')
+
+statement ok
+INSERT INTO t VALUES(3,30,'c') ON CONFLICT(id) DO UPDATE SET v=0
+
+case ups-005
+
+query IIT rowsort
+SELECT * FROM t ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE t(a UNIQUE, b UNIQUE, c)
+
+statement ok
+INSERT INTO t VALUES(1,1,'x')
+
+statement ok
+INSERT INTO t VALUES(1,2,'y') ON CONFLICT(a) DO UPDATE SET c='ua' ON CONFLICT(b) DO UPDATE SET c='ub'
+
+case ups-006
+
+query IIT rowsort
+SELECT * FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a UNIQUE, b UNIQUE, c)
+
+statement ok
+INSERT INTO t VALUES(1,1,'x')
+
+statement ok
+INSERT INTO t VALUES(2,1,'y') ON CONFLICT(a) DO UPDATE SET c='ua' ON CONFLICT(b) DO UPDATE SET c='ub'
+
+case ups-007
+
+query IIT rowsort
+SELECT * FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,10,'a'),(2,20,'b')
+
+case ups-008
+
+query II rowsort
+INSERT INTO t VALUES(1,99,'z') ON CONFLICT(id) DO UPDATE SET v=excluded.v RETURNING id, v
+
+setup
+
+statement ok
+CREATE TABLE t(a PRIMARY KEY, b)
+
+statement ok
+INSERT INTO t VALUES(1,1)
+
+case ups-009
+
+statement ok
+INSERT OR REPLACE INTO t VALUES(1,2)
+
+query II rowsort
+SELECT * FROM t
+
+case ups-010
+
+statement ok
+INSERT OR IGNORE INTO t VALUES(1,2)
+
+query II rowsort
+SELECT * FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a PRIMARY KEY, b NOT NULL)
+
+statement ok
+INSERT INTO t VALUES(1,1)
+
+case ups-011
+
+statement error
+INSERT OR REPLACE INTO t VALUES(2,NULL)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER, w TEXT)
+
+statement ok
+INSERT INTO t VALUES(1,10,'a'),(2,20,'b')
+
+statement ok
+INSERT INTO t SELECT 1,77,'q' WHERE 1 ON CONFLICT(id) DO UPDATE SET v=excluded.v
+
+case ups-012
+
+query IIT rowsort
+SELECT * FROM t ORDER BY id
+

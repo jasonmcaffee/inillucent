@@ -1,0 +1,459 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-prag.table.info
+
+query ITTITI rowsort
+PRAGMA table_info(t)
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER GENERATED ALWAYS AS (a*2) VIRTUAL)
+
+case probe-prag.table.xinfo
+
+query ITTITII rowsort
+PRAGMA table_xinfo(t)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-prag.table.list
+
+query TTTIII rowsort
+PRAGMA table_list
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE INDEX ia ON t(a)
+
+case probe-prag.index
+
+query ITITI rowsort
+PRAGMA index_list(t)
+
+query IIT rowsort
+PRAGMA index_info(ia)
+
+query IITITI rowsort
+PRAGMA index_xinfo(ia)
+
+setup
+
+case probe-prag.database.list
+
+query ITT rowsort
+PRAGMA database_list
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-prag.integrity
+
+query T rowsort
+PRAGMA integrity_check
+
+query T rowsort
+PRAGMA quick_check
+
+setup
+
+case probe-prag.versions
+
+statement ok
+PRAGMA user_version=7
+
+query I rowsort
+PRAGMA user_version
+
+statement ok
+PRAGMA application_id=42
+
+query I rowsort
+PRAGMA application_id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-prag.page
+
+query I rowsort
+PRAGMA page_size
+
+query I rowsort
+PRAGMA page_count
+
+query I rowsort
+PRAGMA freelist_count
+
+setup
+
+case probe-prag.cache
+
+statement ok
+PRAGMA cache_size=-4000
+
+query I rowsort
+PRAGMA cache_size
+
+statement ok
+PRAGMA synchronous=FULL
+
+query I rowsort
+PRAGMA synchronous
+
+case probe-prag.journal.mode
+
+query T rowsort
+PRAGMA journal_mode
+
+query T rowsort
+PRAGMA journal_mode=WAL
+
+query T rowsort
+PRAGMA journal_mode=DELETE
+
+query T rowsort
+PRAGMA journal_mode=MEMORY
+
+case probe-prag.locking
+
+query T rowsort
+PRAGMA locking_mode
+
+query I rowsort
+PRAGMA temp_store
+
+statement ok
+PRAGMA temp_store=MEMORY
+
+query I rowsort
+PRAGMA temp_store
+
+case probe-prag.encoding
+
+query T rowsort
+PRAGMA encoding
+
+case probe-prag.autovacuum
+
+query I rowsort
+PRAGMA auto_vacuum
+
+statement ok
+PRAGMA auto_vacuum=INCREMENTAL
+
+query I rowsort
+PRAGMA auto_vacuum
+
+statement ok
+PRAGMA incremental_vacuum(1)
+
+case probe-prag.secure
+
+query I rowsort
+PRAGMA secure_delete
+
+query I rowsort
+PRAGMA secure_delete=ON
+
+query I rowsort
+PRAGMA cell_size_check
+
+case probe-prag.fk.switches
+
+query I rowsort
+PRAGMA foreign_keys
+
+statement ok
+PRAGMA foreign_keys=ON
+
+query I rowsort
+PRAGMA foreign_keys
+
+statement ok
+PRAGMA defer_foreign_keys=ON
+
+query I rowsort
+PRAGMA defer_foreign_keys
+
+statement ok
+PRAGMA ignore_check_constraints=ON
+
+case probe-prag.trigger.switches
+
+query I rowsort
+PRAGMA recursive_triggers
+
+statement ok
+PRAGMA recursive_triggers=ON
+
+query I rowsort
+PRAGMA recursive_triggers
+
+query I rowsort
+PRAGMA legacy_alter_table
+
+case probe-prag.like.switches
+
+statement ok
+PRAGMA case_sensitive_like=ON
+
+query I rowsort
+SELECT 'ABC' LIKE 'a%'
+
+query I rowsort
+PRAGMA reverse_unordered_selects
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+case probe-prag.schema.version
+
+query I rowsort
+PRAGMA schema_version
+
+query I rowsort
+PRAGMA data_version
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-prag.maintenance
+
+query T rowsort
+PRAGMA optimize
+
+statement ok
+PRAGMA shrink_memory
+
+query III rowsort
+PRAGMA wal_checkpoint
+
+setup
+
+case probe-prag.runtime
+
+query I rowsort
+PRAGMA busy_timeout=5000
+
+query I rowsort
+PRAGMA busy_timeout
+
+query I rowsort
+PRAGMA threads
+
+query I rowsort
+PRAGMA query_only
+
+case probe-prag.memory
+
+query I rowsort
+PRAGMA mmap_size
+
+query I rowsort
+PRAGMA soft_heap_limit
+
+query I rowsort
+PRAGMA hard_heap_limit
+
+case probe-prag.max.page
+
+query I rowsort
+PRAGMA max_page_count
+
+query I rowsort
+PRAGMA max_page_count=1000
+
+query I rowsort
+PRAGMA max_page_count
+
+case probe-prag.schema.switches
+
+query I rowsort
+PRAGMA trusted_schema
+
+query I rowsort
+PRAGMA writable_schema
+
+statement ok
+PRAGMA writable_schema=ON
+
+query I rowsort
+PRAGMA writable_schema
+
+case probe-prag.planner
+
+query I rowsort
+PRAGMA analysis_limit
+
+query I rowsort
+PRAGMA analysis_limit=100
+
+query I rowsort
+PRAGMA automatic_index
+
+case probe-prag.introspect
+
+query I rowsort
+SELECT count(*)>0 FROM pragma_module_list
+
+query I rowsort
+SELECT count(*)>0 FROM pragma_function_list
+
+query I rowsort
+SELECT count(*)>0 FROM pragma_pragma_list
+
+case probe-prag.compile.options
+
+query I rowsort
+SELECT count(*)>0 FROM pragma_compile_options
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-prag.qualified
+
+query ITTITI rowsort
+PRAGMA main.table_info(t)
+
+setup
+
+case probe-prag.user.version
+
+query I rowsort
+PRAGMA user_version
+
+statement ok
+PRAGMA user_version = 12
+
+query I rowsort
+PRAGMA user_version
+
+case probe-prag.application.id
+
+query I rowsort
+PRAGMA application_id
+
+statement ok
+PRAGMA application_id = 99
+
+query I rowsort
+PRAGMA application_id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE VIEW v AS SELECT a, b FROM t
+
+case probe-prag.table.info.view
+
+query ITTITI rowsort
+PRAGMA table_info(v)
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT PRIMARY KEY, b)
+
+case probe-prag.index.info.pk
+
+query ITITI rowsort
+PRAGMA index_list(t)
+
+setup
+
+case probe-prag.journal.default
+
+query T rowsort
+PRAGMA journal_mode
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-prag.wal.truncate
+
+query III rowsort
+PRAGMA wal_checkpoint(TRUNCATE)
+
+setup
+
+case probe-prag.deprecated
+
+query I rowsort
+PRAGMA count_changes
+
+query I rowsort
+PRAGMA full_column_names
+
+query I rowsort
+PRAGMA short_column_names
+
+query I rowsort
+PRAGMA empty_result_callbacks
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE)
+
+case probe-prag.collation.list
+
+query IT rowsort
+PRAGMA collation_list
+

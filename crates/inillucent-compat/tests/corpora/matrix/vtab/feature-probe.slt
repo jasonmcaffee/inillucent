@@ -1,0 +1,344 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+case probe-tvf.series
+
+statement error
+SELECT group_concat(value) FROM generate_series(1,5)
+
+case probe-tvf.series.limit
+
+statement error
+SELECT group_concat(value) FROM (SELECT value FROM generate_series(1) LIMIT 3)
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-tvf.pragma
+
+query T rowsort
+SELECT group_concat(name) FROM pragma_table_info('t')
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE INDEX ia ON t(a)
+
+case probe-tvf.pragma.index
+
+query T rowsort
+SELECT group_concat(name) FROM pragma_index_list('t')
+
+query T rowsort
+SELECT group_concat(name) FROM pragma_index_info('ia')
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER, d TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,'[1,2]'),(2,'[3]')
+
+case probe-tvf.json.join
+
+query T rowsort
+SELECT group_concat(t.id || ':' || j.value) FROM t, json_each(t.d) j
+
+setup
+
+case probe-fts.basic
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('the quick brown fox'),('a slow green turtle')
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'quick'
+
+query T rowsort
+SELECT body FROM f WHERE f MATCH 'turtle'
+
+case probe-fts.phrase
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('the quick brown fox'),('brown the quick fox')
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH '"quick brown"'
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'NEAR(quick fox, 2)'
+
+case probe-fts.boolean
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('quick brown fox'),('slow green turtle')
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'quick AND fox'
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'quick OR turtle'
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'quick NOT fox'
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'qui*'
+
+case probe-fts.bm25
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('fox fox fox'),('fox and other things entirely different here')
+
+query I nosort
+SELECT rowid FROM f WHERE f MATCH 'fox' ORDER BY bm25(f)
+
+case probe-fts.highlight
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('the quick brown fox jumps')
+
+query T rowsort
+SELECT highlight(f,0,'[',']') FROM f WHERE f MATCH 'quick'
+
+query T rowsort
+SELECT snippet(f,0,'<','>','...',4) FROM f WHERE f MATCH 'brown'
+
+case probe-fts.columns
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(title, body)
+
+statement ok
+INSERT INTO f VALUES ('fox','turtle'),('turtle','fox')
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'title:fox'
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'body:fox'
+
+case probe-fts.delete
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('alpha'),('beta')
+
+statement ok
+DELETE FROM f WHERE body='alpha'
+
+statement ok
+UPDATE f SET body='gamma' WHERE body='beta'
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'alpha'
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'gamma'
+
+case probe-fts.rank
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('fox'),('fox fox')
+
+query I nosort
+SELECT rowid FROM f WHERE f MATCH 'fox' ORDER BY rank
+
+setup
+
+statement ok
+CREATE TABLE c(id INTEGER PRIMARY KEY, body TEXT)
+
+statement ok
+INSERT INTO c VALUES (1,'quick fox')
+
+case probe-fts.external
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body, content='c', content_rowid='id')
+
+statement ok
+INSERT INTO f(f) VALUES ('rebuild')
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'fox'
+
+setup
+
+case probe-fts.contentless
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body, content='')
+
+statement ok
+INSERT INTO f(rowid, body) VALUES (1,'quick fox')
+
+query I rowsort
+SELECT rowid FROM f WHERE f MATCH 'fox'
+
+case probe-fts.commands
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('a'),('b')
+
+statement ok
+INSERT INTO f(f) VALUES ('optimize')
+
+statement ok
+INSERT INTO f(f) VALUES ('rebuild')
+
+query I rowsort
+SELECT count(*) FROM f
+
+case probe-fts.tokenizer
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body, tokenize='porter unicode61')
+
+statement ok
+INSERT INTO f VALUES ('running quickly')
+
+query I rowsort
+SELECT count(*) FROM f WHERE f MATCH 'run'
+
+case probe-fts.vocab
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(body)
+
+statement ok
+INSERT INTO f VALUES ('alpha beta'),('beta gamma')
+
+statement ok
+CREATE VIRTUAL TABLE v USING fts5vocab(f, 'row')
+
+query TI rowsort
+SELECT term, cnt FROM v ORDER BY term
+
+case probe-fts.fts4
+
+statement error
+CREATE VIRTUAL TABLE f USING fts4(body)
+
+case probe-rtree.basic
+
+statement ok
+CREATE VIRTUAL TABLE r USING rtree(id, minX, maxX, minY, maxY)
+
+statement ok
+INSERT INTO r VALUES (1,0,1,0,1),(2,5,6,5,6)
+
+query I rowsort
+SELECT id FROM r WHERE minX>=4 AND maxX<=7
+
+case probe-rtree.i32
+
+statement ok
+CREATE VIRTUAL TABLE r USING rtree_i32(id, minX, maxX)
+
+statement ok
+INSERT INTO r VALUES (1,0,10)
+
+query I rowsort
+SELECT count(*) FROM r WHERE minX<=5 AND maxX>=5
+
+case probe-rtree.aux
+
+statement ok
+CREATE VIRTUAL TABLE r USING rtree(id, minX, maxX, +label)
+
+statement ok
+INSERT INTO r VALUES (1,0,1,'here')
+
+query T rowsort
+SELECT label FROM r WHERE id=1
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-ext.dbstat
+
+query I rowsort
+SELECT count(*)>0 FROM dbstat
+
+case probe-ext.dbpage
+
+statement error
+SELECT count(*)>0 FROM sqlite_dbpage
+
+setup
+
+case probe-ext.geopoly
+
+statement error
+CREATE VIRTUAL TABLE g USING geopoly()
+
+case probe-ext.csv
+
+statement error
+CREATE VIRTUAL TABLE c USING csv(filename='nosuch.csv')
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-ext.offset
+
+statement error
+SELECT sqlite_offset(a) IS NOT NULL FROM t LIMIT 1
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+case probe-ext.session
+
+query I rowsort
+SELECT count(*) FROM sqlite_schema
+

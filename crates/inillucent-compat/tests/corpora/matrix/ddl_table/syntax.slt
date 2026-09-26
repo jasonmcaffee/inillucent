@@ -1,0 +1,488 @@
+# Every example in compat/syntax.toml, run rather than only parsed. The setup below
+# is shared by every case in the file; a case's first records are its production's
+# prelude. Written by `inillucent-matrix convert-syntax`.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a, b, c)
+
+statement ok
+INSERT INTO t VALUES(1, 1, 2, 3), (2, 2, 3, 4), (3, NULL, 'x', x'00')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, a, b UNIQUE, c)
+
+statement ok
+INSERT INTO u VALUES(1, 5, 6, 7), (2, 6, 7, 8)
+
+statement ok
+CREATE TABLE a(x, y)
+
+statement ok
+INSERT INTO a VALUES(1, 2), (2, 3)
+
+statement ok
+CREATE TABLE b(x, y)
+
+statement ok
+INSERT INTO b VALUES(2, 3), (4, 5)
+
+statement ok
+CREATE TABLE c(x, y)
+
+statement ok
+INSERT INTO c VALUES(1, 1)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON u BEGIN SELECT 1; END
+
+case syntax-alter-table-stmt-p0
+
+statement error
+ALTER TABLE t RENAME TO u
+
+case syntax-alter-table-stmt-p1
+
+statement error
+ALTER TABLE main.t RENAME COLUMN a TO b
+
+case syntax-alter-table-stmt-p2
+
+statement error
+ALTER TABLE t RENAME a TO b
+
+case syntax-alter-table-stmt-p3
+
+statement error
+ALTER TABLE t ADD COLUMN c TEXT NOT NULL DEFAULT 'x'
+
+case syntax-alter-table-stmt-p4
+
+statement error
+ALTER TABLE t ADD c
+
+case syntax-alter-table-stmt-p5
+
+statement error
+ALTER TABLE t DROP COLUMN c
+
+case syntax-alter-table-stmt-p6
+
+statement error
+ALTER TABLE t DROP c
+
+case syntax-alter-table-stmt-n7
+
+statement error
+ALTER TABLE t
+
+case syntax-alter-table-stmt-n8
+
+statement error
+ALTER INDEX i RENAME TO j
+
+case syntax-create-table-stmt-p0
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a)
+
+case syntax-create-table-stmt-p1
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement error
+CREATE TEMP TABLE IF NOT EXISTS main.t (a INTEGER PRIMARY KEY AUTOINCREMENT, b TEXT)
+
+case syntax-create-table-stmt-p2
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a, b, PRIMARY KEY (a, b)) WITHOUT ROWID
+
+case syntax-create-table-stmt-p3
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a INT, b TEXT) STRICT
+
+case syntax-create-table-stmt-p4
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement error
+CREATE TABLE t (a, b) WITHOUT ROWID, STRICT
+
+case syntax-create-table-stmt-p5
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t AS SELECT 1
+
+case syntax-create-table-stmt-n6
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement error
+CREATE TABLE t
+
+case syntax-create-table-stmt-n7
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement error
+CREATE TABLE t ()
+
+case syntax-drop-table-stmt-p0
+
+statement ok
+DROP TABLE t
+
+case syntax-drop-table-stmt-p1
+
+statement ok
+DROP TABLE IF EXISTS main.t
+
+case syntax-drop-table-stmt-n2
+
+statement error
+DROP TABLE
+
+case syntax-column-def-p0
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a)
+
+case syntax-column-def-p1
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a INTEGER)
+
+case syntax-column-def-p2
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a UNSIGNED BIG INT)
+
+case syntax-column-def-p3
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a VARCHAR(255))
+
+case syntax-column-def-p4
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a DECIMAL(10, 5))
+
+case syntax-column-constraint-p0
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement error
+CREATE TABLE t (a PRIMARY KEY DESC ON CONFLICT ROLLBACK AUTOINCREMENT)
+
+case syntax-column-constraint-p1
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a NOT NULL ON CONFLICT FAIL)
+
+case syntax-column-constraint-p2
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a NULL)
+
+case syntax-column-constraint-p3
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a UNIQUE ON CONFLICT IGNORE)
+
+case syntax-column-constraint-p4
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a CHECK (a > 0))
+
+case syntax-column-constraint-p5
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a DEFAULT 1, b DEFAULT -1, c DEFAULT 'x', d DEFAULT (1 + 1), e DEFAULT NULL)
+
+case syntax-column-constraint-p6
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a COLLATE NOCASE)
+
+case syntax-column-constraint-p7
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a REFERENCES u (b))
+
+case syntax-column-constraint-p8
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a, b GENERATED ALWAYS AS (a + 1) STORED, c AS (a + 2) VIRTUAL)
+
+case syntax-column-constraint-p9
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a CONSTRAINT c NOT NULL)
+
+case syntax-column-constraint-n10
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a CONSTRAINT c)
+
+case syntax-table-constraint-p0
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a, PRIMARY KEY (a) ON CONFLICT ABORT)
+
+case syntax-table-constraint-p1
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a, UNIQUE (a COLLATE NOCASE DESC))
+
+case syntax-table-constraint-p2
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a, CHECK (a > 0))
+
+case syntax-table-constraint-p3
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a, FOREIGN KEY (a) REFERENCES u (b) ON DELETE CASCADE)
+
+case syntax-table-constraint-p4
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a, CONSTRAINT c UNIQUE (a))
+
+case syntax-conflict-clause-p0
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a UNIQUE ON CONFLICT ROLLBACK)
+
+case syntax-conflict-clause-p1
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a UNIQUE ON CONFLICT ABORT)
+
+case syntax-conflict-clause-p2
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a UNIQUE ON CONFLICT FAIL)
+
+case syntax-conflict-clause-p3
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a UNIQUE ON CONFLICT IGNORE)
+
+case syntax-conflict-clause-p4
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (a UNIQUE ON CONFLICT REPLACE)
+
+case syntax-conflict-clause-n5
+
+statement ok
+DROP VIEW v
+
+statement ok
+DROP TABLE t
+
+statement error
+CREATE TABLE t (a UNIQUE ON CONFLICT NOTHING)
+

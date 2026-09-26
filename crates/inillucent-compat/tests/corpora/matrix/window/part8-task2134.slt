@@ -1,0 +1,54 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2134.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE order_line (id INTEGER PRIMARY KEY, order_id INTEGER, item TEXT, quantity INTEGER)
+
+statement ok
+INSERT INTO order_line (order_id, item, quantity) VALUES (1, 'Latte', 1), (1, 'Tea', 1), (2, 'Latte', 1)
+
+statement ok
+CREATE TABLE orders (id INTEGER PRIMARY KEY, paid_at TEXT)
+
+statement ok
+INSERT INTO orders VALUES (1, '08:00'), (2, '08:05'), (3, '07:55')
+
+case t2134-win-001
+
+query III rowsort
+SELECT o.id, (SELECT count(*) FROM order_line l WHERE l.order_id = o.id) AS n, row_number() OVER (ORDER BY o.paid_at) AS place FROM orders o
+
+query ITI rowsort
+SELECT o.id, (SELECT group_concat(item) FROM order_line l WHERE l.order_id = o.id) AS items, rank() OVER (ORDER BY (SELECT count(*) FROM order_line l WHERE l.order_id = o.id) DESC) AS r FROM orders o ORDER BY o.id
+
+query III rowsort
+SELECT o.id, EXISTS (SELECT 1 FROM order_line l WHERE l.order_id = o.id) AS e, count(*) OVER () FROM orders o ORDER BY o.id
+
+setup
+
+statement ok
+CREATE TABLE ingredient (id INTEGER PRIMARY KEY, name TEXT, on_hand INTEGER, reorder_level INTEGER)
+
+statement ok
+INSERT INTO ingredient VALUES (1, 'beans', 100, 300), (2, 'milk', 500, 100), (3, 'cups', 7, 50)
+
+case t2134-win-002
+
+query III rowsort
+SELECT id, on_hand <= reorder_level AS low, rank() OVER (ORDER BY on_hand DESC) AS r FROM ingredient ORDER BY low DESC, name
+
+query II rowsort
+SELECT id, rank() OVER (ORDER BY on_hand DESC) AS r FROM ingredient ORDER BY lower(name)
+
+query III rowsort
+SELECT id, on_hand <= reorder_level AS low, rank() OVER (ORDER BY on_hand DESC) AS r FROM ingredient ORDER BY 2, 1
+
+query II nosort
+SELECT id, rank() OVER (ORDER BY on_hand DESC) AS r FROM ingredient ORDER BY on_hand + 0, r * -1 LIMIT 2
+
+query II rowsort
+SELECT DISTINCT on_hand > 50 AS big, count(*) OVER (PARTITION BY on_hand > 50) AS c FROM ingredient ORDER BY big
+

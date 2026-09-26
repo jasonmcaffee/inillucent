@@ -1,0 +1,111 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/generated.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER AS (a*2))
+
+statement ok
+INSERT INTO t(a) VALUES(3)
+
+case gen-001
+
+query II rowsort
+SELECT a,b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER GENERATED ALWAYS AS (a*2) STORED)
+
+statement ok
+INSERT INTO t(a) VALUES(3)
+
+case gen-002
+
+query II rowsort
+SELECT a,b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT AS (a||'x') VIRTUAL)
+
+statement ok
+INSERT INTO t(a) VALUES(3)
+
+case gen-003
+
+query TT rowsort
+SELECT b, typeof(b) FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER AS (a*2))
+
+case gen-004
+
+statement error
+INSERT INTO t(a,b) VALUES(3,1)
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER AS (a*2))
+
+statement ok
+INSERT INTO t(a) VALUES(3)
+
+case gen-005
+
+statement ok
+UPDATE t SET a=5
+
+query II rowsort
+SELECT a,b FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER AS (a*2) STORED)
+
+statement ok
+CREATE INDEX i ON t(b)
+
+statement ok
+INSERT INTO t(a) VALUES(3),(1)
+
+case gen-006
+
+query I rowsort
+SELECT a FROM t WHERE b=2
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER AS (a*2))
+
+statement ok
+INSERT INTO t(a) VALUES(3)
+
+case gen-007
+
+query II rowsort
+SELECT * FROM t
+
+setup
+
+statement ok
+CREATE TABLE t(a INTEGER, b AS (a*2))
+
+statement ok
+INSERT INTO t(a) VALUES('x')
+
+case gen-008
+
+query IT rowsort
+SELECT b, typeof(b) FROM t
+

@@ -1,0 +1,64 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/collate2.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case clp-001
+
+query III rowsort
+SELECT ('a'='A') COLLATE NOCASE, ('a'='A' COLLATE NOCASE), 'a'='A' COLLATE NOCASE
+
+case clp-002
+
+query III rowsort
+SELECT (1=1) COLLATE NOCASE, (0) COLLATE NOCASE, ('b'>'A') COLLATE NOCASE
+
+case clp-003
+
+query III rowsort
+SELECT ('B'<'a') COLLATE NOCASE, 'B'<'a' COLLATE NOCASE, 'B' COLLATE NOCASE < 'a'
+
+case clp-004
+
+query I rowsort
+SELECT (('a'='A') COLLATE NOCASE) COLLATE BINARY
+
+case clp-005
+
+query II rowsort
+SELECT ('a' LIKE 'A') COLLATE NOCASE, ('a' IN ('A')) COLLATE NOCASE
+
+case clp-006
+
+query I rowsort
+SELECT (CASE WHEN 'a'='A' THEN 1 ELSE 0 END) COLLATE NOCASE
+
+case clp-007
+
+query II rowsort
+SELECT ('a' IS 'A') COLLATE NOCASE, ('a' IS NOT 'A') COLLATE NOCASE
+
+case clp-008
+
+query I rowsort
+SELECT (SELECT 'a'='A') COLLATE NOCASE
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+INSERT INTO t VALUES('a','A')
+
+case clp-009
+
+query II rowsort
+SELECT (a=b) COLLATE NOCASE, a=b FROM t
+
+setup
+
+case clp-010
+
+query II rowsort
+SELECT ('a'||'')=('A'||'') COLLATE NOCASE, (('a'||'')=('A'||'')) COLLATE NOCASE
+

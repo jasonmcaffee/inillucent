@@ -1,0 +1,1391 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2083.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE h1(id INTEGER PRIMARY KEY, a)
+
+statement ok
+INSERT INTO h1 VALUES (1,3)
+
+statement ok
+CREATE INDEX h1_a ON h1(a)
+
+statement ok
+CREATE TABLE h2(id INTEGER PRIMARY KEY, a INTEGER)
+
+statement ok
+INSERT INTO h2 VALUES (1,3)
+
+statement ok
+CREATE INDEX h2_a ON h2(a)
+
+statement ok
+CREATE TABLE s1(k)
+
+statement ok
+INSERT INTO s1 VALUES (3)
+
+statement ok
+CREATE TABLE s2(k INTEGER)
+
+statement ok
+INSERT INTO s2 VALUES (3)
+
+case ix-ticket
+
+query I rowsort
+SELECT count(*) FROM s1, h1 WHERE h1.a = s1.k
+
+query I rowsort
+SELECT count(*) FROM s2, h1 WHERE h1.a = s2.k
+
+query I rowsort
+SELECT count(*) FROM s1, h2 WHERE h2.a = s1.k
+
+query I rowsort
+SELECT count(*) FROM h1 WHERE a = 3
+
+query I rowsort
+SELECT count(*) FROM h1 WHERE a = (SELECT k FROM s1)
+
+statement ok
+UPDATE h1 SET a = 4 FROM s1 WHERE h1.a = s1.k
+
+query II rowsort
+SELECT id, a FROM h1
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a , b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k )
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-untyped-ox-untyped
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a , b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k INTEGER)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-untyped-ox-integer
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a , b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k TEXT)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-untyped-ox-text
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a , b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k REAL)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-untyped-ox-real
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a , b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k NUMERIC)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-untyped-ox-numeric
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a , b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k BLOB)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-untyped-ox-blob
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a INTEGER, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k )
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-integer-ox-untyped
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a INTEGER, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k INTEGER)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-integer-ox-integer
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a INTEGER, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k TEXT)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-integer-ox-text
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a INTEGER, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k REAL)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-integer-ox-real
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a INTEGER, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k NUMERIC)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-integer-ox-numeric
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a INTEGER, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k BLOB)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-integer-ox-blob
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a TEXT, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k )
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-text-ox-untyped
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIIT rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a TEXT, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k INTEGER)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-text-ox-integer
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a TEXT, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k TEXT)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-text-ox-text
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a TEXT, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k REAL)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-text-ox-real
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a TEXT, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k NUMERIC)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-text-ox-numeric
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a TEXT, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k BLOB)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-text-ox-blob
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIIT rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a REAL, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k )
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-real-ox-untyped
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a REAL, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k INTEGER)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-real-ox-integer
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a REAL, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k TEXT)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-real-ox-text
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a REAL, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k REAL)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-real-ox-real
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a REAL, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k NUMERIC)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-real-ox-numeric
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a REAL, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k BLOB)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-real-ox-blob
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a NUMERIC, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k )
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-numeric-ox-untyped
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a NUMERIC, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k INTEGER)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-numeric-ox-integer
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a NUMERIC, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k TEXT)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-numeric-ox-text
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a NUMERIC, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k REAL)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-numeric-ox-real
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a NUMERIC, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k NUMERIC)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-numeric-ox-numeric
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a NUMERIC, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k BLOB)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-numeric-ox-blob
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a BLOB, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k )
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-blob-ox-untyped
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a BLOB, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k INTEGER)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-blob-ox-integer
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a BLOB, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k TEXT)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-blob-ox-text
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a BLOB, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k REAL)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-blob-ox-real
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a BLOB, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k NUMERIC)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-blob-ox-numeric
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE h(id INTEGER PRIMARY KEY, a BLOB, b)
+
+statement ok
+INSERT INTO h VALUES (1, 3, 0), (2, '3', 0), (3, 3.0, 0), (4, '3.0', 0), (5, 3.5, 0), (6, 'abc', 0), (7, x'33', 0), (8, NULL, 0), (9, ' 3', 0), (10, '3e0', 0), (11, 0, 0), (12, '0', 0)
+
+statement ok
+CREATE INDEX h_a ON h(a)
+
+statement ok
+CREATE TABLE s(n INTEGER, k BLOB)
+
+statement ok
+INSERT INTO s VALUES (1, 3), (2, '3'), (3, 3.0), (4, '3.0'), (5, 3.5), (6, 'abc'), (7, x'33'), (8, NULL), (9, ' 3'), (10, '3e0'), (11, 0), (12, '0')
+
+case ix-blob-ox-blob
+
+query TII rowsort
+SELECT 'join', s.n, h.id FROM s, h WHERE h.a = s.k ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'mirror', s.n, h.id FROM s, h WHERE s.k = h.a ORDER BY 2, 3
+
+query TII rowsort
+SELECT 'rowid', s.n, h.id FROM s, h WHERE h.id = s.k ORDER BY 2, 3
+
+query TIII rowsort
+SELECT 'correlated', n, (SELECT count(*) FROM h WHERE h.a = s.k), (SELECT sum(id) FROM h WHERE h.a = s.k) FROM s ORDER BY n
+
+statement ok
+UPDATE h SET b = b + 1 FROM s WHERE h.a = s.k
+
+query TII rowsort
+SELECT 'update', id, b FROM h ORDER BY id
+

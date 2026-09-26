@@ -1,0 +1,139 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/todo.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY, title TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '')
+
+case fts-trigger-insert
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(title, notes)
+
+statement ok
+CREATE TRIGGER t3 AFTER INSERT ON todo BEGIN INSERT INTO f (rowid, title, notes) VALUES (NEW.id, NEW.title, NEW.notes); END
+
+statement ok
+CREATE TRIGGER t4 AFTER DELETE ON todo BEGIN DELETE FROM f WHERE rowid = OLD.id; END
+
+statement ok
+CREATE TRIGGER t5 AFTER UPDATE ON todo BEGIN UPDATE f SET title = NEW.title, notes = NEW.notes WHERE rowid = NEW.id; END
+
+statement ok
+INSERT INTO todo (title) VALUES ('x')
+
+statement ok
+INSERT INTO todo (title, notes) VALUES ('y', 'hello world')
+
+query ITT rowsort
+SELECT rowid, * FROM f ORDER BY rowid
+
+case fts-trigger-update-delete
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(title, notes)
+
+statement ok
+CREATE TRIGGER t3 AFTER INSERT ON todo BEGIN INSERT INTO f (rowid, title, notes) VALUES (NEW.id, NEW.title, NEW.notes); END
+
+statement ok
+CREATE TRIGGER t4 AFTER DELETE ON todo BEGIN DELETE FROM f WHERE rowid = OLD.id; END
+
+statement ok
+CREATE TRIGGER t5 AFTER UPDATE ON todo BEGIN UPDATE f SET title = NEW.title, notes = NEW.notes WHERE rowid = NEW.id; END
+
+statement ok
+INSERT INTO todo (title) VALUES ('x'), ('y')
+
+statement ok
+UPDATE todo SET title = 'z' WHERE id = 1
+
+statement ok
+DELETE FROM todo WHERE id = 2
+
+query ITT rowsort
+SELECT rowid, * FROM f ORDER BY rowid
+
+query I rowsort
+SELECT rowid FROM f WHERE f MATCH 'z'
+
+case fts-trigger-failed-statement
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(title, notes)
+
+statement ok
+CREATE TRIGGER t3 AFTER INSERT ON todo BEGIN INSERT INTO f (rowid, title, notes) VALUES (NEW.id, NEW.title, NEW.notes); END
+
+statement ok
+CREATE TRIGGER t4 AFTER DELETE ON todo BEGIN DELETE FROM f WHERE rowid = OLD.id; END
+
+statement ok
+CREATE TRIGGER t5 AFTER UPDATE ON todo BEGIN UPDATE f SET title = NEW.title, notes = NEW.notes WHERE rowid = NEW.id; END
+
+statement ok
+INSERT INTO todo (title) VALUES ('alpha'), ('beta')
+
+statement error
+INSERT INTO todo (title) VALUES ('gamma'), (NULL)
+
+case fts-trigger-rollback
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(title, notes)
+
+statement ok
+CREATE TRIGGER t3 AFTER INSERT ON todo BEGIN INSERT INTO f (rowid, title, notes) VALUES (NEW.id, NEW.title, NEW.notes); END
+
+statement ok
+CREATE TRIGGER t4 AFTER DELETE ON todo BEGIN DELETE FROM f WHERE rowid = OLD.id; END
+
+statement ok
+CREATE TRIGGER t5 AFTER UPDATE ON todo BEGIN UPDATE f SET title = NEW.title, notes = NEW.notes WHERE rowid = NEW.id; END
+
+statement ok
+INSERT INTO todo (title) VALUES ('alpha')
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO todo (title) VALUES ('delta')
+
+query IT rowsort
+SELECT rowid, title FROM f ORDER BY rowid
+
+statement ok
+ROLLBACK
+
+query IT rowsort
+SELECT rowid, title FROM f ORDER BY rowid
+
+case fts-trigger-insert-select
+
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(title, notes)
+
+statement ok
+CREATE TRIGGER t3 AFTER INSERT ON todo BEGIN INSERT INTO f (rowid, title, notes) VALUES (NEW.id, NEW.title, NEW.notes); END
+
+statement ok
+CREATE TRIGGER t4 AFTER DELETE ON todo BEGIN DELETE FROM f WHERE rowid = OLD.id; END
+
+statement ok
+CREATE TRIGGER t5 AFTER UPDATE ON todo BEGIN UPDATE f SET title = NEW.title, notes = NEW.notes WHERE rowid = NEW.id; END
+
+statement ok
+INSERT INTO todo (title) VALUES ('alpha'), ('beta')
+
+statement ok
+INSERT INTO todo (title) SELECT 'copy ' || title FROM todo
+
+query IT rowsort
+SELECT rowid, title FROM f ORDER BY rowid
+
+query I nosort
+SELECT rowid FROM f WHERE f MATCH 'copy' ORDER BY rowid
+

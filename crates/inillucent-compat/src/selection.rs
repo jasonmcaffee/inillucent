@@ -145,6 +145,42 @@ impl Target {
         }
     }
 
+    /// Returns one shard of this target: the same target, with `#i/N` after
+    /// its module so the shard has a label, a timing row and a budget of its
+    /// own. Only a module target is sharded.
+    ///
+    /// @param index - which shard, from zero
+    /// @param count - how many shards
+    pub fn shard(&self, index: u32, count: u32) -> Target {
+        Target {
+            module: self
+                .module
+                .as_ref()
+                .map(|module| format!("{module}{SHARD_MARK}{index}/{count}")),
+            ..self.clone()
+        }
+    }
+
+    /// Returns the shard this target is, as `(index, count)`, if it is one.
+    pub fn shard_of(&self) -> Option<(u32, u32)> {
+        let (_, shard) = self.module.as_ref()?.split_once(SHARD_MARK)?;
+        let (index, count) = shard.split_once('/')?;
+        Some((index.parse().ok()?, count.parse().ok()?))
+    }
+
+    /// Returns the target a shard belongs to, which is the one its row names.
+    pub fn unsharded(&self) -> Target {
+        Target {
+            module: self.module.as_ref().map(|module| {
+                module
+                    .split_once(SHARD_MARK)
+                    .map(|(plain, _)| plain.to_string())
+                    .unwrap_or_else(|| module.clone())
+            }),
+            ..self.clone()
+        }
+    }
+
     /// Returns the binary this target runs in: itself with no module.
     pub fn binary(&self) -> Target {
         Target {
@@ -207,7 +243,21 @@ pub struct Row {
     /// have to be built by the outer run whether or not it selected them.
     /// `testplan::build_set` adds them to the build and not to the run.
     pub builds: Vec<String>,
+    /// How many processes the runner splits this target across.
+    ///
+    /// **One family of the statement matrix can hold more cases than one
+    /// process finishes inside the change budget (task-2137).** With `shards =
+    /// N` the runner starts the target `N` times, each with
+    /// `INILLUCENT_SHARD=i/N` in its environment, and the suite keeps the
+    /// cases whose id hash lands on `i`. That is cargo-nextest's `slice`
+    /// partition, done by this runner. Each shard is its own timing row,
+    /// labelled `<target>#i/N`, so longest first scheduling sees it. One, the
+    /// default, is no split.
+    pub shards: u32,
 }
+
+/// The separator between a target's label and its shard, as `#i/N`.
+pub const SHARD_MARK: char = '#';
 
 /// When a tier runs.
 ///
@@ -409,6 +459,16 @@ impl Map {
                 .get("module")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            let shards = row
+                .get("shards")
+                .and_then(Value::as_integer)
+                .map(|count| u32::try_from(count).unwrap_or(0))
+                .unwrap_or(1);
+            if shards == 0 {
+                return Err(format!(
+                    "the row for `{package}::{name}` has `shards = 0`; one is no split"
+                ));
+            }
             if module.is_some() && kind != Kind::Test {
                 return Err(format!(
                     "{kind_text} row for `{package}::{name}` has a module; only a test binary holds modules"
@@ -427,6 +487,7 @@ impl Map {
                 features,
                 alone,
                 builds,
+                shards,
             });
         }
         for row in document.array("path") {
@@ -461,7 +522,8 @@ impl Map {
     ///
     /// @param target - the target to look up
     pub fn row(&self, target: &Target) -> Option<&Row> {
-        self.rows.iter().find(|row| &row.target == target)
+        let unsharded = target.unsharded();
+        self.rows.iter().find(|row| row.target == unsharded)
     }
 
     /// Returns the cadence of a tier by name.

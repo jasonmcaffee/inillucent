@@ -1,0 +1,63 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/distinct.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(1.0),('1'),(x'31')
+
+case dis-001
+
+query I rowsort
+SELECT count(*) FROM (SELECT DISTINCT a FROM t)
+
+setup
+
+case dis-002
+
+query II rowsort
+SELECT DISTINCT 1 AS a, 2 AS b UNION ALL SELECT 1,2
+
+setup
+
+statement ok
+CREATE TABLE t(a,b)
+
+statement ok
+INSERT INTO t VALUES(1,2),(1,3),(1,2)
+
+case dis-003
+
+query II nosort
+SELECT DISTINCT a,b FROM t ORDER BY a,b
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES('a'),('A')
+
+case dis-004
+
+query I rowsort
+SELECT count(*) FROM (SELECT DISTINCT a FROM t)
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2)
+
+case dis-005
+
+query I nosort
+SELECT DISTINCT a FROM t ORDER BY a DESC LIMIT 1
+

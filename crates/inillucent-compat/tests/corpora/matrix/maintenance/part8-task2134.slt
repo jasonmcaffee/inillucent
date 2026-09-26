@@ -1,0 +1,32 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2134.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE g (a INTEGER, b INTEGER GENERATED ALWAYS AS (a * 2) VIRTUAL)
+
+statement ok
+INSERT INTO g (a) VALUES (1), (2), (3)
+
+statement ok
+CREATE UNIQUE INDEX gb ON g (b)
+
+statement ok
+INSERT INTO g (a) VALUES (4)
+
+case t2134-vgi-003
+
+query I rowsort
+SELECT a FROM g WHERE b = 4
+
+query II rowsort
+SELECT a, b FROM g WHERE b > 2 ORDER BY b
+
+statement ok
+REINDEX gb
+
+query T rowsort
+PRAGMA integrity_check
+

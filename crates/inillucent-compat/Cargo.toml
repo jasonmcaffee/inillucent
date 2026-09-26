@@ -180,6 +180,12 @@ path = "src/bin/planperf.rs"
 name = "inillucent-slt"
 path = "src/bin/slt.rs"
 
+# Converts the existing corpora into statement matrix case files, and runs
+# matrix cases outside the test harness to measure them (task-2137).
+[[bin]]
+name = "inillucent-matrix"
+path = "src/bin/matrix.rs"
+
 [[bin]]
 name = "inillucent-featureperf"
 path = "src/bin/featureperf.rs"

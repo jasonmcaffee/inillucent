@@ -1,0 +1,39 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/datetime2.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case dtr-001
+
+query TTT rowsort
+SELECT date('9999-12-31','+1 day'), date('0000-01-01','-1 day'), datetime('9999-12-31 23:59:59','+1 second')
+
+case dtr-002
+
+query TTT rowsort
+SELECT date('5000-01-01'), date('2020-01-01','+10000 years'), date('2020-01-01','-10000 years')
+
+case dtr-003
+
+query RT rowsort
+SELECT julianday('9999-12-31'), julianday('9999-12-31','+1 day')
+
+case dtr-004
+
+query TTT rowsort
+SELECT strftime('%Y-%m-%d','2020-01-01 24:00:00'), strftime('%H','2020-01-01 24:00:00'), datetime('2020-01-01 24:00:00')
+
+case dtr-005
+
+query TT rowsort
+SELECT time('23:59:59','+1 second'), datetime('2020-01-01 23:59:59','+1 second')
+
+case dtr-006
+
+query TTT rowsort
+SELECT date('2020-01-01','floor'), date('2020-01-01','ceiling'), date('2020-01-01','+1 month','ceiling')
+
+case dtr-007
+
+query TTT rowsort
+SELECT date('2020-02-30'), date('2020-04-31'), date('2020-01-32')
+

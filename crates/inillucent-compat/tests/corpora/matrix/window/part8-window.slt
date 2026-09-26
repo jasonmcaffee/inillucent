@@ -1,0 +1,172 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/window.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE t(g TEXT, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7)
+
+case win-001
+
+query TII rowsort
+SELECT g,v,row_number() OVER (ORDER BY g,v) FROM t
+
+case win-002
+
+query TIII rowsort
+SELECT g,v,rank() OVER (ORDER BY v), dense_rank() OVER (ORDER BY v) FROM t ORDER BY g,v
+
+case win-003
+
+query TIRR rowsort
+SELECT g,v,percent_rank() OVER (ORDER BY v), cume_dist() OVER (ORDER BY v) FROM t ORDER BY g,v
+
+case win-004
+
+query TII rowsort
+SELECT g,v,ntile(3) OVER (ORDER BY g,v) FROM t
+
+case win-005
+
+query TITI rowsort
+SELECT g,v,lag(v) OVER (ORDER BY g,v), lead(v) OVER (ORDER BY g,v) FROM t
+
+case win-006
+
+query TIII rowsort
+SELECT g,v,lag(v,2,-1) OVER (ORDER BY g,v), lead(v,2,-1) OVER (ORDER BY g,v) FROM t
+
+case win-007
+
+query TIII rowsort
+SELECT g,v,first_value(v) OVER (PARTITION BY g ORDER BY v), last_value(v) OVER (PARTITION BY g ORDER BY v) FROM t ORDER BY g,v
+
+case win-008
+
+query TIT rowsort
+SELECT g,v,nth_value(v,2) OVER (PARTITION BY g ORDER BY v) FROM t ORDER BY g,v
+
+case win-009
+
+query TII rowsort
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v) FROM t ORDER BY g,v
+
+case win-010
+
+query TII rowsort
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t ORDER BY g,v
+
+case win-011
+
+query TII rowsort
+SELECT g,v,sum(v) OVER (ORDER BY v RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t ORDER BY g,v
+
+case win-012
+
+query TII rowsort
+SELECT g,v,sum(v) OVER (ORDER BY v RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM t ORDER BY g,v
+
+case win-013
+
+query TII rowsort
+SELECT g,v,count(*) OVER (ORDER BY v GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t ORDER BY g,v
+
+case win-014
+
+query TII rowsort
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM t ORDER BY g,v
+
+case win-015
+
+query TIRI rowsort
+SELECT g,v,avg(v) OVER (PARTITION BY g), count(v) OVER (PARTITION BY g) FROM t ORDER BY g,v
+
+case win-016
+
+query TII rowsort
+SELECT g,v,sum(v) OVER w FROM t WINDOW w AS (PARTITION BY g ORDER BY v) ORDER BY g,v
+
+case win-017
+
+statement error
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v EXCLUDE CURRENT ROW) FROM t ORDER BY g,v
+
+case win-018
+
+statement error
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v EXCLUDE TIES) FROM t ORDER BY g,v
+
+case win-019
+
+statement error
+SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v EXCLUDE GROUP) FROM t ORDER BY g,v
+
+case win-020
+
+query TIT rowsort
+SELECT g,v,group_concat(v,'|') OVER (PARTITION BY g ORDER BY v) FROM t ORDER BY g,v
+
+case win-021
+
+query TII rowsort
+SELECT g,v,max(v) OVER (ORDER BY v ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM t ORDER BY g,v
+
+case win-022
+
+query TII rowsort
+SELECT g, sum(v) AS s, row_number() OVER (ORDER BY sum(v)) FROM t GROUP BY g ORDER BY g
+
+case win-023
+
+query TII rowsort
+SELECT g,v,row_number() OVER (PARTITION BY g ORDER BY v DESC NULLS LAST) FROM t ORDER BY g,v
+
+case win-024
+
+query TII rowsort
+SELECT g,v,sum(v) OVER (ORDER BY g ROWS 2 PRECEDING) FROM t ORDER BY g,v
+
+case win-025
+
+query TII rowsort
+SELECT * FROM (SELECT g,v,row_number() OVER (PARTITION BY g ORDER BY v) rn FROM t) WHERE rn = 1 ORDER BY g
+
+case win-026
+
+statement error
+SELECT g,v,ntile(0) OVER (ORDER BY v) FROM t
+
+case win-027
+
+query TII rowsort
+SELECT g,v,lag(v,0) OVER (ORDER BY v) FROM t ORDER BY g,v
+
+case win-028
+
+query TII rowsort
+SELECT g,v,lag(v,-1) OVER (ORDER BY g,v) FROM t
+
+setup
+
+case win-029
+
+query II rowsort
+SELECT v, sum(v) OVER (ORDER BY v RANGE BETWEEN 1.5 PRECEDING AND 0.5 FOLLOWING) FROM (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3)
+
+setup
+
+statement ok
+CREATE TABLE t(g TEXT, v INTEGER)
+
+statement ok
+INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7)
+
+case win-030
+
+query TII rowsort
+SELECT g,v,count(*) FILTER (WHERE v>1) OVER (PARTITION BY g) FROM t ORDER BY g,v
+

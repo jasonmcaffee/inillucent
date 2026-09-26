@@ -1,0 +1,69 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/todo.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE tag (id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO tag (name) VALUES ('outdoor'), ('Repairs'), ('apple'), ('Zebra'), (NULL)
+
+case minmax-window
+
+query TT rowsort
+SELECT max(name) OVER (), min(name) OVER () FROM tag LIMIT 1
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 5), (2, 7), (3, 5)
+
+case window-in-derived-table
+
+query II rowsort
+SELECT * FROM (SELECT id, rank() OVER (ORDER BY n DESC) AS r FROM t) WHERE id = 3
+
+case window-in-cte
+
+query II rowsort
+WITH ranked AS (SELECT id, rank() OVER (ORDER BY n DESC) AS r FROM t) SELECT * FROM ranked WHERE id = 3
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 5), (2, 7), (3, 5)
+
+statement ok
+CREATE VIEW v AS SELECT id, rank() OVER (ORDER BY n DESC) AS r FROM t
+
+case window-in-view
+
+query II rowsort
+SELECT * FROM v WHERE id = 3
+
+setup
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 5), (2, 7), (3, 5)
+
+case window-top-per-group
+
+query III rowsort
+SELECT * FROM (SELECT id, n, row_number() OVER (PARTITION BY n ORDER BY id) AS rn FROM t) WHERE rn <= 1 ORDER BY id
+
+case window-derived-joined
+
+query II rowsort
+SELECT t.id, r.r FROM t JOIN (SELECT id, dense_rank() OVER (ORDER BY n) AS r FROM t) AS r ON r.id = t.id ORDER BY t.id
+

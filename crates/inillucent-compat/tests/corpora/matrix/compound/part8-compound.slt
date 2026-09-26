@@ -1,0 +1,132 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/compound.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+case cmp-001
+
+query I rowsort
+SELECT 1 UNION SELECT 1 UNION SELECT 2
+
+case cmp-002
+
+query I rowsort
+SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2
+
+case cmp-003
+
+query R rowsort
+SELECT 1 AS a UNION SELECT 1.0
+
+case cmp-004
+
+query I rowsort
+SELECT 1 AS a UNION SELECT '1'
+
+case cmp-005
+
+query I nosort
+SELECT 2 AS a UNION SELECT 1 ORDER BY a DESC
+
+case cmp-006
+
+query I nosort
+SELECT 3 AS a UNION SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 2
+
+case cmp-007
+
+query II rowsort
+SELECT 1,2 INTERSECT SELECT 1,2
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(1),(2),(3)
+
+case cmp-008
+
+query I nosort
+SELECT a FROM t EXCEPT SELECT 2 ORDER BY a
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES(NULL),(1)
+
+case cmp-009
+
+query T rowsort
+SELECT a FROM t INTERSECT SELECT NULL
+
+case cmp-010
+
+query I rowsort
+SELECT a FROM t EXCEPT SELECT NULL
+
+setup
+
+case cmp-011
+
+statement error
+SELECT 1 UNION SELECT 1,2
+
+case cmp-012
+
+statement error
+SELECT 1 AS a ORDER BY b
+
+case cmp-013
+
+statement error
+SELECT 1 AS a UNION SELECT 2 ORDER BY x
+
+case cmp-014
+
+query T nosort
+SELECT 'b' AS a UNION SELECT 'a' ORDER BY a COLLATE NOCASE
+
+setup
+
+statement ok
+CREATE TABLE t(a TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES('A')
+
+case cmp-015
+
+query T rowsort
+SELECT a FROM t UNION SELECT 'a'
+
+setup
+
+case cmp-016
+
+query I rowsort
+SELECT 1 EXCEPT SELECT 1 UNION SELECT 2
+
+case cmp-017
+
+query I nosort
+SELECT 1 AS x UNION ALL SELECT 2 ORDER BY x LIMIT 1 OFFSET 1
+
+case cmp-018
+
+statement ok
+VALUES(1,2),(3,4)
+
+case cmp-019
+
+query I rowsort
+SELECT * FROM (VALUES(1),(2)) ORDER BY 1 DESC
+
+case cmp-020
+
+query I nosort
+SELECT 1 AS a UNION ALL SELECT 2 AS b ORDER BY a
+

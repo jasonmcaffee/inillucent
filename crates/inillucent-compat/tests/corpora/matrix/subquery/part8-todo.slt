@@ -1,0 +1,29 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/todo.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE todo (id INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE tag (id INTEGER PRIMARY KEY, name TEXT)
+
+statement ok
+CREATE TABLE todo_tag (todo_id INTEGER, tag_id INTEGER)
+
+statement ok
+INSERT INTO todo VALUES (1), (2), (3)
+
+statement ok
+INSERT INTO tag VALUES (1, 'b'), (2, 'a'), (3, 'c')
+
+statement ok
+INSERT INTO todo_tag VALUES (1, 1), (1, 2), (2, 3)
+
+case correlated-derived-count
+
+query II rowsort
+SELECT t.id, (SELECT count(*) FROM (SELECT tag_id FROM todo_tag WHERE todo_id = t.id)) FROM todo t ORDER BY t.id
+

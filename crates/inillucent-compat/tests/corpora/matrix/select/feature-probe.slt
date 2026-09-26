@@ -1,0 +1,156 @@
+# Copied from tools/feature-probe/cases.js and cases-extra.js, which stay as the
+# published comparison. Dot commands and shell settings are left out: the matrix
+# compares typed values through the engine, not what the shell prints.
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-select.basic
+
+query IIT rowsort
+SELECT id,a,b FROM t WHERE a >= 20 ORDER BY a DESC, id LIMIT 3
+
+case probe-select.distinct
+
+query I nosort
+SELECT DISTINCT a FROM t ORDER BY a
+
+case probe-select.groupby
+
+query II rowsort
+SELECT a, count(*) FROM t GROUP BY a HAVING count(*) > 1 ORDER BY a
+
+case probe-select.groupby.expr
+
+query II rowsort
+SELECT a/20, count(*) FROM t GROUP BY a/20 ORDER BY 1
+
+case probe-select.orderby.ordinal
+
+query TI nosort
+SELECT b, a FROM t ORDER BY 2, 1
+
+setup
+
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES (1),(NULL),(3)
+
+case probe-select.orderby.nulls
+
+query T nosort
+SELECT a FROM t ORDER BY a NULLS FIRST
+
+query I nosort
+SELECT a FROM t ORDER BY a NULLS LAST
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-select.limit.offset
+
+query I nosort
+SELECT id FROM t ORDER BY id LIMIT 2 OFFSET 2
+
+query I nosort
+SELECT id FROM t ORDER BY id LIMIT 2, 2
+
+setup
+
+case probe-select.values
+
+query IT rowsort
+VALUES (1,'a'),(2,'b')
+
+query IT rowsort
+SELECT * FROM (VALUES (3,'c'),(4,'d')) ORDER BY 1
+
+case probe-select.nofrom
+
+query ITTR rowsort
+SELECT 1, 'a', NULL, 2.5
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+statement ok
+CREATE TABLE u(id INTEGER PRIMARY KEY, tid INTEGER, w TEXT)
+
+statement ok
+INSERT INTO u VALUES (1,1,'aa'),(2,2,'bb'),(3,9,'cc')
+
+case probe-select.star.qualified
+
+query IITT rowsort
+SELECT t.*, u.w FROM t JOIN u ON u.tid = t.id ORDER BY t.id
+
+setup
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t')
+
+case probe-select.alias
+
+query II rowsort
+SELECT a AS x, a*2 y FROM t ORDER BY x LIMIT 2
+
+case probe-select.agg.empty
+
+query ITTTTR rowsort
+SELECT count(*), sum(a), avg(a), max(a), min(a), total(a) FROM t WHERE a > 1000
+
+case probe-select.groupby.orderagg
+
+query II nosort
+SELECT a, count(*) n FROM t GROUP BY a ORDER BY n DESC, a
+
+case probe-select.bare.column
+
+query II rowsort
+SELECT id, max(a) FROM t
+
+case probe-select.distinct.multi
+
+query IT nosort
+SELECT DISTINCT a, b FROM t ORDER BY a, b
+
+case probe-select.distinct.orderby
+
+query I nosort
+SELECT DISTINCT a FROM t ORDER BY b
+
+case probe-select.orderby.window
+
+query I nosort
+SELECT id FROM t ORDER BY row_number() OVER (ORDER BY a DESC), id
+
+case probe-select.having.alias
+
+query II rowsort
+SELECT a, count(*) n FROM t GROUP BY a HAVING n > 1
+
+case probe-select.count.distinct.two
+
+statement error
+SELECT count(DISTINCT a, b) FROM t
+

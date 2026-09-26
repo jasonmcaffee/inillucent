@@ -1,0 +1,152 @@
+# Moved from crates/inillucent-compat/tests/corpora/differential-part8/task2087.cases,
+# where each case was one line run through both shells with -bail. Each case now runs
+# on files through the persistent oracle, and stops where the script stopped.
+
+setup
+
+statement ok
+CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT)
+
+statement ok
+CREATE INDEX p_n ON p (s COLLATE NOCASE)
+
+statement ok
+INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A')
+
+case seekfn-cast
+
+query I nosort
+SELECT id FROM p WHERE s = CAST('a' AS TEXT) COLLATE NOCASE ORDER BY id
+
+case seekfn-upper
+
+query I nosort
+SELECT id FROM p WHERE s = upper('a') COLLATE NOCASE ORDER BY id
+
+case seekfn-indexed-by
+
+query I nosort
+SELECT id FROM p INDEXED BY p_n WHERE s = CAST('a' AS TEXT) COLLATE NOCASE ORDER BY id
+
+case seekfn-nested
+
+query I nosort
+SELECT id FROM p WHERE s = (lower(substr('xBx', 2, 1)) || '') COLLATE NOCASE ORDER BY id
+
+case seekfn-subquery
+
+query I nosort
+SELECT id FROM p WHERE s = (SELECT upper('c')) COLLATE NOCASE ORDER BY id
+
+case seekfn-range
+
+query I nosort
+SELECT id FROM p WHERE s > lower('A') COLLATE NOCASE ORDER BY id
+
+case seekfn-range-both
+
+query I nosort
+SELECT id FROM p WHERE s >= upper('b') COLLATE NOCASE AND s < CAST('D' AS TEXT) COLLATE NOCASE ORDER BY id
+
+case seekfn-null
+
+query T nosort
+SELECT id FROM p WHERE s = CAST(NULL AS TEXT) COLLATE NOCASE ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT)
+
+statement ok
+CREATE INDEX p_n ON p (s COLLATE NOCASE)
+
+statement ok
+INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A')
+
+statement ok
+INSERT INTO p VALUES (11, CAST(x'0061' AS TEXT)), (12, CAST(x'0062' AS TEXT))
+
+case seekfn-nul
+
+query I nosort
+SELECT id FROM p WHERE s = CAST(x'0042' AS TEXT) COLLATE NOCASE ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT)
+
+statement ok
+CREATE INDEX p_n ON p (s COLLATE NOCASE)
+
+statement ok
+INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A')
+
+case seekfn-rowid-cast
+
+query I rowsort
+SELECT id FROM p WHERE id = CAST('8' AS INTEGER)
+
+case seekfn-rowid-abs
+
+query I rowsort
+SELECT id FROM p WHERE id = abs(-9)
+
+setup
+
+statement ok
+CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT)
+
+statement ok
+CREATE INDEX p_n ON p (s COLLATE NOCASE)
+
+statement ok
+INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A')
+
+statement ok
+CREATE TABLE r (id INTEGER PRIMARY KEY, k INTEGER)
+
+statement ok
+CREATE INDEX r_k ON r (k)
+
+statement ok
+INSERT INTO r VALUES (1, 3), (2, 4), (3, 3)
+
+case seekfn-plain-cast
+
+query I nosort
+SELECT id FROM r WHERE k = CAST('3' AS INTEGER) ORDER BY id
+
+case seekfn-plain-abs
+
+query I nosort
+SELECT id FROM r WHERE k = abs(-4) ORDER BY id
+
+setup
+
+statement ok
+CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT)
+
+statement ok
+CREATE INDEX p_n ON p (s COLLATE NOCASE)
+
+statement ok
+INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A')
+
+statement ok
+CREATE TABLE q (k INTEGER PRIMARY KEY, t TEXT)
+
+statement ok
+INSERT INTO q VALUES (1, 'b'), (2, 'C'), (3, 'z')
+
+case seekfn-join
+
+query II nosort
+SELECT q.k, p.id FROM q, p WHERE p.s = upper(q.t) COLLATE NOCASE ORDER BY q.k, p.id
+
+case seekfn-correlated
+
+query II rowsort
+SELECT q.k, (SELECT max(id) FROM p WHERE s = CAST(q.t AS TEXT) COLLATE NOCASE) FROM q ORDER BY q.k
+
