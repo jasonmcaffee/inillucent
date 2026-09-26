@@ -266,6 +266,19 @@ pub fn fire(
             match run_body(statement, trigger, target, &deeper) {
                 Ok(()) => {}
                 Err(error) if is_ignore(&error) => return Ok(Fired::SkipRow),
+                // **An immediate foreign key is checked when the statement
+                // ends**, as SQLite checks it; see
+                // `WriteTarget::defer_key_check`. Only a foreign key trigger's
+                // own abort reports code 787: a deferred key has no trigger
+                // during a statement, and `RESTRICT` reports 1811 and still
+                // refuses at the row, which is SQLite's rule for it too.
+                Err(error)
+                    if trigger.foreign_key
+                        && error.extended().0 == inillucent_sql::dml::codes::FOREIGN_KEY
+                        && target.defer_key_check(&trigger.name, depth.0 == 0) =>
+                {
+                    break;
+                }
                 Err(error) => return Err(named(error, trigger)),
             }
         }

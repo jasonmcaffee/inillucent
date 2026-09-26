@@ -656,10 +656,12 @@ fn cancel(path: &Path) -> Result<Option<String>, String> {
     let _ = canceller.join();
     match outcome {
         Err(error) if error.status == inillucent_driver::Status::Interrupted => {}
-        Err(error) => return Ok(Some(format!(
+        Err(error) => {
+            return Ok(Some(format!(
             "a cancel from another thread failed the statement with {} rather than interrupting it",
             error.status.name()
-        ))),
+        )))
+        }
         Ok(_) => {
             return Ok(Some(
                 "a cancel from another thread did not stop the running statement".to_string(),

@@ -23,7 +23,6 @@ constraint-f18eefd57be9	1	COMMIT or ROLLBACK with no transaction fails with resu
 schema-013cdbdd2c4d	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 schema-4bac1079f631	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
 constraint-f09d1380625f	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-f31ab9469767	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
 constraint-34e06397277a	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
 constraint-91a394494308	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
 constraint-ec8dae14560d	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
@@ -112,21 +111,13 @@ cte-9e28de2e7b3c	20	CREATE INDEX on a TEMP table named without its schema is "no
 expression-8ff8d52dc3ef	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 expression-35d44f51981c	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 join-3b4ab1c7eccb	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-insert-8fbb225210a1	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-insert-358834f8b772	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-insert-3ffcef69e796	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 insert-97ac15350ad2	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 insert-ecf33772d940	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-insert-f6985da4080b	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 join-d61f7819b021	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 insert-5e68c1f5ef0c	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-insert-0f4f7c4351a7	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-insert-3bdf62f1d1d0	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 function-28e21fa8fb02	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 function-46495f17cbe5	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 function-2c26c5b0e1a2	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-insert-89c873e7ab21	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-insert-2cd506aed201	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 join-724e05edc915	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 function-40a304199e60	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 function-8df226644d04	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
@@ -146,18 +137,7 @@ subquery-c476f0966a91	20	CREATE INDEX on a TEMP table named without its schema i
 subquery-1e3673baae01	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 subquery-644ff6c3b93c	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 subquery-51e4fc21961b	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-7744efae16ae	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-edc8d68b1889	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-3578597c2e2c	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-8760fbb9d4d3	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-ecffb8c56aec	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-46815e24ed5a	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-87bda6d8abc2	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 window-4dbbceb52dc9	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-a79d6b3cca2d	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-eabf18dec187	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-eda2faf3f7f0	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-ff1dfc59cd04	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 window-f7e129eb6d0c	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 window-c5bed7780fa4	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 window-6333d834778e	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
@@ -170,14 +150,6 @@ subquery-095f7695927f	22	ANALYZE of an attached schema by name is "no such table
 subquery-ff8f774c9ebd	22	ANALYZE of an attached schema by name is "no such table".
 window-f98f9019a06f	22	ANALYZE of an attached schema by name is "no such table".
 window-7745f2d0f726	22	ANALYZE of an attached schema by name is "no such table".
-constraint-7533798e55f8	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-a945195bb2f9	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-4cbfcbde4c8f	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-50273240d975	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-b22bfe570627	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-c747cbe49e52	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-e6cd859670b9	25	changes() or total_changes() after COMMIT differs from SQLite's.
-constraint-6c9770f3f49e	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
 constraint-0f0c44a959dd	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
 join-b1bfc744eaee	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
 join-52426e7e6033	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
@@ -632,16 +604,11 @@ ddl_table-7bc5814eaef4	41	A generated column is computed from the value before i
 ddl_table-406610e7d622	41	A generated column is computed from the value before its source column's type converts it.
 ddl_table-5de249523cc3	41	A generated column is computed from the value before its source column's type converts it.
 ddl_table-5e5b653404d9	41	A generated column is computed from the value before its source column's type converts it.
-constraint-774f2f9e32c4	26	A multi-row INSERT breaking an immediate foreign key: SQLite checks at the end of the statement, so last_insert_rowid() is the last row; inillucent stops at the failing row and reports the first.
-constraint-1f91ab9164b2	7	A DELETE refused by ON DELETE RESTRICT reports extended code 787 where SQLite reports 1811.
-constraint-40df2899becb	26	A multi-row INSERT breaking an immediate foreign key: SQLite checks at the end of the statement, so last_insert_rowid() is the last row; inillucent stops at the failing row and reports the first.
-constraint-5f2dadd04614	26	A multi-row INSERT breaking an immediate foreign key: SQLite checks at the end of the statement, so last_insert_rowid() is the last row; inillucent stops at the failing row and reports the first.
 insert-5aebf7432b2e	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
 insert-74feeab48119	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
 insert-4199efb9fa26	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
 insert-70936f4cce9c	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
 insert-c4e7f9f07e60	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-insert-1af23f67ea60	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
 expression-5460f7360163	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 expression-d6ea316dc448	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 expression-37807538acb1	47	The remainder of a real by an integer is an integer where SQLite returns a real.
@@ -698,7 +665,5 @@ expression-e88ac7eb2561	64	A COLLATE comparison on json_each's value column comp
 expression-a23cc4fed6e8	64	A COLLATE comparison on a virtual table's column compares as BINARY.
 expression-4938a1631a2d	64	A COLLATE comparison on a virtual table's column compares as BINARY.
 probe-lim.columns	65@small-pool,sqlite-page	CREATE TABLE with 2,000 columns fails at a 4,096 byte page and with the small buffer pool.
-constraint-bab07571f5db	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
-constraint-05ad544170ba	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 function-1dafb9cd4199	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 retained-bug-67-text-with-nul	67	The smallest case for bug 67.

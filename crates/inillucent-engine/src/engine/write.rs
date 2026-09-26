@@ -105,6 +105,13 @@ pub(crate) struct WriteView<'a> {
     /// the view afterwards on either path. It is a fresh view per statement,
     /// so there is nothing to reset.
     pub(crate) counted: std::cell::Cell<(i64, i64, Option<i64>)>,
+    /// The foreign key triggers whose immediate check failed during the
+    /// statement, each checked again when it ends. See
+    /// `WriteTarget::defer_key_check`.
+    pub(crate) pending_keys: std::cell::RefCell<Vec<Vec<u8>>>,
+    /// Whether the statement is a single row `INSERT ... VALUES` with no
+    /// triggers of its own. See `WriteTarget::defer_key_check`.
+    pub(crate) single_row: std::cell::Cell<bool>,
     /// Which index trees cover which table, so a query a trigger body runs
     /// inside the write reaches the same covering indexes a typed one does.
     pub(crate) covering: &'a HashMap<u32, Vec<u32>>,
@@ -203,6 +210,21 @@ impl WriteTarget for WriteView<'_> {
 
     fn rows_written(&self) -> (i64, i64, Option<i64>) {
         self.counted.get()
+    }
+
+    fn defer_key_check(&self, trigger: &[u8], top_level: bool) -> bool {
+        if top_level && self.single_row.get() {
+            return false;
+        }
+        let mut pending = self.pending_keys.borrow_mut();
+        if !pending.iter().any(|held| held == trigger) {
+            pending.push(trigger.to_vec());
+        }
+        true
+    }
+
+    fn write_is_single_row(&self, single: bool) {
+        self.single_row.set(single);
     }
 
     fn parts_for(

@@ -85,6 +85,15 @@ pub fn insert_at(
     if table.kind == TableKind::View {
         return insert_into_view(statement, target, params, supplied, depth);
     }
+    // See `WriteTarget::defer_key_check`: a single row insert with no trigger
+    // of its own checks an immediate foreign key at the row.
+    if depth.0 == 0 {
+        let one_row =
+            matches!(&statement.source, BoundInsertSource::Values(rows) if rows.len() == 1);
+        target.write_is_single_row(
+            one_row && statement.triggers.iter().all(|trigger| trigger.foreign_key),
+        );
+    }
     let layout = layout_of(target, table)?;
     // `excluded` only exists inside an `ON CONFLICT ... DO UPDATE`, so a plain
     // insert carries one image rather than two.

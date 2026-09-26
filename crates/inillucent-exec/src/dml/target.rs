@@ -230,6 +230,46 @@ pub trait WriteTarget {
         (0, 0, None)
     }
 
+    /// Records that an immediate foreign key's check failed part way through
+    /// the statement, so the key is checked again when the statement ends.
+    ///
+    /// **SQLite checks an immediate key when the statement ends, not at the
+    /// row.** It counts the rows that break a key as they are written and
+    /// fails the statement only if the count is still above zero at the end,
+    /// so a statement that inserts a child before the parent it references
+    /// succeeds, and one that fails does so with every row written first -
+    /// which is where `last_insert_rowid()` and `total_changes()` are read
+    /// from. Answering `true` tells the trigger to carry on; `false`, the
+    /// default for a target that cannot check at the end, raises at the row
+    /// as before.
+    ///
+    /// **Except for a statement that can write only one row.** SQLite checks
+    /// at the row, before writing it, when the statement is a single row
+    /// `INSERT ... VALUES` with no trigger of its own and the check is its
+    /// own rather than a trigger body's - its `isMultiWrite` is clear - so
+    /// such an `INSERT` that fails leaves `last_insert_rowid()` where it was.
+    /// `top_level` says the check is the statement's own, and
+    /// [`WriteTarget::write_is_single_row`] says what the statement is.
+    ///
+    /// @param trigger - the foreign key trigger whose check failed, whose name
+    ///   says which key it is
+    /// @param top_level - whether the row being checked is the statement's own
+    fn defer_key_check(&self, trigger: &[u8], top_level: bool) -> bool {
+        let _ = (trigger, top_level);
+        false
+    }
+
+    /// Records that the statement is one that can write only one row.
+    ///
+    /// See [`WriteTarget::defer_key_check`]. Called by an `INSERT` at the top
+    /// level, before its first row.
+    ///
+    /// @param single - whether it is a single row `VALUES` with no triggers of
+    ///   its own
+    fn write_is_single_row(&self, single: bool) {
+        let _ = single;
+    }
+
     /// Returns this target as the catalog a planned query reads.
     ///
     /// **A write can have to run a query, and a trigger is why.** The body of

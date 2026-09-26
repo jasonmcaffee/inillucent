@@ -1012,7 +1012,7 @@ impl crate::ImportedDatabase {
             Logs::Many(held)
         };
         let session = self.session_state.session.get();
-        let (applied, wrote, counted, deferred) = {
+        let (applied, wrote, counted, deferred, pending_keys) = {
             let mut view = WriteView {
                 database: &mut self.storage.database,
                 attached: &mut self.session_state.attached,
@@ -1030,6 +1030,8 @@ impl crate::ImportedDatabase {
                 pragmas: &self.pragmas,
                 schema_catalog: &self.schema.catalog,
                 deferred: Vec::new(),
+                pending_keys: std::cell::RefCell::new(Vec::new()),
+                single_row: std::cell::Cell::new(false),
             };
             // **Not `?`.** A failed statement has writes of its own to put
             // back, and the borrow of the trees has to end before anything can.
@@ -1046,7 +1048,8 @@ impl crate::ImportedDatabase {
             // it - so the counters have to see it.
             let counted = view.rows_written();
             let deferred = std::mem::take(&mut view.deferred);
-            (applied, wrote, counted, deferred)
+            let pending_keys = view.pending_keys.take();
+            (applied, wrote, counted, deferred, pending_keys)
         };
         let changes = match applied {
             Ok(changes) => changes,
@@ -1080,6 +1083,18 @@ impl crate::ImportedDatabase {
             }
         };
         self.writing.set_touched(self.writing.touched() | wrote);
+        // **The immediate keys a row broke on the way, checked now that every
+        // row is written.** See `WriteTarget::defer_key_check`: SQLite fails
+        // the statement only if a key is still broken at its end, and fails it
+        // after writing every row, which is where `last_insert_rowid()` and
+        // the trigger rows in `total_changes()` come from.
+        if !pending_keys.is_empty() {
+            if let Err(error) = self.check_pending_keys(&pending_keys) {
+                self.remember_rowid(changes.last_rowid);
+                self.record_changes(0, counted.1.saturating_sub(counted.0));
+                return Err(self.abandon(error, mark, autocommit, wrote, txn));
+            }
+        }
         // **A deferred key is checked at the commit, and in autocommit the
         // commit is this statement's.** The statement is its own transaction,
         // so a `DEFERRABLE INITIALLY DEFERRED` key has no later point to wait
@@ -1093,7 +1108,7 @@ impl crate::ImportedDatabase {
                 // The rows were written before the commit failed, and SQLite
                 // leaves `last_insert_rowid()` on the last of them.
                 self.remember_rowid(changes.last_rowid);
-                self.counters.last_changes.set(0);
+                self.record_changes(0, counted.1.saturating_sub(counted.0));
                 return Err(self.abandon(error, mark, autocommit, wrote, txn));
             }
         }
