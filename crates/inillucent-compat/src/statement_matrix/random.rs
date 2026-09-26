@@ -683,7 +683,12 @@ pub fn run_group(
         .into_iter()
         .find(|arm| arm.name == "default")
         .ok_or("no default arm")?;
-    let directory = scratch.join(format!("random-{group}"));
+    // The shard is in the path: every shard process runs every group number,
+    // and two processes writing one directory corrupt each other's databases,
+    // which the first nightly run showed as a disk I/O error and a missing table.
+    let directory = scratch
+        .join(format!("s{}", grouping::shard().0))
+        .join(format!("random-{group}"));
     let mut runner = Runner::new(arm.clone(), &directory);
     let oracle_missing = !runner.has_oracle();
     let borrowed: Vec<&Case> = cases.iter().collect();

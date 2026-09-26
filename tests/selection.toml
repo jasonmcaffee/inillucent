@@ -1702,9 +1702,10 @@ kind = "test"
 name = "nightly"
 module = "matrix"
 tier = "nightly"
-# Every triple of axis values at all six arms. Eight shards, because one
-# process runs its groups one after another.
-shards = 8
+# Every triple of axis values at all six arms: 29,968 s of processor time on
+# the first run. At eight shards it took 62 minutes, using 16 of 24 cores;
+# twenty shards fit the hour.
+shards = 20
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 

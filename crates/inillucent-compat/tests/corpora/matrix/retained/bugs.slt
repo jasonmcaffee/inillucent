@@ -525,3 +525,7 @@ UPDATE u SET v = p.c1 FROM (SELECT json_object('v', json_group_object(s.b, s.a))
 
 query I rowsort
 SELECT changes()
+
+case retained-bug-67-text-with-nul
+query T rowsort
+SELECT quote(('-1.75' || x'00ff') - 0)

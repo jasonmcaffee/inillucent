@@ -34,3 +34,5 @@ stamp	commit	machine	target	verdict	seconds	note
 2026-09-25T18:13:43Z	ec3af66	machine-c9df3d5a	inillucent-compat::nightly::release_format_history	pass	374.5
 2026-09-25T18:13:43Z	ec3af66	machine-c9df3d5a	inillucent-compat::nightly::story_large_table_nightly	pass	1037.8
 2026-09-25T18:13:43Z	ec3af66	machine-c9df3d5a	inillucent::story_ledger_day_nightly	pass	1062.4
+2026-09-26T09:07:09Z	5ce1ef2-dirty	machine-c9df3d5a	inillucent-compat::nightly::matrix	pass	3000.4	-
+2026-09-26T09:07:09Z	5ce1ef2-dirty	machine-c9df3d5a	inillucent-compat::nightly::matrix_random	pass	432.9	seed=20260926 cases=4000

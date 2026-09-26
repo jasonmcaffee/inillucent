@@ -838,3 +838,17 @@ they are touching do not collide; two that have not, do.
   Cargo takes the patch and the other internal crates follow by path. Build with the MSVC environment
   imported. A first `sync` of the corpus embeds 3,696 chunks and took 11 minutes on the processor;
   keep the synced database and copy it for each variant rather than syncing again. (task-2130)
+
+## The SQL statement matrix (tiers `matrix` and `matrix_deep`)
+
+- A fix to the engine can make a `matrix` case start agreeing with SQLite. The group then fails
+  and names the `known.list` line to take off (`crates/inillucent-compat/tests/corpora/matrix/`).
+  Taking the line off is part of the fix, not somebody else's cleanup.
+- A change to a template in `statement_matrix/templates/` renames the generated cases it touches, and
+  `matrix::lists` then names the orphaned `known.list` lines. Rewrite them in the same change.
+  `inillucent-matrix origins <file of ids>` prints each id's axis values for triage.
+- `inillucent-testrun` caps each test process at 8 GiB and everything it starts at a quarter of the
+  machine's memory. `inillucent-matrix` caps itself at 8 GiB. A matrix run against an old engine
+  once reached 66 GB with the machine nearly out of memory, so do not run matrix code outside these.
+- The change tier takes about 57 s and the merge tier about 15 minutes on this machine, measured with
+  their times recorded in `tests/timings.toml`. A merge run holds most of the machine for that long.

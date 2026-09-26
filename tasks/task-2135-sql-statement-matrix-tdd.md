@@ -492,11 +492,11 @@ recorded in `tests/timings.toml` so the runner starts the longest first.
 |---|---|---|---|
 | change, tier `matrix` | Layer 1 (1,707 hand written cases, the retained corpus at every arm) and 2,522 generated at strength two | 56.9 s, 34 targets | 1,082 s |
 | merge, tier `matrix_deep` | Layer 1 and 2,784 generated at strength two at all six arms, 21,189 more at strength three at `default`, the surfaces | 881.9 s, 78 targets | 18,700 s |
-| nightly, `matrix` and `matrix_random` | 23,973 generated at strength three at all six arms, 4,000 random | see section 11.3 | |
+| nightly, `matrix` and `matrix_random` | 23,973 generated at strength three at all six arms, 4,000 random | 3,000.4 s, 24 targets | 58,278 s |
 
 `counts.toml` holds the generated counts per family, strength and cadence.
 
-Four measurements changed the implementation after phase 0:
+Five measurements changed the implementation after phase 0:
 
 1. **The merge tier's first full run took 29.6 minutes** and 16,613 s of processor time, with one
    process per family; `expression` alone took 1,775 s. The strength three triples at two arms were
@@ -508,7 +508,12 @@ Four measurements changed the implementation after phase 0:
 3. **The change tier took 66.7 s** while its targets had no recorded times, because the runner then
    started its slowest targets last. With their times recorded it takes 56.9 s. `insert`,
    `function`, `select`, `delete` and `update` run as two shards and the retained corpus as three.
-4. **A matrix run against an older engine grew to 66 GB in one process.** `inillucent-testrun` now
+4. **The nightly triples took 62 minutes at eight shards**, which used 16 of the machine's 24 cores,
+   and 29,968 s of processor time. At twenty shards they take 50 minutes; the processor time rises
+   to 58,278 s because 40 test threads share 24 cores, and the wall clock is what the budget is.
+   The first nightly also showed the random layer's four shards writing one directory each, which
+   corrupted each other's databases; the directory now names the shard.
+5. **A matrix run against an older engine grew to 66 GB in one process.** `inillucent-testrun` now
    caps each test process at 8 GiB and every process it starts at a quarter of physical memory, and
    the runner arms the engine's statement budget around every case.
 
@@ -657,6 +662,36 @@ of these fix commits into a scratch worktree, runs the matrix there, and records
 
 A fix commit that no matrix case catches means an axis is missing; add the axis value, not a single
 case for that defect. The table of commit, failing case id and axis goes into this document.
+
+#### What each fix's absence fails
+
+Measured on 2026-09-26 against commit 5ce1ef2e's matrix, with `inillucent-testrun --tier matrix`
+(the change cadence) in a scratch worktree. For five commits the build is today's engine with the
+fix's own source changes reversed; where a later commit had changed a file again, that file was
+taken whole from the fix's parent. `ec3af662` could not be reversed that way and still compile, so
+its build is the parent commit itself with today's matrix harness laid over it; that build also
+lacks the 26 commits on the main branch after it, so its failures are not all this fix's, and the row names the
+ones that are.
+
+| Fix | Build | Generated cases that fail | Example case and its axis values |
+|---|---|---|---|
+| `7a01303c` (todo service fixes) | reversed | 495 `window`, 15 `update`, 21 `trigger`, 16 `ddl_view`, 10 `join`; the `vtab` target stops making progress and is killed at the 900 s budget | `window-09fc458677fe` (function=lead, placement=view, source=rowid): "a window function reaching the pipeline builder" is not built. `update-9ad01f041420` (form=from_tvf, target=without_rowid): `UPDATE ... FROM json_each(...)` changes 0 rows where SQLite changes 1 |
+| `f593b836` (`WHERE` on a view's columns) | reversed | 43 guarded filter wrappings across `function` and `join` | `function-007a53e613d8` (function=min, source=fts5, placement=top): the guarded filter fails with "integer overflow" where SQLite never computes the guard for the rows the filter removes |
+| `106b304f` (`UPDATE ... FROM` changes a row once) | reversed | 25 `update` | `update-0b63780119d7` (form=from_table, target=without_rowid): `changes()` is 3 where SQLite says 2 |
+| `bfb53c82` (a correlated subquery beside a window function) | reversed | 36 `window` | `window-5e391031f1a5` (function=row_number, beside=correlated, placement=derived): refused as not built |
+| `ec3af662` (`INSERT ... SELECT` into a virtual table) | parent | 4 `vector`, and the `vtab` process grows until its 8 GiB cap stops it | `vector-6f82351251c5` (operation=search_table, placement=derived): the fixture's `INSERT INTO docs(rowid, body, vector) SELECT ...` into an `inillucent_search` table is refused |
+| `8b9725ac` (bare `REINDEX` with a `WITHOUT ROWID` table) | reversed, `reindex.rs` only | 13 `maintenance` | `maintenance-b9be3f42a138` (operation=reindex, index=partial): `REINDEX` fails with "the index has no catalog row" |
+
+**`f593b836` was the one fix no generated case caught** when this was first run: only
+`t2134-pd-001`, the Layer 1 case written with the fix, failed. The axis value that was missing is a
+column that fails for exactly the rows an outer `WHERE` removes. The Layer 3 wrapping
+`guarded_filter` in `statement_matrix/templates/frame.rs` adds it to every generated read, and the
+table above is with it.
+
+The `vtab` target's stall on the `7a01303c` build was traced, with `INILLUCENT_MATRIX_TRACE`, to `update-from-series`, a Layer 1 case from the
+todo service corpus: `UPDATE ... FROM generate_series(...)` runs without end there. The statement
+budget the runner arms does not stop it, because the loop does not pass through a budget check; the
+runner's own 900 s budget does.
 
 ### 11.2 Bugs found
 

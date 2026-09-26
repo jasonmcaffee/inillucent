@@ -6420,3 +6420,4 @@ constraint-bab07571f5db	66	changes() after an UPDATE ... FROM or INSERT ... SELE
 constraint-05ad544170ba	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 function-ddb471ea2153	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 function-1dafb9cd4199	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
+retained-bug-67-text-with-nul	67	The smallest case for bug 67.

@@ -1029,6 +1029,134 @@ target = "inillucent-compat::matrix_deep::window#5/6"
 milliseconds = 197417
 
 [[timing]]
+target = "inillucent-compat::nightly::matrix#0/20"
+milliseconds = 2877245
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#0/8"
+milliseconds = 3637612
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#1/20"
+milliseconds = 2976458
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#1/8"
+milliseconds = 3596070
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#10/20"
+milliseconds = 2885404
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#11/20"
+milliseconds = 2830875
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#12/20"
+milliseconds = 3000352
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#13/20"
+milliseconds = 2668854
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#14/20"
+milliseconds = 2830521
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#15/20"
+milliseconds = 2832547
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#16/20"
+milliseconds = 2877546
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#17/20"
+milliseconds = 2732622
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#18/20"
+milliseconds = 2895708
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#19/20"
+milliseconds = 2952289
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#2/20"
+milliseconds = 2784753
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#2/8"
+milliseconds = 3688136
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#3/20"
+milliseconds = 2784709
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#3/8"
+milliseconds = 3596579
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#4/20"
+milliseconds = 2919737
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#4/8"
+milliseconds = 3727162
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#5/20"
+milliseconds = 2761195
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#5/8"
+milliseconds = 3460486
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#6/20"
+milliseconds = 2858272
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#6/8"
+milliseconds = 3678628
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#7/20"
+milliseconds = 2661401
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#7/8"
+milliseconds = 3553540
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#8/20"
+milliseconds = 2788496
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix#9/20"
+milliseconds = 2649406
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix_random#0/4"
+milliseconds = 432927
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix_random#1/4"
+milliseconds = 430097
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix_random#2/4"
+milliseconds = 432096
+
+[[timing]]
+target = "inillucent-compat::nightly::matrix_random#3/4"
+milliseconds = 414457
+
+[[timing]]
 target = "inillucent-compat::nightly::release_format_history"
 milliseconds = 374546
 

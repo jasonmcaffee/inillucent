@@ -70,3 +70,9 @@ name = "bug-61-replace-empty-pattern"
 contains = ["replace("]
 kinds = ["rows", "reopen"]
 reason = "Bug 61: replace(x, '', NULL) returns NULL where SQLite returns x: SQLite returns the string for an empty pattern before it looks at the replacement."
+
+[[rule]]
+name = "bug-67-text-with-nul-in-arithmetic"
+contains = ["||", ") - "]
+kinds = ["rows", "reopen"]
+reason = "Bug 67: text that holds a NUL byte reads as 0 in arithmetic where SQLite reads the number before the NUL. A concatenation with a blob makes such text."
