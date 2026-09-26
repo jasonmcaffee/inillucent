@@ -341,7 +341,7 @@ impl Pool {
     /// a buffer one page long allocated and zeroed for each slot, a whole page
     /// read into each and, through
     /// `Meta::choose`, two crc32 passes over a whole page; this costs two
-    /// reads of 116 bytes into the stack.
+    /// reads of 120 bytes into the stack.
     ///
     /// It decides nothing on its own. A caller that finds the bytes changed
     /// reads the slots in full and checksums them, which is the only path that

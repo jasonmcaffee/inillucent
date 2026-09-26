@@ -36,8 +36,13 @@ impl Parser<'_> {
 
     /// The body of [`Parser::parse_select`], with the depth charge applied.
     fn parse_select_inner(&mut self) -> Result<SelectId, ParseError> {
-        let with = self.parse_with_prefix()?;
+        // The span starts before the `WITH`, because it is the whole query:
+        // `CREATE TABLE ... AS` fills the table by running the text this span
+        // covers, and a span that began after the prefix ran the query without
+        // its CTEs, so `CREATE TABLE x AS WITH c AS (...) SELECT a FROM c` was
+        // "no such table: c".
         let start = self.cursor();
+        let with = self.parse_with_prefix()?;
         let first = self.parse_select_core()?;
         let mut compounds = Vec::new();
         while let Some(op) = self.parse_compound_operator()? {

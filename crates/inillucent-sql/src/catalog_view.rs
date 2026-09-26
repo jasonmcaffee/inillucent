@@ -259,6 +259,9 @@ pub struct TriggerInfo {
     pub when: Option<crate::ast::ExprId>,
     /// The body statements, in written order.
     pub body: Vec<crate::ast::Statement>,
+    /// The folded database the `ON` clause named, as in `ON main.t`, when it
+    /// named one.
+    pub table_database: Option<Vec<u8>>,
 }
 
 impl ColumnInfo {

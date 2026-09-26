@@ -371,8 +371,11 @@ pub enum Directive {
     Analyze {
         /// Which attached database.
         database: usize,
-        /// The one table to measure, or nothing for all of them.
+        /// The one table or index to measure, or nothing for all of them.
         table: Option<Vec<u8>>,
+        /// Whether the statement was a bare `ANALYZE`, which measures every
+        /// database but `temp` rather than `database` alone.
+        every_schema: bool,
     },
     /// `CREATE VIEW`.
     CreateView {
@@ -533,6 +536,8 @@ pub(crate) struct CreateTriggerParts<'p> {
     pub time: Option<ast::TriggerTime>,
     /// The table it is attached to.
     pub table: ast::NameId,
+    /// The schema qualifier on the table.
+    pub table_database: Option<ast::NameId>,
     /// Whether `FOR EACH ROW` was written.
     pub for_each_row: bool,
     /// The `WHEN` guard.
@@ -632,6 +637,7 @@ impl<'a> Binder<'a> {
                 time,
                 event: _,
                 table,
+                table_database,
                 for_each_row,
                 when,
                 body,
@@ -642,6 +648,7 @@ impl<'a> Binder<'a> {
                 name: *name,
                 time: *time,
                 table: *table,
+                table_database: *table_database,
                 for_each_row: *for_each_row,
                 when: *when,
                 body,
@@ -720,7 +727,7 @@ impl<'a> Binder<'a> {
         name: ast::NameId,
         body: &ast::CreateTableBody,
     ) -> Result<Directive, ParseError> {
-        let temp = self.temporary_database(temporary, database)?;
+        let temp = self.temporary_database(temporary, database, false)?;
         // **Two bodies, and the second one is built.** This used to be written
         // as two `let ... else` bindings, the inner one answering
         // `unsupported("CREATE TABLE ... AS SELECT")` - an arm no statement
@@ -1099,46 +1106,64 @@ impl<'a> Binder<'a> {
         database: Option<ast::NameId>,
         name: Option<ast::NameId>,
     ) -> Result<Directive, ParseError> {
-        let index = self.resolve_database(database)?;
-        self.record_write_dependency(index);
         let Some(name) = name else {
+            // A bare `ANALYZE` is every database but `temp`, which is SQLite's
+            // `sqlite3Analyze`.
+            let temp = self.catalog.database_index(b"temp");
+            for index in 0..self.catalog.database_count() {
+                if Some(index) != temp {
+                    self.record_write_dependency(index);
+                }
+            }
             return Ok(Directive::Analyze {
-                database: index,
+                database: 0,
                 table: None,
+                every_schema: true,
             });
         };
         let folded = self.ast.folded(name).to_vec();
-        let database_name = self.catalog.database_name(index).to_vec();
-        if self
-            .catalog
-            .database_index(&folded)
-            .is_some_and(|found| found == index)
-        {
-            // The name was the database's, which means everything in it.
-            return Ok(Directive::Analyze {
-                database: index,
-                table: None,
-            });
+        // **An unqualified name may be a database's.** `ANALYZE aux` measures
+        // every table in `aux`; resolving the name as a table in `main` first
+        // made it "no such table: aux".
+        if database.is_none() {
+            if let Some(index) = self.catalog.database_index(&folded) {
+                self.record_write_dependency(index);
+                return Ok(Directive::Analyze {
+                    database: index,
+                    table: None,
+                    every_schema: false,
+                });
+            }
         }
-        if let Some(table) = self
+        // An unqualified table or index is searched for in every database, in
+        // the usual order; a qualified one only in its own. An index is looked
+        // for first, as SQLite does, and is passed on by its own name, because
+        // `ANALYZE ix` measures that index alone.
+        let schema_name = match database {
+            Some(_) => {
+                let index = self.resolve_database(database)?;
+                Some(self.catalog.database_name(index).to_vec())
+            }
+            None => None,
+        };
+        let found = self
             .catalog
-            .find_table(Some(database_name.as_slice()), &folded)
-        {
-            return Ok(Directive::Analyze {
-                database: index,
-                table: Some(table.name.clone()),
+            .find_index(schema_name.as_deref(), &folded)
+            .map(|(table, index)| (table.database, index.name.clone()))
+            .or_else(|| {
+                self.catalog
+                    .find_table(schema_name.as_deref(), &folded)
+                    .map(|table| (table.database, table.name.clone()))
             });
-        }
-        if let Some((table, _)) = self
-            .catalog
-            .find_index(Some(database_name.as_slice()), &folded)
-        {
-            return Ok(Directive::Analyze {
-                database: index,
-                table: Some(table.name.clone()),
-            });
-        }
-        Err(no_such_table(self.ast.text(name), Span::default()))
+        let Some((index, table)) = found else {
+            return Err(no_such_table(self.ast.text(name), Span::default()));
+        };
+        self.record_write_dependency(index);
+        Ok(Directive::Analyze {
+            database: index,
+            table: Some(table),
+            every_schema: false,
+        })
     }
 
     /// Binds an `ALTER TABLE`.
@@ -1430,26 +1455,34 @@ impl<'a> Binder<'a> {
     ) -> Result<Directive, ParseError> {
         let index = self.resolve_database(database)?;
         self.record_write_dependency(index);
-        let database_name = self.catalog.database_name(index).to_vec();
-        let everything = |catalog: &dyn CatalogView| -> Vec<Vec<u8>> {
-            catalog
-                .tables_of(index)
+        // **An unqualified name means every database**, which is SQLite's
+        // `sqlite3Reindex`: a bare `REINDEX` and a collation rebuild the
+        // indexes of every database, and a table or index name is looked for
+        // in all of them. Reading only `main` made `REINDEX ix` on a temporary
+        // table's index "unable to identify the object to be reindexed".
+        let schema_name = database.map(|_| self.catalog.database_name(index).to_vec());
+        let qualified = database.is_some();
+        let every_index = |catalog: &dyn CatalogView| -> Vec<Vec<u8>> {
+            let tables = if qualified {
+                catalog.tables_of(index)
+            } else {
+                catalog.every_table()
+            };
+            tables
                 .into_iter()
-                .flat_map(|table| table.indexes.iter().map(|entry| entry.name.clone()))
+                .flat_map(|table| table.indexes.iter())
+                .map(|entry| entry.name.clone())
                 .filter(|name| !name.is_empty())
                 .collect()
         };
         let Some(name) = name else {
             return Ok(Directive::Reindex {
                 database: index,
-                indexes: everything(self.catalog),
+                indexes: every_index(self.catalog),
             });
         };
         let folded = self.ast.folded(name).to_vec();
-        if let Some(table) = self
-            .catalog
-            .find_table(Some(database_name.as_slice()), &folded)
-        {
+        if let Some(table) = self.catalog.find_table(schema_name.as_deref(), &folded) {
             return Ok(Directive::Reindex {
                 database: index,
                 indexes: table
@@ -1459,10 +1492,7 @@ impl<'a> Binder<'a> {
                     .collect(),
             });
         }
-        if let Some((_, entry)) = self
-            .catalog
-            .find_index(Some(database_name.as_slice()), &folded)
-        {
+        if let Some((_, entry)) = self.catalog.find_index(schema_name.as_deref(), &folded) {
             return Ok(Directive::Reindex {
                 database: index,
                 indexes: vec![entry.name.clone()],
@@ -1473,9 +1503,12 @@ impl<'a> Binder<'a> {
         // is the last thing it tried.
         if Collation::from_name(core::str::from_utf8(&folded).unwrap_or("")).is_some() {
             let wanted = folded.clone();
-            let indexes = self
-                .catalog
-                .tables_of(index)
+            let tables = if qualified {
+                self.catalog.tables_of(index)
+            } else {
+                self.catalog.every_table()
+            };
+            let indexes = tables
                 .into_iter()
                 .flat_map(|table| table.indexes.iter())
                 .filter(|entry| {
@@ -1597,7 +1630,7 @@ impl<'a> Binder<'a> {
         columns: &[ast::NameId],
         select: ast::SelectId,
     ) -> Result<Directive, ParseError> {
-        let temp = self.temporary_database(temporary, database)?;
+        let temp = self.temporary_database(temporary, database, false)?;
         let index = match temp {
             Some(index) => index,
             None => self.resolve_database(database)?,
@@ -1700,7 +1733,7 @@ impl<'a> Binder<'a> {
         &mut self,
         parts: CreateTriggerParts<'_>,
     ) -> Result<Directive, ParseError> {
-        let temp = self.temporary_database(parts.temporary, parts.database)?;
+        let temp = self.temporary_database(parts.temporary, parts.database, true)?;
         // `for_each_row` records whether the words were written, not whether
         // the trigger is one: SQLite has only row triggers, an omitted clause
         // means FOR EACH ROW, and FOR EACH STATEMENT is a syntax error in the
@@ -1726,8 +1759,30 @@ impl<'a> Binder<'a> {
         // A trigger created in a named database fires for a table in that
         // database. A temporary one fires for whatever the name finds, which
         // is the whole point of `CREATE TEMP TRIGGER ... ON t`: the trigger is
-        // the connection's and the table is everybody's.
-        let scope = temp.map_or(Some(database_name.as_slice()), |_| None);
+        // the connection's and the table is everybody's. `ON main.t` names the
+        // database: a temporary trigger may name any, and any other trigger
+        // only its own, which is SQLite's `sqlite3FixSrcList`.
+        let named = match parts.table_database {
+            Some(id) => {
+                let at = self.resolve_database(Some(id))?;
+                if temp.is_none() && at != index {
+                    return Err(refused(
+                        format!(
+                            "trigger {} cannot reference objects in database {}",
+                            String::from_utf8_lossy(&written),
+                            String::from_utf8_lossy(self.ast.text(id))
+                        ),
+                        Span::default(),
+                    ));
+                }
+                Some(self.catalog.database_name(at).to_vec())
+            }
+            None => None,
+        };
+        let scope = match &named {
+            Some(name) => Some(name.as_slice()),
+            None => temp.map_or(Some(database_name.as_slice()), |_| None),
+        };
         let Some(target) = self.catalog.find_table(scope, &table_folded).cloned() else {
             return Err(crate::bind::no_such_table(
                 self.ast.text(parts.table),
@@ -1845,9 +1900,20 @@ impl<'a> Binder<'a> {
             }
         };
         let parsed_settings = index_settings(&using, settings)?;
-        let index = self.resolve_database(database)?;
-        let database_name = self.catalog.database_name(index).to_vec();
         let table_folded = self.ast.folded(table).to_vec();
+        // **An unqualified index goes where its table is.** SQLite looks the
+        // table up in the usual order, `temp` first, and creates the index in
+        // the schema it found the table in. Taking an unqualified index to mean
+        // `main` made `CREATE TEMP TABLE t(a); CREATE INDEX i ON t(a)` report
+        // "no such table: t".
+        let index = match database {
+            Some(_) => self.resolve_database(database)?,
+            None => match self.catalog.find_table(None, &table_folded) {
+                Some(found) => found.database,
+                None => return Err(no_such_table(self.ast.text(table), Span::default())),
+            },
+        };
+        let database_name = self.catalog.database_name(index).to_vec();
         let Some(target) = self
             .catalog
             .find_table(Some(database_name.as_slice()), &table_folded)
@@ -1950,10 +2016,18 @@ impl<'a> Binder<'a> {
         database: Option<ast::NameId>,
         name: ast::NameId,
     ) -> Result<Directive, ParseError> {
-        let index = self.resolve_database(database)?;
-        let database_name = self.catalog.database_name(index).to_vec();
         let written = self.ast.text(name).to_vec();
         let folded = self.ast.folded(name).to_vec();
+        // **An unqualified name is looked for in every database, `temp`
+        // first,** which is SQLite's `sqlite3LocateTable` order. Taking it to
+        // mean `main` made `DROP TABLE s` "no such table" for a temporary `s`,
+        // and dropped `main.s` where SQLite drops the temporary `s` that
+        // shadows it.
+        let index = match database {
+            Some(_) => self.resolve_database(database)?,
+            None => self.unqualified_home(kind, &folded).unwrap_or(0),
+        };
+        let database_name = self.catalog.database_name(index).to_vec();
         self.record_write_dependency(index);
         if kind == ObjectKind::Trigger {
             // A trigger owns no B-tree either, so dropping one is its schema row
@@ -2082,6 +2156,30 @@ impl<'a> Binder<'a> {
         })
     }
 
+    /// Returns the database an unqualified object name resolves to.
+    ///
+    /// `None` when no database holds an object of that kind by that name, so
+    /// the caller reports it against `main` as before.
+    ///
+    /// @param kind - what sort of object the statement names
+    /// @param folded - the object's folded name
+    fn unqualified_home(&self, kind: ObjectKind, folded: &[u8]) -> Option<usize> {
+        match kind {
+            ObjectKind::Trigger => self
+                .catalog
+                .find_trigger(None, folded)
+                .map(|(table, _)| table.database),
+            ObjectKind::Index => self
+                .catalog
+                .find_index(None, folded)
+                .map(|(table, _)| table.database),
+            _ => self
+                .catalog
+                .find_table(None, folded)
+                .map(|table| table.database),
+        }
+    }
+
     /// Binds a `PRAGMA`.
     fn bind_pragma(
         &mut self,
@@ -2109,22 +2207,38 @@ impl<'a> Binder<'a> {
 
     /// Returns the temporary database's number when `TEMP` was written.
     ///
-    /// A temporary object's name may not be qualified: `CREATE TEMP TABLE
-    /// main.t` says two different things about where the table goes, and
-    /// SQLite refuses it rather than picking one.
+    /// A temporary table's or view's name may be qualified only by `temp`:
+    /// `CREATE TEMP TABLE main.t` says two different things about where the
+    /// table goes, and SQLite refuses it rather than picking one, while
+    /// `CREATE TEMP TABLE temp.t` says the same thing twice and SQLite accepts
+    /// it. A temporary trigger takes no qualifier at all, which is SQLite's
+    /// rule in `sqlite3BeginTrigger`.
+    ///
+    /// @param temporary - whether `TEMP` was written
+    /// @param database - the qualifier, when one was written
+    /// @param trigger - whether the object is a trigger
     fn temporary_database(
         &self,
         temporary: bool,
         database: Option<ast::NameId>,
+        trigger: bool,
     ) -> Result<Option<usize>, ParseError> {
         if !temporary {
             return Ok(None);
         }
-        if database.is_some() {
-            return Err(refused(
-                "temporary table name must be unqualified",
-                Span::default(),
-            ));
+        if let Some(id) = database {
+            if trigger {
+                return Err(refused(
+                    "temporary trigger may not have qualified name",
+                    Span::default(),
+                ));
+            }
+            if self.ast.folded(id) != b"temp" {
+                return Err(refused(
+                    "temporary table name must be unqualified",
+                    Span::default(),
+                ));
+            }
         }
         self.catalog
             .database_index(b"temp")

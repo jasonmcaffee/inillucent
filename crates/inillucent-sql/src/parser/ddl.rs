@@ -622,7 +622,10 @@ impl Parser<'_> {
             TriggerEvent::Update(columns)
         };
         self.expect_keyword(Keyword::ON)?;
-        let table = self.parse_name()?;
+        // `ON main.t` is SQLite's grammar too: a temporary trigger may name a
+        // table in any database, and a trigger in a named database may repeat
+        // that database's name.
+        let (table_database, table) = self.parse_qualified_name()?;
         let for_each_row = if self.eat_keyword(Keyword::FOR)? {
             self.expect_keyword(Keyword::EACH)?;
             self.expect_keyword(Keyword::ROW)?;
@@ -660,6 +663,7 @@ impl Parser<'_> {
             time,
             event,
             table,
+            table_database,
             for_each_row,
             when,
             body,

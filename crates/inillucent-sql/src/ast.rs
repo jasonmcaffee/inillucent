@@ -1094,6 +1094,8 @@ pub enum Statement {
         event: TriggerEvent,
         /// The table it is attached to.
         table: NameId,
+        /// The schema qualifier on the table, as in `ON main.t`.
+        table_database: Option<NameId>,
         /// Whether `FOR EACH ROW` was written.
         for_each_row: bool,
         /// The `WHEN` guard.

@@ -343,7 +343,7 @@ impl ImportedDatabase {
                 ..
             } => self.drop_object(kind, &name, exists, if_exists),
             Directive::Alter { table, action, .. } => self.alter_table(source, &table, &action),
-            Directive::Analyze { table, .. } => self.analyze(table.as_deref()),
+            analyze @ Directive::Analyze { .. } => self.run_analyze(analyze),
             Directive::Reindex { indexes, .. } => self.reindex(&indexes),
             // **The three transaction statements refuse what SQLite refuses.**
             // `begin_batch`, `commit_batch` and `rollback` are deliberately

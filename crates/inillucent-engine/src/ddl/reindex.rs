@@ -37,7 +37,7 @@ impl ImportedDatabase {
         // `BINARY` while the tree was ordered by `NOCASE` - so the one
         // statement that could have repaired such an index reported it as
         // corrupt instead.
-        let targets: Vec<(Vec<u8>, Vec<u8>)> = self
+        let targets: Vec<(usize, Vec<u8>, Vec<u8>)> = self
             .schema
             .tables
             .iter()
@@ -46,9 +46,9 @@ impl ImportedDatabase {
                     .indexes
                     .iter()
                     .filter(move |index| has_its_own_tree(table, index))
-                    .map(move |index| (table.name.clone(), index.clone()))
+                    .map(move |index| (table.database, table.name.clone(), index.clone()))
             })
-            .filter(|(_, index)| {
+            .filter(|(_, _, index)| {
                 wanted.is_empty()
                     || wanted.contains(&index.folded)
                     // `REINDEX t` names a table and means every index on it;
@@ -61,14 +61,14 @@ impl ImportedDatabase {
                             .any(|key| key.collation.to_ascii_lowercase() == *name)
                     })
             })
-            .map(|(table, index)| (table, index.name.clone()))
+            .map(|(at, table, index)| (at, table, index.name.clone()))
             .collect();
         let named_table = self.schema.tables.iter().any(|table| {
             wanted
                 .iter()
                 .any(|name| table.folded == *name && !table.indexes.is_empty())
         });
-        let targets: Vec<(Vec<u8>, Vec<u8>)> = if named_table {
+        let targets: Vec<(usize, Vec<u8>, Vec<u8>)> = if named_table {
             self.schema
                 .tables
                 .iter()
@@ -78,20 +78,31 @@ impl ImportedDatabase {
                         .indexes
                         .iter()
                         .filter(move |index| has_its_own_tree(table, index))
-                        .map(move |index| (table.name.clone(), index.name.clone()))
+                        .map(move |index| (table.database, table.name.clone(), index.name.clone()))
                 })
                 .chain(targets)
                 .collect()
         } else {
             targets
         };
-        let mut done: Vec<Vec<u8>> = Vec::new();
-        for (table, index) in targets {
-            if done.contains(&index) {
+        let mut done: Vec<(usize, Vec<u8>)> = Vec::new();
+        for (at, table, index) in targets {
+            if done.contains(&(at, index.clone())) {
                 continue;
             }
-            done.push(index.clone());
-            self.rebuild_index(&table, &index)?;
+            done.push((at, index.clone()));
+            // **Each index is rebuilt in its own database.** The primitives
+            // underneath write into `ddl_schema`, and an index on a `temp` or
+            // attached table has its catalog row there; rebuilding it as if it
+            // were `main`'s failed with "the index has no catalog row", which
+            // `REINDEX NOCASE` over a temporary table's index found.
+            let previous = self.schema.ddl_schema;
+            self.schema.ddl_schema = at;
+            let rebuilt = self.rebuild_index(at, &table, &index);
+            self.schema.ddl_schema = previous;
+            rebuilt?;
+            self.writing
+                .set_touched(self.writing.touched() | crate::schema_bit(at));
         }
         if !done.is_empty() {
             self.rebuild_tables()?;
@@ -109,15 +120,16 @@ impl ImportedDatabase {
     /// the statement. The catalog row keeps its name and its text and takes the
     /// new root.
     ///
+    /// @param at - the database the table is in
     /// @param table - the indexed table's name
     /// @param name - the index's name
-    fn rebuild_index(&mut self, table: &[u8], name: &[u8]) -> DbResult<()> {
+    fn rebuild_index(&mut self, at: usize, table: &[u8], name: &[u8]) -> DbResult<()> {
         let folded = table.to_ascii_lowercase();
         let owner = self
             .schema
             .tables
             .iter()
-            .find(|held| held.folded == folded)
+            .find(|held| held.folded == folded && held.database == at)
             .cloned()
             .ok_or_else(|| refusal(format!("no such table: {}", String::from_utf8_lossy(table))))?;
         let index_folded = name.to_ascii_lowercase();
@@ -128,8 +140,7 @@ impl ImportedDatabase {
             .cloned()
             .ok_or_else(|| refusal(format!("no such index: {}", String::from_utf8_lossy(name))))?;
         let rowid = self
-            .schema
-            .entries
+            .entries_of(at)
             .iter()
             .find(|held| {
                 held.entry.kind == ObjectKind::Index
@@ -138,8 +149,7 @@ impl ImportedDatabase {
             .map(|held| held.rowid)
             .ok_or_else(|| refusal("the index has no catalog row"))?;
         let sql = self
-            .schema
-            .entries
+            .entries_of(at)
             .iter()
             .find(|held| held.rowid == rowid)
             .map(|held| held.entry.sql.clone())
@@ -190,7 +200,6 @@ impl ImportedDatabase {
         } else {
             flat.chunks_exact(key_columns).collect()
         };
-        let at = self.schema.ddl_schema;
         // **The catalog row names the new tree before the tree is filled
         // (task-1932, found by `reindex_crash.rs`).** A recovery derives every
         // tree's shape from the catalog rows it has replayed so far, and
