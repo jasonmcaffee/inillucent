@@ -1,0 +1,72 @@
+# Differences a Layer 4 random case shows that are recorded defects, matched by
+# construct because a random case id changes whenever the generator does.
+# Same format as deliberate.toml; every rule names its bug number on the board
+# in its name, and its reason says which bug. A rule here is a defect, never a
+# deliberate difference: those go in deliberate.toml.
+
+[[rule]]
+name = "bug-28-sum-over-text"
+contains = ["sum("]
+detail = "Real("
+kinds = ["rows", "reopen"]
+reason = "Bug 28: sum() over text values returns a real where SQLite returns an integer."
+
+[[rule]]
+name = "bug-47-real-remainder"
+contains = ["%"]
+kinds = ["rows", "reopen"]
+reason = "Bug 47: a remainder with a real operand returns an integer where SQLite returns a real."
+
+[[rule]]
+name = "bug-55-unicode-of-nul"
+contains = ["unicode("]
+kinds = ["rows", "reopen"]
+reason = "Bug 55: unicode() of a value whose first character is NUL returns 0 where SQLite returns NULL."
+
+[[rule]]
+name = "bug-32-correlated-subquery-value"
+detail = "a correlated subquery used as a value"
+kinds = ["gap", "reopen"]
+reason = "Bug 32: a correlated subquery used as a value is refused as not built, with no capability row that says so."
+
+[[rule]]
+name = "bug-38-negative-zero"
+detail = "Real(-0.0)"
+kinds = ["rows", "reopen"]
+reason = "Bug 38: negating a real zero keeps the sign, so inillucent answers -0.0 where SQLite answers 0.0."
+
+[[rule]]
+name = "bug-56-negating-text-or-blob"
+contains = ["(- "]
+kinds = ["rows", "reopen"]
+reason = "Bug 56: unary minus on text that is only partly numeric, or on a blob, returns 0 where SQLite negates the numeric prefix."
+
+[[rule]]
+name = "bug-57-blob-in-division"
+contains = ["/"]
+kinds = ["rows", "reopen"]
+reason = "Bug 57: a blob operand in a division makes the result a real where SQLite keeps an integer."
+
+[[rule]]
+name = "bug-58-seek-union-join-term"
+detail = "a seek union as an inner join term"
+kinds = ["gap", "reopen"]
+reason = "Bug 58: an IN list on a joined table's column is refused as not built, with no capability row that says so."
+
+[[rule]]
+name = "bug-59-failing-constant-not-evaluated"
+detail = "integer overflow"
+kinds = ["outcome", "reopen"]
+reason = "Bug 59: SQLite evaluates a constant subexpression once before the scan, so one that overflows fails the statement even when no row reaches it; inillucent evaluates it per row and succeeds."
+
+[[rule]]
+name = "bug-60-substr-of-empty-blob"
+contains = ["substr("]
+kinds = ["rows", "reopen", "counters"]
+reason = "Bug 60: substr() of an empty blob returns an empty blob where SQLite returns NULL, so a comparison with it is false where SQLite's is NULL."
+
+[[rule]]
+name = "bug-61-replace-empty-pattern"
+contains = ["replace("]
+kinds = ["rows", "reopen"]
+reason = "Bug 61: replace(x, '', NULL) returns NULL where SQLite returns x: SQLite returns the string for an empty pattern before it looks at the replacement."

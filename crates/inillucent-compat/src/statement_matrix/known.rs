@@ -26,6 +26,9 @@ use crate::statement_matrix::grade::{Failure, KINDS};
 pub struct Known {
     /// The bug's number on task-2136, or the word the old allow list used.
     pub bug: String,
+    /// The arms the defect shows at, from a bug field written `65@small-pool,sqlite-page`;
+    /// empty is every arm. A line is stale only when the case agreed at one of these.
+    pub arms: Vec<String>,
     /// Why the case is listed.
     pub reason: String,
 }
@@ -44,7 +47,14 @@ pub fn read_known(path: &Path) -> Result<BTreeMap<String, Known>, String> {
         }
         let mut fields = line.splitn(3, '\t');
         let id = fields.next().unwrap_or("").trim().to_string();
-        let bug = fields.next().unwrap_or("").trim().to_string();
+        let written = fields.next().unwrap_or("").trim();
+        let (bug, arms) = match written.split_once('@') {
+            Some((number, arms)) => (
+                number.to_string(),
+                arms.split(',').map(|arm| arm.trim().to_string()).collect(),
+            ),
+            None => (written.to_string(), Vec::new()),
+        };
         let reason = fields.next().unwrap_or("").trim().to_string();
         if id.is_empty() || bug.is_empty() || reason.is_empty() {
             return Err(format!(
@@ -53,7 +63,10 @@ pub fn read_known(path: &Path) -> Result<BTreeMap<String, Known>, String> {
                 number.saturating_add(1)
             ));
         }
-        if out.insert(id.clone(), Known { bug, reason }).is_some() {
+        if out
+            .insert(id.clone(), Known { bug, arms, reason })
+            .is_some()
+        {
             return Err(format!("{}: `{id}` is listed twice", path.display()));
         }
     }
@@ -173,13 +186,13 @@ pub enum Judged {
 ///
 /// @param id - the case id
 /// @param failures - every failure, at every arm; empty when it agreed
-/// @param ran - whether it ran at all, rather than being skipped everywhere
+/// @param ran_at - the arms it ran at; empty when it was skipped everywhere
 /// @param known - `known.list`
 /// @param deliberate - `deliberate.toml`
 pub fn judge(
     id: &str,
     failures: Vec<Failure>,
-    ran: bool,
+    ran_at: &[String],
     known: &BTreeMap<String, Known>,
     deliberate: &[Deliberate],
 ) -> Judged {
@@ -188,7 +201,15 @@ pub fn judge(
         .filter(|failure| !deliberate.iter().any(|rule| rule.covers(failure)))
         .collect();
     match (remaining.is_empty(), known.get(id)) {
-        (true, Some(listed)) if ran => Judged::Stale(listed.clone()),
+        // Stale only where the defect was said to show: a line for a failure
+        // at one arm says nothing about a cadence that never ran that arm.
+        (true, Some(listed))
+            if ran_at
+                .iter()
+                .any(|arm| listed.arms.is_empty() || listed.arms.contains(arm)) =>
+        {
+            Judged::Stale(listed.clone())
+        }
         (true, _) => Judged::Pass,
         (false, Some(_)) => Judged::Expected,
         (false, None) => Judged::Fail(remaining),

@@ -581,6 +581,454 @@ target = "inillucent-compat::lib"
 milliseconds = 28999
 
 [[timing]]
+target = "inillucent-compat::matrix::compound"
+milliseconds = 23374
+
+[[timing]]
+target = "inillucent-compat::matrix::constraint"
+milliseconds = 33411
+
+[[timing]]
+target = "inillucent-compat::matrix::cte"
+milliseconds = 27432
+
+[[timing]]
+target = "inillucent-compat::matrix::ddl_index"
+milliseconds = 38436
+
+[[timing]]
+target = "inillucent-compat::matrix::ddl_table#0/2"
+milliseconds = 37971
+
+[[timing]]
+target = "inillucent-compat::matrix::ddl_table#1/2"
+milliseconds = 34366
+
+[[timing]]
+target = "inillucent-compat::matrix::ddl_view"
+milliseconds = 33852
+
+[[timing]]
+target = "inillucent-compat::matrix::delete#0/2"
+milliseconds = 21800
+
+[[timing]]
+target = "inillucent-compat::matrix::delete#1/2"
+milliseconds = 24833
+
+[[timing]]
+target = "inillucent-compat::matrix::expression#0/2"
+milliseconds = 38316
+
+[[timing]]
+target = "inillucent-compat::matrix::expression#1/2"
+milliseconds = 32811
+
+[[timing]]
+target = "inillucent-compat::matrix::function#0/2"
+milliseconds = 27302
+
+[[timing]]
+target = "inillucent-compat::matrix::function#1/2"
+milliseconds = 25800
+
+[[timing]]
+target = "inillucent-compat::matrix::insert#0/2"
+milliseconds = 28800
+
+[[timing]]
+target = "inillucent-compat::matrix::insert#1/2"
+milliseconds = 43310
+
+[[timing]]
+target = "inillucent-compat::matrix::join"
+milliseconds = 25801
+
+[[timing]]
+target = "inillucent-compat::matrix::lists"
+milliseconds = 38808
+
+[[timing]]
+target = "inillucent-compat::matrix::maintenance"
+milliseconds = 37349
+
+[[timing]]
+target = "inillucent-compat::matrix::pragma"
+milliseconds = 22301
+
+[[timing]]
+target = "inillucent-compat::matrix::retained#0/3"
+milliseconds = 27338
+
+[[timing]]
+target = "inillucent-compat::matrix::retained#1/3"
+milliseconds = 34372
+
+[[timing]]
+target = "inillucent-compat::matrix::retained#2/3"
+milliseconds = 25434
+
+[[timing]]
+target = "inillucent-compat::matrix::schema"
+milliseconds = 16907
+
+[[timing]]
+target = "inillucent-compat::matrix::select#0/2"
+milliseconds = 25903
+
+[[timing]]
+target = "inillucent-compat::matrix::select#1/2"
+milliseconds = 22310
+
+[[timing]]
+target = "inillucent-compat::matrix::subquery"
+milliseconds = 21308
+
+[[timing]]
+target = "inillucent-compat::matrix::transaction"
+milliseconds = 21831
+
+[[timing]]
+target = "inillucent-compat::matrix::trigger#0/2"
+milliseconds = 25794
+
+[[timing]]
+target = "inillucent-compat::matrix::trigger#1/2"
+milliseconds = 24294
+
+[[timing]]
+target = "inillucent-compat::matrix::update#0/2"
+milliseconds = 24303
+
+[[timing]]
+target = "inillucent-compat::matrix::update#1/2"
+milliseconds = 22835
+
+[[timing]]
+target = "inillucent-compat::matrix::vector"
+milliseconds = 2809
+
+[[timing]]
+target = "inillucent-compat::matrix::vtab"
+milliseconds = 17843
+
+[[timing]]
+target = "inillucent-compat::matrix::window"
+milliseconds = 30803
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::compound#0/3"
+milliseconds = 254456
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::compound#1/3"
+milliseconds = 247503
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::compound#2/3"
+milliseconds = 244557
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::constraint#0/2"
+milliseconds = 133857
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::constraint#1/2"
+milliseconds = 156365
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::cte#0/4"
+milliseconds = 241571
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::cte#1/4"
+milliseconds = 247087
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::cte#2/4"
+milliseconds = 285625
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::cte#3/4"
+milliseconds = 269635
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::ddl_index#0/2"
+milliseconds = 209512
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::ddl_index#1/2"
+milliseconds = 258553
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::ddl_table#0/3"
+milliseconds = 269563
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::ddl_table#1/3"
+milliseconds = 230565
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::ddl_table#2/3"
+milliseconds = 272594
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::ddl_view#0/2"
+milliseconds = 232536
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::ddl_view#1/2"
+milliseconds = 273079
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::delete#0/3"
+milliseconds = 192986
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::delete#1/3"
+milliseconds = 202536
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::delete#2/3"
+milliseconds = 194517
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::expression#0/8"
+milliseconds = 430789
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::expression#1/8"
+milliseconds = 352230
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::expression#2/8"
+milliseconds = 351336
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::expression#3/8"
+milliseconds = 320726
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::expression#4/8"
+milliseconds = 355793
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::expression#5/8"
+milliseconds = 361969
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::expression#6/8"
+milliseconds = 323936
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::expression#7/8"
+milliseconds = 396169
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::function#0/6"
+milliseconds = 332051
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::function#1/6"
+milliseconds = 351053
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::function#2/6"
+milliseconds = 351552
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::function#3/6"
+milliseconds = 328574
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::function#4/6"
+milliseconds = 328024
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::function#5/6"
+milliseconds = 381595
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::insert#0/4"
+milliseconds = 258876
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::insert#1/4"
+milliseconds = 261520
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::insert#2/4"
+milliseconds = 228462
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::insert#3/4"
+milliseconds = 271993
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::join#0/4"
+milliseconds = 195921
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::join#1/4"
+milliseconds = 226476
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::join#2/4"
+milliseconds = 235158
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::join#3/4"
+milliseconds = 287260
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::maintenance#0/2"
+milliseconds = 223731
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::maintenance#1/2"
+milliseconds = 281040
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::pragma"
+milliseconds = 222434
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::retained"
+milliseconds = 103351
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::schema"
+milliseconds = 172917
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::select#0/4"
+milliseconds = 300029
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::select#1/4"
+milliseconds = 273681
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::select#2/4"
+milliseconds = 285177
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::select#3/4"
+milliseconds = 270012
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::subquery#0/4"
+milliseconds = 235467
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::subquery#1/4"
+milliseconds = 237452
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::subquery#2/4"
+milliseconds = 218454
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::subquery#3/4"
+milliseconds = 228490
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::surfaces#0/8"
+milliseconds = 135906
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::surfaces#1/8"
+milliseconds = 129065
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::surfaces#2/8"
+milliseconds = 162586
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::surfaces#3/8"
+milliseconds = 123911
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::surfaces#4/8"
+milliseconds = 154923
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::surfaces#5/8"
+milliseconds = 135381
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::surfaces#6/8"
+milliseconds = 141384
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::surfaces#7/8"
+milliseconds = 146905
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::transaction#0/2"
+milliseconds = 136411
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::transaction#1/2"
+milliseconds = 153041
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::trigger#0/3"
+milliseconds = 237083
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::trigger#1/3"
+milliseconds = 237489
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::trigger#2/3"
+milliseconds = 247980
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::update#0/3"
+milliseconds = 253959
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::update#1/3"
+milliseconds = 255451
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::update#2/3"
+milliseconds = 208428
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::vector"
+milliseconds = 49833
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::vtab"
+milliseconds = 179922
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::window#0/6"
+milliseconds = 232987
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::window#1/6"
+milliseconds = 190913
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::window#2/6"
+milliseconds = 189901
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::window#3/6"
+milliseconds = 214416
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::window#4/6"
+milliseconds = 184400
+
+[[timing]]
+target = "inillucent-compat::matrix_deep::window#5/6"
+milliseconds = 197417
+
+[[timing]]
 target = "inillucent-compat::nightly::release_format_history"
 milliseconds = 374546
 

@@ -245,7 +245,7 @@ strength three (every triple):         about 15,000 to 25,000 cases
 - **Each template writes a total `ORDER BY`** over every output column unless the case is about
   ordering, in which case the comparison is `rowsort` plus a check that the ordering keys are
   nondecreasing.
-- **A case has a stable id:** `<family>-<first 12 hex digits of SHA-256 of the case's canonical text>`.
+- **A case has a stable id:** `<family>-<first 12 hex digits of SHA3-256 of the case's canonical text>`. SHA3-256 because it is the digest `inillucent-compat` already has; only its stability matters.
   The canonical text is the statements with whitespace normalised, so reordering the generator's code
   does not rename cases and the known difference list (section 6.4) stays valid.
 - **Size:** about 10,000 cases at strength two across all families; about 150,000 at strength three.
@@ -425,7 +425,7 @@ green run.
 | Cadence | Where | What runs | Wall clock budget on 24 cores |
 |---|---|---|---|
 | **change** (`--changed`, every agent ticket) | new tier `matrix`, see 8.2 | Layer 1 at the `default` arm; Layer 2 at strength two at `default`; Layer 3 on those; the retained corpus at every arm | **under 60 s** |
-| **merge** (CI on every push, `--cadence merge`) | new tier `matrix_deep` | Layer 1 and Layer 2 at strength two at every arm; Layer 2 at strength three at `default` and `small_pool`; the surfaces of section 5.5 | under 15 minutes |
+| **merge** (CI on every push, `--cadence merge`) | new tier `matrix_deep` | Layer 1 and Layer 2 at strength two at every arm; Layer 2 at strength three at `default`; the surfaces of section 5.5 | under 15 minutes |
 | **nightly** (`packaging/nightly.ps1`, 02:00) | tier `nightly` | Layer 2 at strength three at every arm; Layer 4 for a fixed number of cases from the date's seed | under 60 minutes |
 
 The change budget is the constraint that shapes the rest. Two numbers set it:
@@ -482,6 +482,35 @@ Three things follow, and each changed the implementation:
 
 After these changes the `matrix` tier, holding only Layer 1, took 21.3 s of wall clock through
 `inillucent-testrun --tier matrix`.
+
+#### Measured at the end of the implementation
+
+Measured on 2026-09-26 with `inillucent-testrun`, on the same machine, with each target's time
+recorded in `tests/timings.toml` so the runner starts the longest first.
+
+| Cadence | Cases | Wall clock | Processor time |
+|---|---|---|---|
+| change, tier `matrix` | Layer 1 (1,707 hand written cases, the retained corpus at every arm) and 2,522 generated at strength two | 56.9 s, 34 targets | 1,082 s |
+| merge, tier `matrix_deep` | Layer 1 and 2,784 generated at strength two at all six arms, 21,189 more at strength three at `default`, the surfaces | 881.9 s, 78 targets | 18,700 s |
+| nightly, `matrix` and `matrix_random` | 23,973 generated at strength three at all six arms, 4,000 random | see section 11.3 | |
+
+`counts.toml` holds the generated counts per family, strength and cadence.
+
+Four measurements changed the implementation after phase 0:
+
+1. **The merge tier's first full run took 29.6 minutes** and 16,613 s of processor time, with one
+   process per family; `expression` alone took 1,775 s. The strength three triples at two arms were
+   61% of its 69,000 case runs. The merge tier now runs the triples at `default` only, and the
+   nightly runs them at every arm. Each family is split into shards of about 250 s.
+2. **Shards alone made it slower per case**, 25,966 s of processor time in 20 minutes, because each
+   shard divided its cases into eight groups and a fixture is shared only inside a group. The merge
+   modules have two groups each, the number of test threads a process runs, and the tier takes 881.9 s.
+3. **The change tier took 66.7 s** while its targets had no recorded times, because the runner then
+   started its slowest targets last. With their times recorded it takes 56.9 s. `insert`,
+   `function`, `select`, `delete` and `update` run as two shards and the retained corpus as three.
+4. **A matrix run against an older engine grew to 66 GB in one process.** `inillucent-testrun` now
+   caps each test process at 8 GiB and every process it starts at a quarter of physical memory, and
+   the runner arms the engine's statement budget around every case.
 
 ### 8.2 Tiers and selection
 

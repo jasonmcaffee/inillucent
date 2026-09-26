@@ -372,10 +372,17 @@ function Add-NightlyHistory {
     $machine = "machine-" + (([System.Security.Cryptography.SHA256]::Create().ComputeHash(
         [System.Text.Encoding]::UTF8.GetBytes([System.Environment]::MachineName)) |
         ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 8)
+    # The statement matrix's random layer writes the seed it ran and how many
+    # cases, which is what a person needs to replay the night.
+    $randomNote = Join-Path $Worktree '_agent_output/nightly/matrix-random.txt'
     $rows = foreach ($target in ($targets | Sort-Object)) {
         $verdict = if ($failed -contains $target) { 'fail' } elseif ($skipped -contains $target) { 'skipped' } else { 'pass' }
         $seconds = if ($verdict -eq 'pass' -and $times.ContainsKey($target)) { $times[$target] } else { '-' }
-        "$when`t$short`t$machine`t$target`t$verdict`t$seconds"
+        $note = '-'
+        if ($target -like '*::matrix_random*' -and (Test-Path -LiteralPath $randomNote)) {
+            $note = (Get-Content -Raw -LiteralPath $randomNote).Trim()
+        }
+        "$when`t$short`t$machine`t$target`t$verdict`t$seconds`t$note"
     }
     if ($rows) {
         [System.IO.File]::AppendAllText($path, (($rows -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding $false))

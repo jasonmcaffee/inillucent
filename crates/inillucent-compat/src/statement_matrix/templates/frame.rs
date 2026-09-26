@@ -253,8 +253,14 @@ fn place_in_trigger(case: &mut Case, q: &str, columns: usize, temp: &str) {
         case.records.push(log);
         case.records.push(trigger);
     }
-    case.records
-        .push(Record::ok("INSERT INTO u(k, v) VALUES (7, 70)"));
+    // Graded engine against engine, not written as `statement ok`: the body
+    // runs the query, and on some data (an overflow, a blob in JSON) SQLite's
+    // body fails, which both engines must then do.
+    case.records.push(record(
+        "INSERT INTO u(k, v) VALUES (7, 70)".to_string(),
+        Sort::RowSort,
+        &[],
+    ));
     case.records
         .push(record("SELECT * FROM log".to_string(), Sort::RowSort, &[]));
 }
@@ -278,6 +284,10 @@ pub fn layer_three(case: &mut Case, query: &Query, indexed: bool) {
         case.records
             .push(record(wrapped.clone(), Sort::RowSort, binds));
     }
+    if !query.first.is_empty() {
+        case.records
+            .push(record(guarded_filter(q), Sort::RowSort, binds));
+    }
     if !query.checkable {
         return;
     }
@@ -294,6 +304,27 @@ pub fn layer_three(case: &mut Case, query: &Query, indexed: bool) {
         });
     }
     add_predicate_properties(case, query, indexed);
+}
+
+/// Wraps a query so that a column fails for exactly the rows an outer `WHERE`
+/// removes: `guard` overflows when `c1` is NULL, and the outer query keeps
+/// only the rows where `c1` is not NULL.
+///
+/// **The shape of the defect `f593b836` fixed, which no other wrapping had.**
+/// SQLite copies a `WHERE` on a derived table's column into the derived table,
+/// so the rows it removes never compute `guard`; before the fix inillucent
+/// computed every column of every row first and failed. The answer is graded
+/// against SQLite, so where SQLite cannot copy the filter in (a `LIMIT` inside,
+/// for one) both engines fail and agree. Measured: this wrapping fails on a
+/// build with the fix reversed and passes on the build with it.
+///
+/// @param q - the generated query, whose first column is `c1`
+fn guarded_filter(q: &str) -> String {
+    format!(
+        "SELECT d.c1, d.guard FROM (SELECT p.*, CASE WHEN p.c1 IS NULL \
+         THEN abs(-9223372036854775807 - 1) ELSE 0 END AS guard FROM ({q}) AS p) AS d \
+         WHERE d.c1 IS NOT NULL"
+    )
 }
 
 /// TLP, NoREC, the outer filter, index agreement and ANALYZE agreement, for a

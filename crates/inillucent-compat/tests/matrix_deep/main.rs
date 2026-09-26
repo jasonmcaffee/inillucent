@@ -1,5 +1,5 @@
 //! The `matrix_deep` tier of `inillucent-compat`'s integration tests: the SQL
-//! statement matrix at every merge: Layer 1 and every pair of axis values at every arm, and every triple at the default and small_pool arms.
+//! statement matrix at every merge: Layer 1 and every pair of axis values at every arm, and every triple at the default arm.
 //!
 //! Invariant: **this file declares one module per statement family and nothing
 //! else, and each module is one target in `tests/selection.toml`, run by

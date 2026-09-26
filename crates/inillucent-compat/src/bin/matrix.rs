@@ -12,6 +12,7 @@
 //! inillucent-matrix convert-syntax                 compat/syntax.toml
 //! inillucent-matrix convert-capabilities           the driver's CAPABILITIES probes
 //! inillucent-matrix surfaces [family]              Layer 1 through SharedDatabase, prepared reuse, execute_batch
+//! inillucent-matrix random [--seed N] [--count N]  Layer 4 at the default arm; the seed defaults to today's date
 //! inillucent-matrix run <family> [--limit N] [--arm NAME] [--threads N] [--cadence C]
 //! inillucent-matrix inventory                      writes _agent_output/matrix/inventory.md
 //! inillucent-matrix counts                         prints the counts.toml numbers
@@ -34,11 +35,19 @@ use inillucent_compat::workspace_root;
 /// Reads the command line and runs one command.
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    // Run outside `inillucent-testrun`, nothing else bounds this process: a
+    // matrix run against an older engine once reached 66 GB. Past 8 GiB an
+    // allocation fails here instead of on the rest of the machine.
+    if !inillucent_compat::supervise::cap_everything_started(8 * 1024 * 1024 * 1024) {
+        eprintln!("inillucent-matrix: could not cap this process's memory");
+    }
     let result = match arguments.first().map(String::as_str) {
         Some("convert-part8") => convert_part8(),
         Some("convert-probe") => convert_probe(arguments.get(1).map(PathBuf::from)),
         Some("convert-syntax") => convert_syntax(),
         Some("convert-capabilities") => convert_capabilities(),
+        Some("random") => random(&arguments[1..]),
+        Some("origins") => origins(arguments.get(1).map(String::as_str).unwrap_or("")),
         Some("surfaces") => surfaces(arguments.get(1).map(String::as_str).unwrap_or("all")),
         Some("run") => run(&arguments[1..]),
         Some("inventory") => inventory(),
@@ -47,7 +56,7 @@ fn main() -> ExitCode {
         Some("shrink") => shrink(&arguments[1..]),
         Some("show") => show(arguments.get(1).map(String::as_str).unwrap_or("")),
         _ => Err(
-            "usage: inillucent-matrix convert-part8 | convert-probe <json> | convert-syntax | convert-capabilities | surfaces [family] | \
+            "usage: inillucent-matrix convert-part8 | convert-probe <json> | convert-syntax | convert-capabilities | surfaces [family] | random [--seed N] [--count N] | origins <file> | \
                   run <family> [--limit N] [--arm NAME] [--threads N] [--cadence C] | inventory \
                   | counts"
                 .to_string(),
@@ -266,6 +275,55 @@ fn surfaces(family: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Runs a Layer 4 random run in this process and prints what no rule covers.
+///
+/// @param arguments - `--seed N` (default: today's date as YYYYMMDD), `--count N` (default 500),
+///   and `--only N`, which prints case N of the seed and runs it alone
+fn random(arguments: &[String]) -> Result<(), String> {
+    use inillucent_compat::statement_matrix::random;
+    let value = |flag: &str| {
+        arguments
+            .iter()
+            .position(|argument| argument == flag)
+            .and_then(|at| arguments.get(at + 1))
+            .and_then(|text| text.parse::<u64>().ok())
+    };
+    let seed = value("--seed").unwrap_or_else(|| random::seed_of_date(&random::today()));
+    let count = value("--count").unwrap_or(500);
+    if let Some(index) = value("--only") {
+        let case = random::case(seed, index);
+        print!("{}", case.render());
+        let arm = inillucent_compat::statement_matrix::group::every_arm()
+            .into_iter()
+            .find(|arm| arm.name == "default")
+            .ok_or("no default arm")?;
+        let mut runner = Runner::new(arm, &scratch()?.join("random-only"));
+        if let Verdict::Failed(failures) = runner.run(&case) {
+            for failure in &failures {
+                println!("{}", failure.render());
+            }
+        }
+        runner.finish();
+        return Ok(());
+    }
+    let started = std::time::Instant::now();
+    let report = random::run_group(seed, count, 0, 1, &scratch()?.join("random"))?;
+    for problem in &report.problems {
+        println!(
+            "{problem}
+"
+        );
+    }
+    println!(
+        "seed {seed}: {} case(s), {} covered by a rule, {} not covered, {:.2}s",
+        report.cases,
+        report.expected,
+        report.problems.len(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 /// Runs a family's cases in this process and prints what they cost.
 ///
 /// @param arguments - the family, then options
@@ -372,14 +430,16 @@ fn measure(
                     let (known_list, deliberate) = lists();
                     for (case, verdict) in borrowed.iter().zip(runner.run_all(&borrowed)) {
                         let (failures, ran) = match verdict {
-                            Verdict::Passed => (Vec::new(), true),
-                            Verdict::Failed(failures) => (failures, true),
+                            Verdict::Passed => (Vec::new(), vec![runner.arm_name().to_string()]),
+                            Verdict::Failed(failures) => {
+                                (failures, vec![runner.arm_name().to_string()])
+                            }
                             Verdict::Skipped(_) => {
                                 skipped += 1;
-                                (Vec::new(), false)
+                                (Vec::new(), Vec::new())
                             }
                         };
-                        match judge(&case.id, failures, ran, &known_list, &deliberate) {
+                        match judge(&case.id, failures, &ran, &known_list, &deliberate) {
                             Judged::Pass | Judged::Expected => {}
                             Judged::Fail(failures) => {
                                 failing.extend(failures.iter().take(3).map(|failure| {
@@ -551,6 +611,33 @@ fn find(id: &str) -> Result<Case, String> {
         }
     }
     Err(format!("no case has the id {id}"))
+}
+
+/// Prints the origin of every case id listed in a file, one per line, from
+/// one generation of every cadence rather than one per id.
+///
+/// @param file - a file with one case id per line
+fn origins(file: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(file).map_err(|error| format!("{file}: {error}"))?;
+    let wanted: std::collections::BTreeSet<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .collect();
+    let mut found = BTreeMap::new();
+    for family in inillucent_compat::statement_matrix::inventory::FAMILIES {
+        for cadence in [Cadence::Change, Cadence::Merge, Cadence::Nightly] {
+            for (case, _) in group::work(family, cadence)?.runs {
+                if wanted.contains(case.id.as_str()) {
+                    found.insert(case.id.clone(), case.origin.clone());
+                }
+            }
+        }
+    }
+    for id in wanted {
+        println!("{id}\t{}", found.get(id).map(String::as_str).unwrap_or("?"));
+    }
+    Ok(())
 }
 
 /// Prints one case, found by id at any cadence, in the file format.

@@ -126,8 +126,13 @@ pub fn work(family: &str, cadence: Cadence) -> Result<Work, String> {
             for case in templates::generate(family, 2)? {
                 runs.push((case, every.clone()));
             }
+            // The triples at the default arm only. At the default and
+            // small-pool arms both, the first full merge run took 29.6 minutes
+            // and 16,613 s of processor time on 24 cores, and the triples were
+            // 61% of its 69,000 case runs; the budget is 15 minutes. The
+            // nightly runs the triples at every arm, small-pool included.
             for case in templates::generate_only_triples(family)? {
-                runs.push((case, named(&["default", "small-pool"])));
+                runs.push((case, default.clone()));
             }
         }
         Cadence::Nightly => {
@@ -274,7 +279,11 @@ pub fn run_group_report(
         .filter(|(case, _)| owns(&placement_key(case), group, groups))
         .collect();
     let outcomes = run_cases(&mine, family, group, scratch, &mut report);
-    judge_all(outcomes, &known_list, &deliberate, &mut report);
+    let origins: BTreeMap<String, String> = mine
+        .iter()
+        .map(|(case, _)| (case.id.clone(), case.origin.clone()))
+        .collect();
+    judge_all(outcomes, &known_list, &deliberate, &origins, &mut report);
     report.summary = format!(
         "matrix {family} group {group}/{groups} ({cadence:?}): {} case run(s), {} statement(s), \
          {} fixture(s) built, {} copied; {:.2}s in cases, {:.2}s building fixtures, {:.3}s \
@@ -293,7 +302,7 @@ pub fn run_group_report(
 }
 
 /// The failures of one case at every arm, and whether it ran anywhere.
-type CaseOutcome = (Vec<Failure>, bool);
+type CaseOutcome = (Vec<Failure>, Vec<String>);
 
 /// Runs the group's cases, one runner per arm.
 fn run_cases(
@@ -330,9 +339,9 @@ fn run_cases(
         for (case, verdict) in for_arm.iter().zip(verdicts) {
             let entry = outcomes.entry(case.id.clone()).or_default();
             match verdict {
-                Verdict::Passed => entry.1 = true,
+                Verdict::Passed => entry.1.push(arm.name.to_string()),
                 Verdict::Failed(failures) => {
-                    entry.1 = true;
+                    entry.1.push(arm.name.to_string());
                     entry.0.extend(failures);
                 }
                 Verdict::Skipped(_) => {}
@@ -350,14 +359,21 @@ fn judge_all(
     outcomes: BTreeMap<String, CaseOutcome>,
     known_list: &BTreeMap<String, known::Known>,
     deliberate: &[known::Deliberate],
+    origins: &BTreeMap<String, String>,
     report: &mut GroupReport,
 ) {
     for (id, (failures, ran)) in outcomes {
-        match known::judge(&id, failures, ran, known_list, deliberate) {
+        match known::judge(&id, failures, &ran, known_list, deliberate) {
             Judged::Pass | Judged::Expected => {}
             Judged::Fail(failures) => {
                 report.failing.push(id.clone());
-                let rendered: Vec<String> = failures.iter().take(3).map(Failure::render).collect();
+                let mut rendered: Vec<String> =
+                    failures.iter().take(3).map(Failure::render).collect();
+                // The axis values, so a reader and a triage rule can see which
+                // combination failed without regenerating the case.
+                if let Some(origin) = origins.get(&id) {
+                    rendered.push(format!("      origin: {origin}"));
+                }
                 report.problems.push(rendered.join("\n    "));
             }
             Judged::Stale(listed) => report.problems.push(format!(

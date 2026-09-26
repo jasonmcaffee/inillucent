@@ -168,8 +168,8 @@ check a run against.
 | `retrieval` | 7 | 570 | `change` | the embedding and retrieval engine, and its graded harness |
 | `tooling` | 17 | 150 | `change` | the checks that keep the repository's own rules true |
 | `matrix` | 24 | 187 | `change` | the SQL statement matrix: every statement form with every pair of contexts, graded against the pinned SQLite |
-| `matrix_deep` | 24 | 192 | `merge` | the statement matrix at every configuration arm, every triple of contexts, and the driver's other surfaces |
-| `nightly` | 3 | 6 | `nightly` | the long forms, run on a schedule rather than on a change |
+| `matrix_deep` | 24 | 54 | `merge` | the statement matrix at every configuration arm, every triple of contexts, and the driver's other surfaces |
+| `nightly` | 5 | 102 | `nightly` | the long forms, run on a schedule rather than on a change |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than
 code so that a person can read the whole arrangement in one file.
@@ -192,6 +192,7 @@ cadence column against the map as well as the target column.
 |---|---|
 | one function, one module | `#[cfg(test)]` in the crate — tier `unit` |
 | a construct SQLite also has | `inillucent-compat/tests/differential/`, graded against the oracle — tier `differential` |
+| **a statement form, or a context a statement sits in** | a case in `inillucent-compat/tests/corpora/matrix/<family>/`, or an axis value in `statement_matrix/templates/` — tier `matrix`, see §2.3 |
 | SQL or storage behaviour with no SQLite equivalent | `inillucent-compat/tests/engine/` — tier `engine` |
 | what an application does with the public API | `crates/inillucent/tests/` — tier `e2e` |
 | **a sequence an application performs, at every configuration** | `crates/inillucent/tests/story_*.rs`, through `scenario!` — tier `e2e`, see §2.2 |
@@ -274,6 +275,35 @@ defect: the ticket, the surface, one sentence about what happened, and the test
 that holds it now. A row with `held_by = []` must say why in `open`, and
 `tooling::escapes` fails when a `held_by` names a test that does not exist — so
 the ledger cannot quietly become a list of tests somebody deleted.
+
+
+### 2.3 The SQL statement matrix
+
+`tasks/task-2135-sql-statement-matrix-tdd.md` is the design. The matrix runs every statement form
+the engine accepts, in combinations of the contexts that change its answer (where the rows come
+from, how they are reached, where the statement sits, what data and affinity the columns hold, how
+a constant is bound), on real files on both engines, and grades each answer against the pinned
+SQLite. Every case that writes is reopened and checked with `PRAGMA integrity_check`.
+
+| layer | what it is | where |
+|---|---|---|
+| 1 | hand written cases: the syntax register's examples, the capability probes, the feature probe corpus, the former part 8 corpus, one case per function, pragma, module and collation | `crates/inillucent-compat/tests/corpora/matrix/<family>/*.slt` |
+| 2 | templates over a covering array of the axes: every pair on a change, every triple on a merge | `crates/inillucent-compat/src/statement_matrix/templates/` |
+| 3 | wrappings graded against SQLite (derived table, CTE, materialized CTE, a guarded filter), and properties checked on inillucent alone (TLP, NoREC, DQE, index and `ANALYZE` agreement) | `statement_matrix/templates/frame.rs`, `statement_matrix/properties.rs` |
+| 4 | random statements over random schemas, from a seed that is the date, nightly only | `statement_matrix/random.rs` |
+
+Three files decide what a failure means. `known.list` names every case that fails because of a
+recorded defect, with the defect's number, and a listed case that starts to pass fails the suite
+until its line comes off. `deliberate.toml` names differences that are not defects, by construct,
+with the reason. `random-known.toml` names recorded defects by construct for Layer 4, whose case ids
+change whenever the generator does.
+
+`tooling::matrix_inventory` fails when an AST variant, a function, a pragma, a module, a collation,
+a syntax register example or a capability row has no case, and writes the coverage to
+`_agent_output/matrix/inventory.md`. `counts.toml` records how many cases each family generates;
+a change that grows a family rewrites it with `inillucent-matrix counts`, and that diff is where the
+time is decided, not a clock. `inillucent-matrix shrink <id> --save` reduces a failing case and saves
+it to the retained corpus, which runs at every arm on every change.
 
 ---
 
@@ -696,6 +726,8 @@ build-plus-run rather than a slice of one shared build.
 | `tooling` | 242.4 s | 13 | 122 |
 | `durability` | 988.2 s | 31 | 216 |
 | `nightly` | 1,650.3 s | 2 | 3 |
+| `matrix` | 56.9 s | 34 | 267 |
+| `matrix_deep` | 881.9 s | 78 | 204 |
 
 `perf`'s 35.1 s agrees with §5.1's "about half a minute" where the old 9.1 s
 in this table did not; that inconsistency predates this pass and is corrected
@@ -716,6 +748,14 @@ slowest target, and three of them are within a second of the whole tier:
 its own, so cutting the stories would not bring the tier under it. What the
 number bought is 370 tests where the tier had 130: nine stories, each asked at
 six configurations.
+
+**`matrix` and `matrix_deep` were measured on 2026-09-26**, with their times
+recorded in `tests/timings.toml` so the runner starts the longest targets first;
+before they were recorded, the change tier took 66.7 s on the same work because
+its slowest targets started last. A target count above the row count is the
+shards: `insert#1/2` is one of two processes that split the `insert` family.
+The merge tier's first full run, before it had shards and while it ran the
+triples at two arms, took 29.6 minutes.
 
 **`durability` and `tooling` are minutes rather than seconds, and both are one
 target.** `vacuum_crash` is the whole of `durability`'s wall and

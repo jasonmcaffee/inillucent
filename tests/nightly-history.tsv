@@ -15,7 +15,11 @@
 #
 # `machine` is a label, not a hostname - the same rule performance-history.tsv uses.
 #
-stamp	commit	machine	target	verdict	seconds
+# `note` holds what a target needs to be replayed, and is `-` for a target that
+# needs nothing. The statement matrix's random layer writes `seed=YYYYMMDD
+# cases=N` there. Rows written before the column existed have six fields.
+#
+stamp	commit	machine	target	verdict	seconds	note
 2026-09-21T06:20:51Z	0657915-dirty	machine-c9df3d5a	inillucent-compat::nightly::release_format_history	pass	3.5
 2026-09-21T06:20:51Z	0657915-dirty	machine-c9df3d5a	inillucent::story_ledger_day_nightly	pass	1602.4
 2026-09-23T09:06:21Z	97cff60-dirty	machine-c9df3d5a	inillucent-compat::nightly::release_format_history	pass	4.8

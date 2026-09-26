@@ -885,6 +885,9 @@ fn every_timing_row_names_a_live_target() {
             continue;
         };
         named = named.saturating_add(1);
+        // A shard is timed as `<target>#<index>/<count>`, and the map names
+        // the target once, with its `shards`.
+        let target = target.split('#').next().unwrap_or(target);
         // A lib harness is written `package` with no `::`, and the map names it
         // with the package's own name as the target name.
         let known = live.contains(target)

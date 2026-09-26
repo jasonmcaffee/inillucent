@@ -169,11 +169,23 @@ The exit code is the result. Exit code 0 means every selected target passed. Exi
 target failed. Exit code 2 means the run did not happen, for example because the build failed.
 [`AGENTS.md`](../AGENTS.md) section 2 explains each exit code.
 
-Each tier has a cadence. `change` tiers run on every change that can reach them. The `durability`
-and `perf` tiers are `merge`: a change run selects one of their targets only when a crate that
-actually changed is in its `covers`, and CI runs all of them on every push. The `nightly` tier runs
-once a night in `packaging/nightly.ps1`, which also builds the release and runs the gates. The runner
-builds only the targets it selected.
+Each tier has a cadence. `change` tiers run on every change that can reach them. The `durability`,
+`perf` and `matrix_deep` tiers are `merge`: a change run selects one of their targets only when a
+crate that actually changed is in its `covers`, and CI runs all of them on every push. The `nightly`
+tier runs once a night in `packaging/nightly.ps1`, which also builds the release and runs the gates.
+The runner builds only the targets it selected.
+
+The SQL statement matrix is two tiers and part of the nightly one. The `matrix` tier runs every
+statement form with every pair of contexts, graded against the pinned SQLite, on every change in
+under a minute. The `matrix_deep` tier adds every triple of contexts, every configuration arm, and
+the driver's `SharedDatabase`, prepared statement and `execute_batch` paths. The nightly tier runs
+the triples at every arm and 4,000 random cases from a seed that is the date. The case files
+are in `crates/inillucent-compat/tests/corpora/matrix/`, and `known.list` there names every case
+that fails because of a recorded defect. `tasks/task-2135-sql-statement-matrix-tdd.md` is the
+design.
+
+`inillucent-testrun` caps the memory of every test process at 8 GiB, and of all of them together at
+a quarter of the machine's memory, so a test that grows without bound fails on its own.
 
 `inillucent-compat`'s integration tests are one binary per tier, with one module per suite:
 `tests/engine/new_engine_log_lead.rs` is the target `inillucent-compat::engine::new_engine_log_lead`.
@@ -200,7 +212,7 @@ prerequisite in `tests/selection.toml` is missing from this table or has a diffe
 
 | prerequisite | rows | what provides it |
 |---|---:|---|
-| `oracle` | 77 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1` or `bash tools/sqlite-reference.sh` |
+| `oracle` | 79 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1` or `bash tools/sqlite-reference.sh` |
 | `shell` | 9 | the pinned `sqlite3` 3.53.4 shell, built by the same two scripts |
 | `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are committed. A new clone has them. The row is for a checkout that has lost them |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
@@ -234,7 +246,7 @@ a prerequisite and its suite cannot skip. Those two checks keep this table equal
 
 ## What the tests cover
 
-The workspace has 3,499 tests across 234 test targets. There are 234 rows in `tests/selection.toml`,
+The workspace has 3,499 tests across 285 test targets. There are 285 rows in `tests/selection.toml`,
 and each row is one `[[target]]` that the runner runs. `tools/doc-facts/check.mjs` fails when this
 page gives a different count from `tests/selection.toml`.
 

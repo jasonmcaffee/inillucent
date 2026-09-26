@@ -112,6 +112,11 @@ name = "matrix"
 purpose = "every statement form and every pair of contexts, against the pinned SQLite, on files"
 cadence = "change"
 
+# The merge tier's families carry `shards` sized from the first full run
+# (2026-09-25): 16,613 s of processor time, with one process per family taking
+# up to 1,775 s. Each shard is about 250 s, so the tier fits its 15 minute
+# budget on 24 cores. A family that grows past its shards shows it in
+# counts.toml first.
 [[tier]]
 name = "matrix_deep"
 purpose = "every triple of contexts and every configuration arm"
@@ -307,6 +312,7 @@ kind = "test"
 name = "matrix"
 module = "select"
 tier = "matrix"
+shards = 2
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
@@ -371,6 +377,7 @@ kind = "test"
 name = "matrix"
 module = "function"
 tier = "matrix"
+shards = 2
 covers = ["inillucent-engine", "inillucent-scalar"]
 requires = ["oracle"]
 
@@ -380,6 +387,7 @@ kind = "test"
 name = "matrix"
 module = "insert"
 tier = "matrix"
+shards = 2
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
@@ -389,6 +397,7 @@ kind = "test"
 name = "matrix"
 module = "update"
 tier = "matrix"
+shards = 2
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
@@ -398,6 +407,7 @@ kind = "test"
 name = "matrix"
 module = "delete"
 tier = "matrix"
+shards = 2
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
@@ -508,7 +518,7 @@ kind = "test"
 name = "matrix"
 module = "retained"
 tier = "matrix"
-shards = 2
+shards = 3
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
@@ -518,6 +528,7 @@ kind = "test"
 name = "matrix_deep"
 module = "select"
 tier = "matrix_deep"
+shards = 4
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -527,6 +538,7 @@ kind = "test"
 name = "matrix_deep"
 module = "join"
 tier = "matrix_deep"
+shards = 4
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -536,6 +548,7 @@ kind = "test"
 name = "matrix_deep"
 module = "compound"
 tier = "matrix_deep"
+shards = 3
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -545,6 +558,7 @@ kind = "test"
 name = "matrix_deep"
 module = "cte"
 tier = "matrix_deep"
+shards = 4
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -554,6 +568,7 @@ kind = "test"
 name = "matrix_deep"
 module = "window"
 tier = "matrix_deep"
+shards = 6
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -563,6 +578,7 @@ kind = "test"
 name = "matrix_deep"
 module = "subquery"
 tier = "matrix_deep"
+shards = 4
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -572,6 +588,7 @@ kind = "test"
 name = "matrix_deep"
 module = "expression"
 tier = "matrix_deep"
+shards = 8
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -581,6 +598,7 @@ kind = "test"
 name = "matrix_deep"
 module = "function"
 tier = "matrix_deep"
+shards = 6
 covers = ["inillucent-engine", "inillucent-scalar", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -590,6 +608,7 @@ kind = "test"
 name = "matrix_deep"
 module = "insert"
 tier = "matrix_deep"
+shards = 4
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -599,6 +618,7 @@ kind = "test"
 name = "matrix_deep"
 module = "update"
 tier = "matrix_deep"
+shards = 3
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -608,6 +628,7 @@ kind = "test"
 name = "matrix_deep"
 module = "delete"
 tier = "matrix_deep"
+shards = 3
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -617,6 +638,7 @@ kind = "test"
 name = "matrix_deep"
 module = "ddl_table"
 tier = "matrix_deep"
+shards = 3
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -626,6 +648,7 @@ kind = "test"
 name = "matrix_deep"
 module = "ddl_index"
 tier = "matrix_deep"
+shards = 2
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -635,6 +658,7 @@ kind = "test"
 name = "matrix_deep"
 module = "ddl_view"
 tier = "matrix_deep"
+shards = 2
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -644,6 +668,7 @@ kind = "test"
 name = "matrix_deep"
 module = "trigger"
 tier = "matrix_deep"
+shards = 3
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -653,6 +678,7 @@ kind = "test"
 name = "matrix_deep"
 module = "constraint"
 tier = "matrix_deep"
+shards = 2
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -662,6 +688,7 @@ kind = "test"
 name = "matrix_deep"
 module = "transaction"
 tier = "matrix_deep"
+shards = 2
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -689,6 +716,7 @@ kind = "test"
 name = "matrix_deep"
 module = "maintenance"
 tier = "matrix_deep"
+shards = 2
 covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 requires = ["oracle"]
 
@@ -1667,6 +1695,29 @@ module = "release_format_history"
 tier = "nightly"
 covers = ["inillucent-engine"]
 requires = ["previous-release", "tracked-fixtures"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "nightly"
+module = "matrix"
+tier = "nightly"
+# Every triple of axis values at all six arms. Eight shards, because one
+# process runs its groups one after another.
+shards = 8
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "nightly"
+module = "matrix_random"
+tier = "nightly"
+# Layer 4, from a seed that is the date: 4,000 cases in four shards.
+shards = 4
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec", "inillucent-scalar"]
+requires = ["oracle"]
 
 [[target]]
 package = "inillucent-compat"

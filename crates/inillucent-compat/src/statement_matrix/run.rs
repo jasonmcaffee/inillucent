@@ -154,6 +154,12 @@ impl Runner {
         }
     }
 
+    /// The name of the arm this runner runs at, as `known.list` and `arms`
+    /// directives spell it.
+    pub fn arm_name(&self) -> &'static str {
+        self.arm.name
+    }
+
     /// Whether the pinned SQLite oracle is built on this machine.
     pub fn has_oracle(&self) -> bool {
         self.program.is_some()

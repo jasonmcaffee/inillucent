@@ -69,9 +69,9 @@ flowchart LR
   on those packages, then runs every target that covers one of them.
 - A path that no rule in `tests/selection.toml` matches selects every target except the nightly
   tier.
-- Each tier has a cadence. A `change` tier target runs by the closure above. A `durability` or
-  `perf` target (cadence `merge`) runs only when a crate you changed is in its `covers`; CI runs
-  them all on every push. A `nightly` target never runs on a change: the nightly job runs it, or
+- Each tier has a cadence. A `change` tier target runs by the closure above. A `durability`,
+  `perf` or `matrix_deep` target (cadence `merge`) runs only when a crate you changed is in its
+  `covers`; CI runs them all on every push. A `nightly` target never runs on a change: the nightly job runs it, or
   `--tier nightly` by name.
 - The build names only the selected targets, so a run that selects no `inillucent-bench` row does
   not compile ONNX Runtime, the tokenizers or oniguruma.
@@ -192,6 +192,7 @@ where a test goes. The common cases:
 |---|---|---|
 | one function or module | `#[cfg(test)]` in the crate | `unit` |
 | a construct SQLite also has | `inillucent-compat/tests/`, graded against the oracle | `differential` |
+| a statement form, in every context the matrix names | a case in `inillucent-compat/tests/corpora/matrix/<family>/`, or a template in `statement_matrix/templates/` | `matrix` |
 | SQL or storage with no SQLite equivalent | `inillucent-compat/tests/` | `engine` |
 | what an application does with the public API | `crates/inillucent/tests/` | `e2e` |
 | a sequence an application performs, at every configuration | `crates/inillucent/tests/story_*.rs`, through `scenario!` | `e2e` |

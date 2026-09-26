@@ -187,3 +187,15 @@ name = "wal-autocheckpoint-is-zero"
 contains = ["wal_autocheckpoint"]
 kinds = ["rows", "reopen"]
 reason = "inillucent folds its log in at an explicit checkpoint rather than every thousand frames, so it reports wal_autocheckpoint as 0. The comment on reported_value in crates/inillucent-engine/src/pragma.rs gives the reason."
+
+[[rule]]
+name = "journal-mode-arm"
+contains = ["PRAGMA journal_mode"]
+kinds = ["rows", "reopen"]
+reason = "One configuration arm runs inillucent with PRAGMA journal_mode = truncate to exercise that commit path, and SQLite is left at delete, so reading the mode back differs by construction. At the default arm the two agree, and a difference there would still fail."
+
+[[rule]]
+name = "update-from-with-several-matching-rows"
+cases = ["compound-a19c80b8df3c", "compound-022aadab40a9", "compound-d6fca0360e3c", "compound-8d88896b953c"]
+kinds = ["rows", "reopen"]
+reason = "The UNION holds two rows whose c1 compare equal but differ in type (5.0 and 5), and both match one row of u. SQLite documents that UPDATE ... FROM then uses one of them and does not say which, so the value written is a draw."
