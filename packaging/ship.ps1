@@ -1016,8 +1016,14 @@ function Copy-TestPrerequisite {
         }
     }
     $declaration = Join-Path $MainCheckout 'tests/prerequisites.local.toml'
-    if (Test-Path -LiteralPath $declaration) {
-        Copy-Item -LiteralPath $declaration -Destination (Join-Path $Root 'tests/prerequisites.local.toml') -Force
+    $declarationTarget = Join-Path $Root 'tests/prerequisites.local.toml'
+    # **A release cut from the main checkout itself, not a worktree, has $Root
+    # equal to $MainCheckout.** Then $declaration and $declarationTarget are the
+    # same file, and Copy-Item refuses to overwrite an item with itself. Nothing
+    # needs copying in that case - the declaration is already exactly where it
+    # is meant to be.
+    if ((Test-Path -LiteralPath $declaration) -and $declaration -ne $declarationTarget) {
+        Copy-Item -LiteralPath $declaration -Destination $declarationTarget -Force
     }
 }
 
