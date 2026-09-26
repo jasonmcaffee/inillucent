@@ -601,6 +601,20 @@ const UNREACHABLE: &[(&str, &str)] = &[
     ),
 ];
 
+/// Names a live register can list that no matrix case can grade, each with the
+/// reason, so their absence from the cases is stated rather than failed.
+///
+/// A name here is still printed in the report. It must be a name whose answer
+/// depends on something outside the build and the case, such as a file on the
+/// machine.
+const OUTSIDE_THE_MATRIX: &[(&str, &str)] = &[(
+    "embed",
+    "registered only when `inillucent-search` is built with its `embed` feature, which a broad \
+     build turns on through feature unification, and it answers from a model installed on the \
+     machine, so one case would pass on one machine and fail on another; the suites \
+     `engine::embed_direct_only` and `retrieval::rag_verify` call it",
+)];
+
 /// Every name the inventory checks, with the first case that reached it.
 #[derive(Clone, Debug, Default)]
 pub struct Seen {
@@ -1953,9 +1967,15 @@ fn names_section(
         "\n## {title}\n\n| Name | First case |\n|---|---|\n"
     ));
     for name in live {
-        match reached.get(name) {
-            Some(case) => markdown.push_str(&format!("| `{name}` | `{case}` |\n")),
-            None => {
+        let outside = OUTSIDE_THE_MATRIX
+            .iter()
+            .find(|(outside, _)| outside == name);
+        match (reached.get(name), outside) {
+            (Some(case), _) => markdown.push_str(&format!("| `{name}` | `{case}` |\n")),
+            (None, Some((_, reason))) => {
+                markdown.push_str(&format!("| `{name}` | outside the matrix: {reason} |\n"))
+            }
+            (None, None) => {
                 markdown.push_str(&format!("| `{name}` | **missing** |\n"));
                 missing.push(format!("{} {name}", title.to_ascii_lowercase()));
             }
