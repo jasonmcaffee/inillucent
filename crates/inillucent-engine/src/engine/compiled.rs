@@ -232,21 +232,82 @@ impl crate::ImportedDatabase {
     ) -> DbResult<Vec<Vec<OwnedDatum>>> {
         let mut select = dml::module_keys_query(table, source, filter, kept.limit, kept.offset);
         select.order_by = kept.order_by.to_vec();
-        // An `UPDATE`'s new values, read after the rowid by the same query;
-        // see the `Cached::VirtualUpdate` arm of `compile` for why.
-        for (at, value) in values.iter().enumerate() {
-            select
-                .columns
-                .push(inillucent_sql::bind::BoundResultColumn {
-                    expr: (*value).clone(),
-                    name: format!("value{at}").into_bytes(),
-                    origin: None,
-                    declared_type: Vec::new(),
-                });
-        }
+        push_value_columns(&mut select, values.iter().copied());
         let plan = plan_select_with(select, self.pragmas.levers());
         let prepared = physical::prepare_any(&plan, self)?;
         Ok(physical::run_any_prepared(&plan, self, &prepared, params)?.0)
+    }
+
+    /// Runs a compiled `UPDATE` of an ordinary table.
+    ///
+    /// @param statement - the bound update
+    /// @param query - the compiled query that finds the rows
+    /// @param assignments_hold_subquery - whether an assignment holds a subquery
+    /// @param setup - what the statement keeps between executions
+    /// @param params - the bound parameters
+    fn run_update(
+        &mut self,
+        statement: &inillucent_sql::dml::BoundUpdate,
+        query: &CachedQuery,
+        assignments_hold_subquery: bool,
+        setup: &dml::UpdateCache,
+        params: &Params,
+    ) -> DbResult<Outcome> {
+        let keys = self.update_keys_of(statement, query, params);
+        let keys = self.before_write(keys)?;
+        // The same for an `UPDATE`'s assignments: the plan above finds the
+        // rows, and the values written into them are evaluated by the write
+        // path from expressions the plan never carried.
+        let folded = if assignments_hold_subquery || !statement.returning.is_empty() {
+            let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
+                .assignments
+                .iter()
+                .map(|assignment| &assignment.value)
+                .chain(statement.returning.iter().map(|column| &column.expr))
+                .collect();
+            let folded = inillucent_exec::subquery::fold_expressions(&assigned, self, params);
+            self.before_write(folded)?
+        } else {
+            None
+        };
+        let params = folded.as_ref().unwrap_or(params);
+        self.write(
+            params,
+            returning_names(&statement.returning),
+            |target, params| dml::update_cached(statement, target, params, &keys, setup),
+        )
+    }
+
+    /// Checks the foreign keys a statement has to settle before it commits.
+    ///
+    /// **The immediate keys a row broke on the way, checked now that every row
+    /// is written.** See `WriteTarget::defer_key_check`: SQLite fails the
+    /// statement only if a key is still broken at its end, and fails it after
+    /// writing every row, which is where `last_insert_rowid()` and the trigger
+    /// rows in `total_changes()` come from.
+    ///
+    /// **A deferred key is checked at the commit, and in autocommit the commit
+    /// is this statement's.** The statement is its own transaction, so a
+    /// `DEFERRABLE INITIALLY DEFERRED` key has no later point to wait for.
+    /// `commit_batch` makes the same check for an explicit transaction; without
+    /// this one an autocommit `INSERT` of an orphan row was stored where SQLite
+    /// fails it and keeps nothing. It runs before the modules are synced, so a
+    /// failure leaves them nothing to take back.
+    ///
+    /// @param pending - the triggers whose immediate check failed
+    /// @param autocommit - whether the statement is its own transaction
+    fn check_keys_at_statement_end(
+        &mut self,
+        pending: &[Vec<u8>],
+        autocommit: bool,
+    ) -> DbResult<()> {
+        if !pending.is_empty() {
+            self.check_pending_keys(pending)?;
+        }
+        if autocommit {
+            self.check_deferred_foreign_keys()?;
+        }
+        Ok(())
     }
 
     /// Clears `PRAGMA defer_foreign_keys` where SQLite clears it.
@@ -282,20 +343,29 @@ impl crate::ImportedDatabase {
     ///
     /// @param sql - the statement about to be compiled
     pub(crate) fn load_schema_once(&self, sql: &str) {
-        let head = sql
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        // A pragma and a transaction statement read no table, so they load
-        // no schema; `BEGIN` on its own leaves the setting as it was.
-        if matches!(
-            head.as_str(),
-            "pragma" | "begin" | "commit" | "end" | "rollback" | "savepoint" | "release"
-        ) {
+        // Asked first, and without allocating, because this runs before every
+        // statement and a session only loads its schema once.
+        let session = self.session_state.session.get();
+        if self.session_state.sessions_read.borrow().contains(&session) {
             return;
         }
-        let session = self.session_state.session.get();
+        let head = sql.split_whitespace().next().unwrap_or_default();
+        // A pragma and a transaction statement read no table, so they load
+        // no schema; `BEGIN` on its own leaves the setting as it was.
+        let reads_nothing = [
+            "pragma",
+            "begin",
+            "commit",
+            "end",
+            "rollback",
+            "savepoint",
+            "release",
+        ]
+        .iter()
+        .any(|word| head.eq_ignore_ascii_case(word));
+        if reads_nothing {
+            return;
+        }
         let first = self
             .session_state
             .sessions_read
@@ -389,30 +459,7 @@ impl crate::ImportedDatabase {
                 )
             }
             Cached::Update(statement, query, assignments_hold_subquery, setup) => {
-                let keys = self.update_keys_of(statement, query, params);
-                let keys = self.before_write(keys)?;
-                // The same for an `UPDATE`'s assignments: the plan above finds
-                // the rows, and the values written into them are evaluated by
-                // the write path from expressions the plan never carried.
-                let folded = if *assignments_hold_subquery || !statement.returning.is_empty() {
-                    let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
-                        .assignments
-                        .iter()
-                        .map(|assignment| &assignment.value)
-                        .chain(statement.returning.iter().map(|column| &column.expr))
-                        .collect();
-                    let folded =
-                        inillucent_exec::subquery::fold_expressions(&assigned, self, params);
-                    self.before_write(folded)?
-                } else {
-                    None
-                };
-                let params = folded.as_ref().unwrap_or(params);
-                self.write(
-                    params,
-                    returning_names(&statement.returning),
-                    |target, params| dml::update_cached(statement, target, params, &keys, setup),
-                )
+                self.run_update(statement, query, *assignments_hold_subquery, setup, params)
             }
             Cached::VirtualUpdate(statement, query) => {
                 let keys =
@@ -757,23 +804,13 @@ impl crate::ImportedDatabase {
                     statement.offset.as_ref(),
                 );
                 select.order_by = statement.order_by.clone();
-                // **The new values are read by the query that finds the rows**,
-                // one result column per assignment after the rowid. A value
-                // computed from the row - `SET body = body || '!'`, or a
-                // subquery correlated to it - is then evaluated against that
-                // row by the ordinary query path. `update_module` used to fold
-                // each value as a constant and refused anything that read the
-                // row, which SQLite answers.
-                for (at, assignment) in statement.assignments.iter().enumerate() {
-                    select
-                        .columns
-                        .push(inillucent_sql::bind::BoundResultColumn {
-                            expr: assignment.value.clone(),
-                            name: format!("value{at}").into_bytes(),
-                            origin: None,
-                            declared_type: Vec::new(),
-                        });
-                }
+                push_value_columns(
+                    &mut select,
+                    statement
+                        .assignments
+                        .iter()
+                        .map(|assignment| &assignment.value),
+                );
                 let plan = plan_select_with(select, self.pragmas.levers());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualUpdate(
@@ -1152,34 +1189,12 @@ impl crate::ImportedDatabase {
             }
         };
         self.writing.set_touched(self.writing.touched() | wrote);
-        // **The immediate keys a row broke on the way, checked now that every
-        // row is written.** See `WriteTarget::defer_key_check`: SQLite fails
-        // the statement only if a key is still broken at its end, and fails it
-        // after writing every row, which is where `last_insert_rowid()` and
-        // the trigger rows in `total_changes()` come from.
-        if !pending_keys.is_empty() {
-            if let Err(error) = self.check_pending_keys(&pending_keys) {
-                self.remember_rowid(changes.last_rowid);
-                self.record_changes(0, counted.1.saturating_sub(counted.0));
-                return Err(self.abandon(error, mark, autocommit, wrote, txn));
-            }
-        }
-        // **A deferred key is checked at the commit, and in autocommit the
-        // commit is this statement's.** The statement is its own transaction,
-        // so a `DEFERRABLE INITIALLY DEFERRED` key has no later point to wait
-        // for. `commit_batch` makes the same check for an explicit
-        // transaction; without this one an autocommit `INSERT` of an orphan
-        // row was stored where SQLite fails it and keeps nothing. It runs
-        // before the modules are synced, so a failure leaves them nothing to
-        // take back.
-        if autocommit {
-            if let Err(error) = self.check_deferred_foreign_keys() {
-                // The rows were written before the commit failed, and SQLite
-                // leaves `last_insert_rowid()` on the last of them.
-                self.remember_rowid(changes.last_rowid);
-                self.record_changes(0, counted.1.saturating_sub(counted.0));
-                return Err(self.abandon(error, mark, autocommit, wrote, txn));
-            }
+        if let Err(error) = self.check_keys_at_statement_end(&pending_keys, autocommit) {
+            // The rows were written before the check failed, and SQLite leaves
+            // `last_insert_rowid()` on the last of them.
+            self.remember_rowid(changes.last_rowid);
+            self.record_changes(0, counted.1.saturating_sub(counted.0));
+            return Err(self.abandon(error, mark, autocommit, wrote, txn));
         }
         let module_rows = match self.follow_modules(deferred, &changes, autocommit) {
             Ok(rows) => rows,
@@ -1443,5 +1458,32 @@ fn opens_a_transaction(cached: &Cached) -> bool {
             )
         }
         _ => true,
+    }
+}
+
+/// Adds a virtual table `UPDATE`'s new values to the query that finds its
+/// rows, one result column per assignment after the rowid.
+///
+/// **The new values are read by the query that finds the rows.** A value
+/// computed from the row - `SET body = body || '!'`, or a subquery correlated
+/// to it - is then evaluated against that row by the ordinary query path.
+/// `update_module` used to fold each value as a constant and refused anything
+/// that read the row, which SQLite answers.
+///
+/// @param select - the query that finds the rows
+/// @param values - the assignments' values, in assignment order
+fn push_value_columns<'v>(
+    select: &mut inillucent_sql::bind::BoundSelect,
+    values: impl Iterator<Item = &'v inillucent_sql::bind::BoundExpr>,
+) {
+    for (at, value) in values.enumerate() {
+        select
+            .columns
+            .push(inillucent_sql::bind::BoundResultColumn {
+                expr: value.clone(),
+                name: format!("value{at}").into_bytes(),
+                origin: None,
+                declared_type: Vec::new(),
+            });
     }
 }

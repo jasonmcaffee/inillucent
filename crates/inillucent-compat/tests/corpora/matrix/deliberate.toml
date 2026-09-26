@@ -195,6 +195,12 @@ kinds = ["rows", "reopen"]
 reason = "One configuration arm runs inillucent with PRAGMA journal_mode = truncate to exercise that commit path, and SQLite is left at delete, so reading the mode back differs by construction. At the default arm the two agree, and a difference there would still fail."
 
 [[rule]]
+name = "journal-mode-arm-table-function"
+contains = ["pragma_journal_mode"]
+kinds = ["rows", "reopen"]
+reason = "The same arm as journal-mode-arm, read through the pragma_journal_mode table function, which every pragma that returns a value now has: inillucent runs that arm with journal_mode = truncate and SQLite is left at delete."
+
+[[rule]]
 name = "update-from-with-several-matching-rows"
 cases = ["compound-a19c80b8df3c", "compound-022aadab40a9", "compound-d6fca0360e3c", "compound-8d88896b953c"]
 kinds = ["rows", "reopen"]

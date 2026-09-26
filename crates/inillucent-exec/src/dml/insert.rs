@@ -99,15 +99,7 @@ pub fn insert_at(
     if table.kind == TableKind::View {
         return insert_into_view(statement, target, params, supplied, depth);
     }
-    // See `WriteTarget::defer_key_check`: a single row insert with no trigger
-    // of its own checks an immediate foreign key at the row.
-    if depth.0 == 0 {
-        let one_row =
-            matches!(&statement.source, BoundInsertSource::Values(rows) if rows.len() == 1);
-        target.write_is_single_row(
-            one_row && statement.triggers.iter().all(|trigger| trigger.foreign_key),
-        );
-    }
+    note_single_row(statement, target, depth);
     let layout = layout_of(target, table)?;
     // `excluded` only exists inside an `ON CONFLICT ... DO UPDATE`, so a plain
     // insert carries one image rather than two.
@@ -137,21 +129,7 @@ pub fn insert_at(
         catalog,
     )?;
 
-    let rows: Vec<Row> = match &statement.source {
-        BoundInsertSource::Values(values) => {
-            let mut built = Vec::with_capacity(values.len());
-            for row in values {
-                let mut cells = Vec::with_capacity(row.len());
-                for expr in row {
-                    let eval = space.compile(expr, params, catalog)?;
-                    cells.push(space.evaluate(eval.as_ref(), &[])?);
-                }
-                built.push(cells);
-            }
-            built
-        }
-        BoundInsertSource::Select(_) => supplied.to_vec(),
-    };
+    let rows = rows_to_insert(statement, &space, params, catalog, supplied)?;
 
     // **Found on demand, not up front.** Reading the largest rowid costs a
     // descent, and a statement that supplies its own key needs none - which is
@@ -174,15 +152,7 @@ pub fn insert_at(
     let mut changes = Changes::default();
     let captured = target.captures(table.root);
     for supplied_row in &rows {
-        // **A row that is skipped gives its rowid back.** SQLite allocates a
-        // rowid when it writes the row, so a row that `OR IGNORE`, a `CHECK`,
-        // a `NOT NULL` or a trigger's `RAISE(IGNORE)` skips never had one,
-        // and the next row takes the number. This engine allocates while it
-        // builds the image, so a skipped row used to use up its number: the
-        // rows were stored as 1, 3, 6 where SQLite stores 1, 2, 3, and
-        // `last_insert_rowid()` answered the larger number. An
-        // `AUTOINCREMENT` table is the exception, in SQLite too: its sequence
-        // keeps every number it handed out.
+        // See `give_back`: a skipped row hands its rowid back.
         let rowid_before = next_rowid;
         let image = plan.build_row(
             supplied_row,
@@ -260,28 +230,10 @@ pub fn insert_at(
             give_back(table, &mut next_rowid, rowid_before);
             continue;
         };
-        // **`last_insert_rowid()` moves for an insert, never for an upsert's
-        // `DO UPDATE` arm.** See [`Stored`]'s own doc comment: both used to
-        // feed the same row image into `changes.last_rowid`, so resolving a
-        // conflict onto an existing row reported *that* row's rowid as newly
-        // inserted.
-        //
-        // **Recorded when the row is written, before its `AFTER` triggers.**
-        // SQLite sets the rowid as the row goes in, so an `AFTER INSERT`
-        // trigger that fails with `RAISE(ROLLBACK)` leaves it at the row it
-        // undid; recording it after the triggers left it at 0. Only the
-        // statement's own rows move it: a trigger body's insert moves
-        // SQLite's value only while the trigger runs.
-        if let Stored::Inserted(row) = &stored {
-            if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| row.get(at)) {
-                changes.last_rowid = Some(*assigned);
-                if depth.0 == 0 {
-                    target.count_rowid(*assigned);
-                }
-                // A key the statement supplied raises the mark too: `INSERT
-                // INTO t VALUES (50, ...)` makes the next allocated key 51.
-                high_water = high_water.max(*assigned);
-            }
+        if let Some(assigned) = record_rowid(&stored, &layout, &mut changes, target, depth) {
+            // A key the statement supplied raises the mark too: `INSERT INTO t
+            // VALUES (50, ...)` makes the next allocated key 51.
+            high_water = high_water.max(assigned);
         }
         if trigger::fire(
             &statement.triggers,
@@ -326,10 +278,102 @@ pub fn insert_at(
     }
     Ok(changes)
 }
+/// Tells the target whether this insert is one that can write only one row.
+///
+/// See `WriteTarget::defer_key_check`: a single row insert with no trigger of
+/// its own checks an immediate foreign key at the row, as SQLite does.
+///
+/// @param statement - the bound insert
+/// @param target - the file and its trees
+/// @param depth - how many triggers deep the insert is
+fn note_single_row(statement: &BoundInsert, target: &dyn WriteTarget, depth: Depth) {
+    if depth.0 != 0 {
+        return;
+    }
+    let one_row = matches!(&statement.source, BoundInsertSource::Values(rows) if rows.len() == 1);
+    target.write_is_single_row(
+        one_row && statement.triggers.iter().all(|trigger| trigger.foreign_key),
+    );
+}
+
+/// Returns the rows an insert writes: its `VALUES` evaluated, or the rows its
+/// `SELECT` produced.
+///
+/// @param statement - the bound insert
+/// @param space - the row space the values are evaluated in
+/// @param params - the bound parameters
+/// @param catalog - where a registered function's body is looked up
+/// @param supplied - the rows a `SELECT` source produced
+fn rows_to_insert(
+    statement: &BoundInsert,
+    space: &RowSpace,
+    params: &Params,
+    catalog: &dyn crate::physical::TreeCatalog,
+    supplied: &[Row],
+) -> DbResult<Vec<Row>> {
+    let BoundInsertSource::Values(values) = &statement.source else {
+        return Ok(supplied.to_vec());
+    };
+    let mut built = Vec::with_capacity(values.len());
+    for row in values {
+        let mut cells = Vec::with_capacity(row.len());
+        for expr in row {
+            let eval = space.compile(expr, params, catalog)?;
+            cells.push(space.evaluate(eval.as_ref(), &[])?);
+        }
+        built.push(cells);
+    }
+    Ok(built)
+}
+
+/// Records the rowid a written row was given, and returns it.
+///
+/// **`last_insert_rowid()` moves for an insert, never for an upsert's `DO
+/// UPDATE` arm.** See [`Stored`]'s own doc comment: both used to feed the same
+/// row image into `changes.last_rowid`, so resolving a conflict onto an
+/// existing row reported *that* row's rowid as newly inserted.
+///
+/// **Recorded when the row is written, before its `AFTER` triggers.** SQLite
+/// sets the rowid as the row goes in, so an `AFTER INSERT` trigger that fails
+/// with `RAISE(ROLLBACK)` leaves it at the row it undid; recording it after
+/// the triggers left it at 0. Only the statement's own rows move it: a trigger
+/// body's insert moves SQLite's value only while the trigger runs.
+///
+/// @param stored - what the write did
+/// @param layout - the table tree's layout
+/// @param changes - the statement's tally
+/// @param target - the file and its trees
+/// @param depth - how many triggers deep the insert is
+fn record_rowid(
+    stored: &Stored,
+    layout: &SourceLayout,
+    changes: &mut Changes,
+    target: &dyn WriteTarget,
+    depth: Depth,
+) -> Option<i64> {
+    let Stored::Inserted(row) = stored else {
+        return None;
+    };
+    let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| row.get(at)) else {
+        return None;
+    };
+    changes.last_rowid = Some(*assigned);
+    if depth.0 == 0 {
+        target.count_rowid(*assigned);
+    }
+    Some(*assigned)
+}
+
 /// Hands a skipped row's rowid back, so the next row is given it.
 ///
-/// An `AUTOINCREMENT` table keeps the number, as SQLite's does: its sequence
-/// records every rowid it hands out.
+/// **A row that is skipped gives its rowid back.** SQLite allocates a rowid
+/// when it writes the row, so a row that `OR IGNORE`, a `CHECK`, a `NOT NULL`
+/// or a trigger's `RAISE(IGNORE)` skips never had one, and the next row takes
+/// the number. This engine allocates while it builds the image, so a skipped
+/// row used to use up its number: the rows were stored as 1, 3, 6 where SQLite
+/// stores 1, 2, 3, and `last_insert_rowid()` answered the larger number. An
+/// `AUTOINCREMENT` table is the exception, in SQLite too: its sequence keeps
+/// every number it handed out.
 ///
 /// @param table - the table being written
 /// @param next_rowid - the next rowid to allocate
@@ -362,21 +406,7 @@ fn insert_into_view(
     let space = RowSpace::new(&[statement.target_source], &layout);
     let catalog = target.catalog();
     let plan = InsertPlan::compile(statement, &layout, &space, params, catalog)?;
-    let rows: Vec<Row> = match &statement.source {
-        BoundInsertSource::Values(values) => {
-            let mut built = Vec::with_capacity(values.len());
-            for row in values {
-                let mut cells = Vec::with_capacity(row.len());
-                for expr in row {
-                    let eval = space.compile(expr, params, catalog)?;
-                    cells.push(space.evaluate(eval.as_ref(), &[])?);
-                }
-                built.push(cells);
-            }
-            built
-        }
-        BoundInsertSource::Select(_) => supplied.to_vec(),
-    };
+    let rows = rows_to_insert(statement, &space, params, catalog, supplied)?;
     let mut changes = Changes::default();
     let mut never = None;
     for supplied_row in &rows {

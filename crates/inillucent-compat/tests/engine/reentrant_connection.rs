@@ -316,6 +316,10 @@ fn a_callback_can_read_and_set_a_run_time_limit() {
 struct AsksCounters {
     /// The database the question goes to, which is the one being authorized.
     database: Rc<Database>,
+    /// The session being authorized, which is the one whose counters are
+    /// asked about: the counters belong to a connection, as SQLite's do, so a
+    /// hook reads them through the connection that ran the statement.
+    session: u64,
     /// The rowid and the change count, per call.
     answers: RefCell<Vec<(i64, i64)>>,
 }
@@ -325,7 +329,7 @@ impl Authorizer for AsksCounters {
     ///
     /// @param _action - what the binder is asking about
     fn authorize(&self, _action: AuthAction<'_>) -> Authorization {
-        let connection = self.database.session();
+        let connection = self.database.session_as(self.session);
         let rowid = connection.last_insert_rowid().unwrap_or(-1);
         let changed = connection.changes().unwrap_or(-1);
         self.answers.borrow_mut().push((rowid, changed));
@@ -358,6 +362,7 @@ fn a_callback_can_read_what_the_last_statement_did() {
 
     let watcher = Rc::new(AsksCounters {
         database: Rc::clone(&database),
+        session: connection.session(),
         answers: RefCell::new(Vec::new()),
     });
     connection

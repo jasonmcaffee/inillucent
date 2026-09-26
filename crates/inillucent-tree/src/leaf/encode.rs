@@ -833,24 +833,8 @@ impl LeafBuilder {
                 .saturating_add(count.saturating_mul(layout.width(index, column)));
             cursor = align8(cursor);
         }
-        // **A row this wide is a limit of the page format, and it is named as
-        // one.** A leaf keeps a directory entry and at least one aligned block
-        // per column, so a page holds only so many columns - about 340 at
-        // 4,096 bytes - and a wider table fails here whatever its values are.
-        // SQLite stores such a row across overflow pages and answers; this
-        // format has no way to do that yet. It was a bare `SQLITE_MISUSE`,
-        // "bad parameter or other API misuse", which names neither the table
-        // nor the fix: a larger page size holds it.
         if cursor > self.page_size {
-            let said = format!(
-                "a row of {} columns does not fit one page of {} bytes; \
-                 a larger page size holds it",
-                self.columns.len(),
-                self.page_size
-            );
-            return Err(misuse(said.clone())
-                .with_message(said)
-                .with_unsupported("a table wider than one page holds"));
+            return Err(too_wide(self.columns.len(), self.page_size));
         }
 
         // The heap grows down from the page end. Every variable-width value and
@@ -1143,4 +1127,26 @@ mod tests {
         assert!(fitted >= 40, "only {fitted} row sets fitted a page");
         assert!(refused >= 10, "only {refused} row sets were refused");
     }
+}
+
+/// Returns the refusal for a row wider than one page.
+///
+/// **A row this wide is a limit of the page format, and it is named as one.**
+/// A leaf keeps a directory entry and at least one aligned block per column,
+/// so a page holds only so many columns - about 340 at 4,096 bytes - and a
+/// wider table fails whatever its values are. SQLite stores such a row across
+/// overflow pages and answers; this format has no way to do that yet. It was a
+/// bare `SQLITE_MISUSE`, "bad parameter or other API misuse", which named
+/// neither the table nor the fix: a larger page size holds it.
+///
+/// @param columns - how many columns the row has
+/// @param page_size - the page size, in bytes
+fn too_wide(columns: usize, page_size: usize) -> inillucent_base::DbError {
+    let said = format!(
+        "a row of {columns} columns does not fit one page of {page_size} bytes; a larger \
+         page size holds it"
+    );
+    misuse(said.clone())
+        .with_message(said)
+        .with_unsupported("a table wider than one page holds")
 }

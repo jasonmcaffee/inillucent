@@ -208,6 +208,46 @@ impl ImportedDatabase {
         Ok(outcome)
     }
 
+    /// Runs `BEGIN`, `COMMIT` or `ROLLBACK` with no savepoint named.
+    ///
+    /// **The three transaction statements refuse what SQLite refuses.**
+    /// `begin_batch`, `commit_batch` and `rollback` are deliberately tolerant -
+    /// they are called at boundaries by code that does not know whether a
+    /// transaction is open - and the *statements* are not: SQLite reports all
+    /// three of these, and before the write path had a statement boundary, this
+    /// engine reported none of them. It is how a caller finds out that an `OR
+    /// ROLLBACK` ended the transaction underneath it: the `COMMIT` that follows
+    /// has nothing left to commit and has to say so. Each refusal is
+    /// `SQLITE_ERROR` (1), which is what the pinned reference answers; `refusal`
+    /// would answer `SQLITE_MISUSE` (21), and the statement matrix's transaction
+    /// cases found exactly that.
+    ///
+    /// @param which - `begin`, `commit` or `rollback`
+    fn transaction_statement(&mut self, which: &str) -> DbResult<Outcome> {
+        let open = self.writing.batch().is_some();
+        match (which, open) {
+            ("begin", true) => {
+                return Err(statement_refusal(
+                    "cannot start a transaction within a transaction",
+                ))
+            }
+            ("begin", false) => self.begin_batch(),
+            ("commit", false) => {
+                return Err(statement_refusal(
+                    "cannot commit - no transaction is active",
+                ))
+            }
+            ("commit", true) => self.commit_batch()?,
+            (_, false) => {
+                return Err(statement_refusal(
+                    "cannot rollback - no transaction is active",
+                ))
+            }
+            (_, true) => self.rollback()?,
+        }
+        Ok(Outcome::empty())
+    }
+
     /// Runs one bound directive against the schema `execute_ddl` selected.
     ///
     /// @param directive - the bound statement
@@ -353,37 +393,8 @@ impl ImportedDatabase {
             Directive::Alter { table, action, .. } => self.alter_table(source, &table, &action),
             analyze @ Directive::Analyze { .. } => self.run_analyze(analyze),
             Directive::Reindex { indexes, .. } => self.reindex(&indexes),
-            // **The three transaction statements refuse what SQLite refuses.**
-            // `begin_batch`, `commit_batch` and `rollback` are deliberately
-            // tolerant - they are called at boundaries by code that does not
-            // know whether a transaction is open - and the *statements* are
-            // not: SQLite reports all three of these, and before the write
-            // path had a statement boundary, this engine reported none of
-            // them. It is the same defect three times,
-            // and it is how a caller finds out that an `OR ROLLBACK` ended the
-            // transaction underneath it: the `COMMIT` that follows has nothing
-            // left to commit and has to say so. Each refusal is `SQLITE_ERROR`
-            // (1), which is what the pinned reference answers; `refusal` would
-            // answer `SQLITE_MISUSE` (21), and the statement matrix's
-            // transaction cases found exactly that.
-            Directive::Begin(_) => {
-                if self.writing.batch().is_some() {
-                    return Err(statement_refusal(
-                        "cannot start a transaction within a transaction",
-                    ));
-                }
-                self.begin_batch();
-                Ok(Outcome::empty())
-            }
-            Directive::Commit => {
-                if self.writing.batch().is_none() {
-                    return Err(statement_refusal(
-                        "cannot commit - no transaction is active",
-                    ));
-                }
-                self.commit_batch()?;
-                Ok(Outcome::empty())
-            }
+            Directive::Begin(_) => self.transaction_statement("begin"),
+            Directive::Commit => self.transaction_statement("commit"),
             Directive::Pragma {
                 ref name,
                 ref argument,
@@ -395,15 +406,7 @@ impl ImportedDatabase {
                     self.rollback_to(&name)?;
                     Ok(Outcome::empty())
                 }
-                None => {
-                    if self.writing.batch().is_none() {
-                        return Err(statement_refusal(
-                            "cannot rollback - no transaction is active",
-                        ));
-                    }
-                    self.rollback()?;
-                    Ok(Outcome::empty())
-                }
+                None => self.transaction_statement("rollback"),
             },
             // A `SAVEPOINT` outside a transaction opens one, which is what
             // SQLite does: it is the only way to name a point inside a

@@ -313,12 +313,14 @@ fn a_checkpoint_refuses_once_a_shared_transaction_has_written() {
 
 /// One writer at a time, and the loser is told rather than left waiting.
 ///
-/// **The refusal is `Misuse` rather than `Busy` on this engine**, and the
-/// difference is which layer answers. The old engine had two connections and a
+/// **The refusal is `Error` (code 1) rather than `Busy` on this engine**, and
+/// the difference is which layer answers. The old engine had two connections and a
 /// lock between them, so the second `BEGIN IMMEDIATE` lost a race and was told
 /// the database was `Busy`. Here the two are sessions on one pool, so a second
 /// `BEGIN IMMEDIATE` is a second transaction on a pool that already has one -
-/// which the engine rejects as misuse before any lock is consulted. Either way
+/// which the engine refuses with SQLite's "cannot start a transaction within
+/// a transaction" before any lock is consulted. That refusal is code 1, as
+/// SQLite's is; it was code 21 until the statement matrix found it. Either way
 /// the invariant this test exists for holds: **two writers cannot both be open,
 /// and the loser is told rather than left waiting.**
 #[test]
@@ -337,7 +339,7 @@ fn a_second_writer_in_this_process_is_refused() {
     let refused = second.execute_batch("BEGIN IMMEDIATE");
     assert_eq!(
         refused.map_err(|error| error.code()),
-        Err(PrimaryCode::Misuse),
+        Err(PrimaryCode::Error),
         "two sessions held the writer at once; a `Busy` here instead would mean \
          the two are arbitrating through the lock rather than through the pool, \
          which is what two separate connections used to do"
