@@ -1,0 +1,425 @@
+# The smallest case found for each defect the matrix recorded on the board, one
+# per bug, named retained-bug-<number>-<what>. They run at every arm on every
+# change. Each is listed in known.list under its bug's number, so fixing a bug
+# makes its case agree and fails the suite until the line comes off the list.
+
+case retained-bug-01-commit
+statement error
+COMMIT
+
+case retained-bug-01-begin
+statement ok
+BEGIN
+
+statement error
+BEGIN
+
+case retained-bug-02-not-null-column
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT)
+
+statement ok
+INSERT INTO t VALUES (1, 10, 'p')
+
+statement error
+ALTER TABLE t ADD COLUMN c INTEGER NOT NULL
+
+case retained-bug-04-escape
+statement error
+SELECT 'a%b' LIKE 'a%b' ESCAPE ''
+
+case retained-bug-05-limit-real
+statement ok
+CREATE TABLE t(a)
+
+statement error
+SELECT a FROM t ORDER BY a LIMIT 2.7
+
+case retained-bug-06-unique-index
+statement ok
+CREATE TABLE g(a, b AS (a % 2) VIRTUAL)
+
+statement ok
+INSERT INTO g(a) VALUES (1), (3)
+
+statement error
+CREATE UNIQUE INDEX gb ON g (b)
+
+case retained-bug-08-ctas-changes
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+INSERT INTO t VALUES (10), (20), (30)
+
+statement ok
+CREATE TABLE d AS SELECT a FROM t WHERE a > 15
+
+query I rowsort
+SELECT changes()
+
+case retained-bug-09-raise-rollback
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(ROLLBACK,'no'); END
+
+statement error
+INSERT INTO t VALUES(1)
+
+query I rowsort
+SELECT last_insert_rowid()
+
+case retained-bug-10-raise-ignore
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE TRIGGER tr BEFORE INSERT ON t WHEN NEW.a<0 BEGIN SELECT RAISE(IGNORE); END
+
+statement ok
+INSERT INTO t VALUES(1),(-1),(2)
+
+query I rowsort
+SELECT last_insert_rowid()
+
+case retained-bug-11-returning-wildcard
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, a)
+
+statement error
+UPDATE t SET a = 1 RETURNING t.*
+
+case retained-bug-12-drop-column-view
+statement ok
+CREATE TABLE t(a, b, c)
+
+statement ok
+CREATE VIEW v AS SELECT a, b, c FROM t
+
+statement error
+ALTER TABLE t DROP COLUMN c
+
+case retained-bug-16-temp-schema
+query T rowsort
+SELECT name FROM sqlite_temp_schema
+
+case retained-bug-17-auto-vacuum
+statement ok
+PRAGMA auto_vacuum=INCREMENTAL
+
+query I rowsort
+PRAGMA auto_vacuum
+
+reopen
+
+query I rowsort
+PRAGMA auto_vacuum
+
+case retained-bug-18-writable-schema
+statement ok
+PRAGMA writable_schema=ON
+
+query I rowsort
+PRAGMA writable_schema
+
+case retained-bug-18-automatic-index
+statement ok
+PRAGMA automatic_index = OFF
+
+query I rowsort
+PRAGMA automatic_index
+
+case retained-bug-19-row-value-set
+statement ok
+CREATE TABLE t(a, b)
+
+statement ok
+INSERT INTO t VALUES(1, 2)
+
+statement ok
+UPDATE t SET (a, b) = (3, 4)
+
+case retained-bug-20-temp-index
+statement ok
+CREATE TEMP TABLE t(a)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+case retained-bug-21-temp-qualified
+statement ok
+CREATE TEMP TABLE temp.s(a)
+
+case retained-bug-22-analyze-schema
+statement ok
+ATTACH '%SCRATCH%/aux.db' AS aux
+
+statement ok
+CREATE TABLE aux.t(a)
+
+statement ok
+ANALYZE aux
+
+case retained-bug-23-ctas-with
+statement ok
+CREATE TABLE x AS WITH c AS (SELECT 1 AS a) SELECT a FROM c
+
+query I rowsort
+SELECT * FROM x
+
+case retained-bug-26-deferred-fk
+statement ok
+PRAGMA foreign_keys = ON
+
+statement ok
+CREATE TABLE p(id INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE c(p INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)
+
+statement error
+INSERT INTO c VALUES (99)
+
+case retained-bug-27-right-join
+statement ok
+CREATE TABLE l(a)
+
+statement ok
+CREATE TABLE r(a, w)
+
+statement ok
+INSERT INTO r VALUES (1, 'x')
+
+query T rowsort
+SELECT l.a AS la, r.a AS ra, r.w FROM l RIGHT JOIN r ON r.a = l.a
+
+case retained-bug-28-sum-text
+statement ok
+CREATE TABLE t(a TEXT)
+
+statement ok
+INSERT INTO t VALUES ('2'), ('3')
+
+query T rowsort
+SELECT sum(a), typeof(sum(a)) FROM t
+
+case retained-bug-29-stat1-empty
+statement ok
+CREATE TABLE t(a)
+
+statement ok
+CREATE INDEX i ON t(a)
+
+statement ok
+ANALYZE
+
+query T rowsort
+SELECT tbl, idx, stat FROM sqlite_stat1
+
+case retained-bug-30-pragma-function
+query I rowsort
+SELECT * FROM pragma_user_version
+
+case retained-bug-31-unique-without-rowid
+statement ok
+CREATE TABLE t(k INTEGER PRIMARY KEY, a TEXT, b TEXT) WITHOUT ROWID
+
+statement ok
+INSERT INTO t VALUES (2, 1, NULL)
+
+statement ok
+CREATE UNIQUE INDEX iu ON t(k)
+
+statement error
+INSERT OR ABORT INTO t VALUES (2, 'new', 'n')
+
+case retained-bug-33-match-derived
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(title, body)
+
+statement ok
+INSERT INTO f(rowid, title, body) VALUES (1, 'release notes', 'the release ships in may'), (2, 'parser', 'parse the headers first')
+
+query T rowsort
+SELECT * FROM (SELECT rowid AS c1, body AS c2 FROM f WHERE f MATCH '"release ships"' OR rowid = 2) AS d
+
+case retained-bug-34-update-from-partial-index
+statement ok
+CREATE TABLE t(k INTEGER, a, m INTEGER DEFAULT 0)
+
+statement ok
+CREATE INDEX ip ON t(a) WHERE a IS NOT NULL
+
+statement ok
+INSERT INTO t(k, a) VALUES (1, 1)
+
+statement ok
+CREATE TABLE r(k INTEGER, a)
+
+statement ok
+INSERT INTO r VALUES (1, 5)
+
+statement ok
+UPDATE t SET m = m + 1 FROM r WHERE r.k = t.k
+
+case retained-bug-35-unread-column
+statement ok
+CREATE TABLE t(k INTEGER, a)
+
+statement ok
+INSERT INTO t VALUES (1, x'04')
+
+query I rowsort
+SELECT k FROM (SELECT k, json_quote(a) AS j FROM t) AS d
+
+case retained-bug-37-strict-any
+statement ok
+CREATE TABLE t(k INTEGER, a ANY) STRICT
+
+statement ok
+INSERT INTO t VALUES (4, ' 7'), (6, '5')
+
+query T rowsort
+SELECT k, a, typeof(a) FROM t
+
+case retained-bug-38-negative-zero
+statement ok
+CREATE TABLE t(a ANY, r REAL) STRICT
+
+statement ok
+INSERT INTO t VALUES (-0.0, -0.0)
+
+query T rowsort
+SELECT a, typeof(a), r, round(-0.0, 1) FROM t
+
+case retained-bug-39-groups-offset
+statement ok
+CREATE TABLE t(a, k)
+
+statement ok
+INSERT INTO t VALUES (1, 1), (2, 2), (2, 3)
+
+query T rowsort
+SELECT k, count(*) OVER (ORDER BY a, k GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t
+
+case retained-bug-40-view-type
+statement ok
+CREATE TABLE t(k INTEGER, a, b TEXT)
+
+statement ok
+CREATE VIEW v AS SELECT k AS x, a AS y FROM t
+
+query T rowsort
+PRAGMA table_info(v)
+
+case retained-bug-41-generated-before-type
+statement ok
+CREATE TABLE t(a INTEGER, g TEXT AS (a || 'x') STORED) STRICT
+
+statement ok
+INSERT INTO t(a) VALUES (' 7')
+
+query T rowsort
+SELECT a, g FROM t
+
+case retained-bug-42-vacuum-generated
+statement ok
+CREATE TABLE t(a, g TEXT AS (a || 'x') STORED)
+
+statement ok
+INSERT INTO t(a) VALUES (1)
+
+statement ok
+VACUUM
+
+case retained-bug-43-returning-virtual-table
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(a)
+
+statement ok
+INSERT INTO f(rowid, a) VALUES (1, 'x')
+
+statement error
+DELETE FROM f RETURNING rowid
+
+case retained-bug-43-upsert-virtual-table
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(a)
+
+statement error
+INSERT INTO f(rowid, a) VALUES (1, 'x') ON CONFLICT DO NOTHING
+
+case retained-bug-44-insert-ignore-fts
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(a, b)
+
+statement ok
+INSERT INTO f(rowid, a, b) VALUES (2, 'p', 'q')
+
+statement ok
+CREATE TABLE r(k, a, w)
+
+statement ok
+INSERT INTO r VALUES (2, 20, 'z'), (3, 30, 'w')
+
+statement ok
+INSERT OR IGNORE INTO f(rowid, a, b) SELECT k, a, w FROM r
+
+query T rowsort
+SELECT rowid, a, b FROM f
+
+case retained-bug-45-or-rollback-virtual-table
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(a, b)
+
+statement ok
+INSERT INTO f(rowid, a, b) VALUES (2, 'ABC', 'q')
+
+statement ok
+BEGIN
+
+query T rowsort
+INSERT OR ROLLBACK INTO f(rowid, a, b) VALUES (2, 'new', 'n')
+
+query I rowsort
+SELECT 1
+
+case retained-bug-46-shadow-tables
+statement ok
+CREATE VIRTUAL TABLE f USING fts5(a)
+
+query T rowsort
+SELECT name, type FROM pragma_table_list WHERE name LIKE 'f%'
+
+query T rowsort
+SELECT name, sql FROM sqlite_schema WHERE name = 'f_config'
+
+case retained-bug-47-real-remainder
+query T rowsort
+SELECT 7.0 % 2, typeof(7.0 % 2), 7 % 2.0
+
+case retained-bug-48-upsert-target
+statement ok
+CREATE TABLE t(k INTEGER, a)
+
+statement error
+INSERT INTO t VALUES (1, 'x') ON CONFLICT (k) DO NOTHING
+
+case retained-bug-49-range-over-text
+statement ok
+CREATE TABLE t(k INTEGER PRIMARY KEY, a TEXT COLLATE NOCASE)
+
+statement ok
+INSERT INTO t VALUES (2, '9'), (3, '1e2')
+
+query T rowsort
+SELECT k, count(*) OVER (ORDER BY a RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t
+
+case retained-bug-50-strict-primary-key
+statement ok
+CREATE TABLE t(k INTEGER, a REAL PRIMARY KEY, b TEXT) STRICT
+
+query T rowsort
+PRAGMA table_info(t)

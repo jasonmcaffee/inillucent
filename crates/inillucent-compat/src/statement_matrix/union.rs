@@ -35,6 +35,7 @@ pub struct Union {
     pub capabilities: Vec<String>,
     seen: BTreeSet<String>,
     names: BTreeMap<String, String>,
+    closed: bool,
 }
 
 /// What one setup statement does to the schema.
@@ -103,7 +104,8 @@ impl Union {
     /// @param case - the case
     /// @param position - its position in the runner's list
     pub fn admit(&mut self, case: &Case, position: usize) -> bool {
-        if self.members.len() >= MOST_MEMBERS
+        if self.closed
+            || self.members.len() >= MOST_MEMBERS
             || (!self.members.is_empty() && self.oracle != case.oracle)
         {
             return false;
@@ -156,6 +158,36 @@ impl Union {
     }
 }
 
+/// Whether a case reads something that describes the whole database rather
+/// than its own objects: the schema tables, the table list, statistics, page
+/// counts. Its answer would then depend on which other cases share its
+/// fixture, so it never shares one.
+///
+/// @param case - the case
+pub fn reads_whole_database(case: &Case) -> bool {
+    const WHOLE: &[&str] = &[
+        "sqlite_schema",
+        "sqlite_master",
+        "sqlite_temp",
+        "table_list",
+        "sqlite_stat",
+        "page_count",
+        "freelist_count",
+        "database_list",
+        "schema_version",
+        "dbstat",
+        "integrity_check",
+        "quick_check",
+        "function_list",
+        "module_list",
+        "pragma_list",
+    ];
+    case.records.iter().filter_map(Record::sql).any(|sql| {
+        let lower = sql.to_ascii_lowercase();
+        WHOLE.iter().any(|name| lower.contains(name))
+    })
+}
+
 /// Groups read only cases into merged fixtures, first fit, in order.
 ///
 /// @param cases - every case the runner has
@@ -166,6 +198,14 @@ pub fn group(cases: &[&Case], positions: &[usize]) -> Vec<Union> {
         let Some(case) = cases.get(*position) else {
             continue;
         };
+        if reads_whole_database(case) {
+            let mut alone = Union::default();
+            if alone.admit(case, *position) {
+                alone.closed = true;
+                unions.push(alone);
+            }
+            continue;
+        }
         if !unions.iter_mut().any(|union| union.admit(case, *position)) {
             let mut fresh = Union::default();
             if fresh.admit(case, *position) {

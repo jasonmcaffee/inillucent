@@ -120,6 +120,12 @@ fn write_axes(own: Vec<Axis>) -> Vec<Axis> {
 
 /// The constraint every write family shares.
 fn write_allowed(pick: &Pick) -> bool {
+    // The pinned SQLite has no `ORDER BY ... LIMIT` on a write, and the rowid
+    // subquery `limited.rs` sends it instead cannot name a `WITHOUT ROWID`
+    // table's rows. The pair is left out rather than graded against nothing.
+    if pick.forbids("form", "target", &[("order_limit", "without_rowid")]) {
+        return false;
+    }
     if pick.forbids(
         "target",
         "access",

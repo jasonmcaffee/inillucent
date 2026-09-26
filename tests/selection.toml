@@ -361,6 +361,7 @@ kind = "test"
 name = "matrix"
 module = "expression"
 tier = "matrix"
+shards = 2
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
@@ -406,6 +407,7 @@ kind = "test"
 name = "matrix"
 module = "ddl_table"
 tier = "matrix"
+shards = 2
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
@@ -433,6 +435,7 @@ kind = "test"
 name = "matrix"
 module = "trigger"
 tier = "matrix"
+shards = 2
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
@@ -505,6 +508,7 @@ kind = "test"
 name = "matrix"
 module = "retained"
 tier = "matrix"
+shards = 2
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 

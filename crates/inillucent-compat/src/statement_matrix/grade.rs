@@ -339,7 +339,10 @@ fn grade_pair(
         reference,
         false,
         context.counters,
-        !context.module_pending,
+        // SQLite's `changes()` after a write to a virtual table counts what
+        // the module did to its own shadow tables, which is FTS5's business
+        // and not the caller's; a case that uses a module compares it nowhere.
+        context.counters && !context.module_pending,
     );
     if let Some(first) = differences.first() {
         let kind = if candidate.ok != reference.ok {

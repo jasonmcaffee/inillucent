@@ -40,3 +40,586 @@ probe-prag.autovacuum	17	PRAGMA auto_vacuum set on a new file reads back 0 after
 probe-prag.schema.switches	18	PRAGMA writable_schema reads back 0 after it is set on; SQLite reads back 1.
 ms-006	19	UPDATE t SET (a, b) = (3, 4) is refused as unsupported and no capability row says the engine lacks it.
 syntax-update-stmt-p2	19	UPDATE t SET (a, b) = (SELECT 1, 2) is refused as unsupported and no capability row says the engine lacks it.
+
+# Generated cases, grouped by bug. Written from the triage of an inillucent-matrix run;
+# each line's case fails in the way its bug's section on task-2136 describes.
+constraint-03d461ce4b6d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-06376903ab5d	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-07098ec5b8da	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-0ff32eb7c953	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-14b1790408d3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-1d269e2d9513	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-2a9222127d07	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-3332f0645e39	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-3f0b85337977	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-4b0a367af6cc	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-4c334063c5c0	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-52d5d80c8377	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-5b172c28191b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-5f9d45ce4f9c	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-618ef3bdd6f7	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-76c3206e97aa	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-9f6128abdff6	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-a3f2c8de74df	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-a60143039ed9	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-b893830377a2	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-c1442ad09ce1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-c2270a72d2aa	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-d2e8e154e10b	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-d510da4317d1	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-de974b2d4a92	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-e1237684f59c	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-e6c88362d3da	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-f0bce35f61c3	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-f18eefd57be9	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+constraint-fe4126418837	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
+ddl_index-ce507454a64f	6	CREATE UNIQUE INDEX over duplicate values fails with code 21 where SQLite gives 19.
+constraint-059de34f5d89	7	A DELETE refused by ON DELETE RESTRICT reports extended code 787 where SQLite reports 1811.
+ddl_table-3b1cd34321bb	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
+ddl_table-7918d7e9a8f5	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
+ddl_table-8dfc4d960bc5	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
+ddl_table-9270a8853fb9	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
+ddl_table-a46b2e208ffe	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
+ddl_table-d59c687a3127	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
+ddl_table-f5afc181d0e3	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
+schema-013cdbdd2c4d	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
+schema-910bf633dd3e	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
+window-a2ad6734c372	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
+window-d74f80f63439	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
+constraint-bbb2b0d74da4	10	last_insert_rowid() counts a row the INSERT skipped.
+ddl_table-24be60b2e95c	10	last_insert_rowid() counts a row the INSERT skipped.
+ddl_table-43ad4abb702b	10	last_insert_rowid() counts a row the INSERT skipped.
+ddl_table-586fb02b2ea9	10	last_insert_rowid() counts a row the INSERT skipped.
+ddl_table-951a3e990496	10	last_insert_rowid() counts a row the INSERT skipped.
+insert-7fe928818489	10	last_insert_rowid() counts a row the INSERT skipped.
+schema-002b38e41f46	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-59ef9d1ae8ab	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-63fb6e4dc569	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-723f396a416f	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-7e673b742737	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-81de74fcd0fd	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-8f6226850b5a	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-96ae07283b1f	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-a90c59935c8f	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-b6bf3b1c56dd	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-c059c42d6c9a	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-c63964a21346	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-e23796ab81d4	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+schema-e77753aef164	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
+pragma-54a9c8393c60	17	PRAGMA auto_vacuum set on a new file reads back 0 after a reopen where SQLite keeps the setting.
+pragma-d6afea07dce8	17	PRAGMA auto_vacuum set on a new file reads back 0 after a reopen where SQLite keeps the setting.
+pragma-1f2817dc8a0b	18	PRAGMA automatic_index reads back 1 after it is set off.
+update-02d5fe84c667	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
+update-1f8eca07f4d6	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
+update-337ac58a3792	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
+update-3af72d30a2f2	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
+update-59ed3c779f26	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
+update-89c494f146d8	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
+update-ad9d41ac1155	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
+update-d824844705bc	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
+ddl_index-03ea26e76645	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-0d2429278f06	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-2341284e7732	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-3ba69ebe021b	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-489bd55ac4cd	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-4a16021cb2c0	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-9950fd72b534	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-a736dda084a7	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-b49d9cea6f94	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-c274b35aca71	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+ddl_index-ead144211df8	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+delete-04f903cf949c	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+delete-63ddb3847e94	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+delete-82985dc08026	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+delete-839c5efacfac	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+delete-85fa5d592c6e	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+delete-885c28c1e792	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+insert-0234b339a4da	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+insert-1ed7fa6c7fe7	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+insert-35d5770a78dd	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+insert-4524af9c6cd0	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+insert-4c7dfeb39c5d	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+insert-5c01fe7a91e4	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+insert-75a4dcd9791f	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+insert-991671658178	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+insert-ec8ca94340e8	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+maintenance-0fffb4631a39	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+maintenance-1cde1367b294	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+maintenance-21152997093a	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+maintenance-702fc544989c	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+maintenance-72619e2994f3	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+maintenance-73d0a285d833	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+maintenance-788cb2307133	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+maintenance-7d0bbb5ade3a	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+maintenance-81a1526d833b	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+transaction-ae25725b3d7d	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+update-34dab31a2778	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+update-56dafbea546e	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+update-a98d21c0bb28	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+update-ade8b6b03cb8	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+update-b12e47e198eb	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+update-c0b7848eb2fb	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
+schema-3fd08ec03f58	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
+schema-4bac1079f631	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
+schema-973f04fc7358	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
+schema-9842837de31e	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
+schema-d6f6a14a3a17	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
+schema-f76de9a5b7f8	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
+compound-21fa7cb73e8c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-4a1e3245e6e4	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-67a6802f938b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-68385236aa63	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-6c4d37cbf030	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-6f36c72e8894	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-870b4823ca90	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-b0aa9a9aa4ac	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-be87ac62d744	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-c3b2c98c1f71	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-dcd7d0824e6d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+compound-deb62ff82c19	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-00779cdb08e5	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-0299a973b848	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-032948d05e71	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-0c51fa1f7a0b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-0ef593cff034	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-14978e2117f4	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-16fa4424e683	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-19f179e8d1de	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-1b0ae55ebdba	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-1ed4c18449d6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-2c0abb95c582	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-2d4c755c41ab	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-343ba506d9ce	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-36084834db63	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-38c29ef2a07e	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-38c87e60f343	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-3cc756fba253	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-41ab11def4f6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-455a55f5839f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-4dacb1457d88	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-505c79b3678c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-5135c4c82ca6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-5388b9c635f4	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-568a287a55d4	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-57c8cc93c54c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-5b47b7b529ae	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-5d88d8705f0d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-60e084ee2192	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-6119f4aee694	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-628377db0b73	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-64b716cb52f6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-687d5bd108f0	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-6affdd53d09c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-6c321067e160	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-6dbae8445005	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-77501cba37eb	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-830ee601049f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-85a086d6a584	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-89f68cec9c78	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-90f8f8845395	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-935a817f446d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-97ca507b91d5	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-9d1f971c7004	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-a19157e47e05	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-a3e425dfb815	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-af3d7ba7eb37	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-b600d8637862	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-b88057282cfe	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-ba8749653eeb	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-bbecef094951	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-bf51d471ea26	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-c3b295849918	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-c51769bc33d5	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-cbee84933186	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-ccf783a4a8de	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-d0cfe76ddf04	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-d26269e7052b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-d7b6c6d70a88	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-da02e88d54ad	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-da08c30e3216	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-da15b3c2c079	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-e33f313da5d9	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-e8acea361042	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-ebdefc2b975a	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-ec5dac30fe77	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-f2123cd1d81c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-f2f8e9ab09de	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-f4e88fdd96d4	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-fcf42cab79ee	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+cte-fd01c1352928	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-003454941e4b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-058bfeac8a91	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-0765b50e187e	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-085cebc29077	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-0ce74aa1a8f7	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-0f7fefe54a7c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-1315d00c9970	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-161706fc3d79	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-18fa3ff4fc5d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-19b96f5e5b31	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-207de07b378b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-2ba3833d7e08	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-307de74ab480	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-3393293dc4bc	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-3b0f7538ed11	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-405e7514eb0b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-40f1eb042beb	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-40f502428904	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-42947d6be9c5	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-44948ffbced2	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-475c3d1db28a	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-4af4017257b9	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-4c0075f5e97c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-54d14774083c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-569eb0db4b19	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-5979abf95ed2	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-60a1b6b2e0ba	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-61e8d3c47b94	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-6cabfc8f6408	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-6eba89876b3a	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-6ec6c5bdd988	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-715bb9603296	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-71ab554e8d5f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-72da46f16764	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-7335df57b877	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-7b086c4e2fd1	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-81072c5f3992	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-8292c6ec6fb4	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-8c54d37c02da	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-8d5e64ffa580	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-96d789c60833	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-9c5aa9ffe452	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-a18b422c6b8b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-aba6dd330c6c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-aec7308f417f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-aefebaa88333	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-b03aa3efb3bb	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-b0bd0d8cfb96	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-b14092d82a29	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-bc980df557cb	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-c2d017a659c8	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-c75427069c28	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-cb3f69a22cce	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-ce52ce6a0c55	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-d1a971ccb6ae	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-d29831a310cd	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-d40cf3870d84	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-d56e7a060407	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-ddc0375e37a2	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-e139fcec8968	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-e31d01c7e0ad	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-e4511aa3ee0b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-e713a4d11de8	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-e96746512e0d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-ef744eb46aab	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-fa6cb9a9fa3f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+expression-fe34503496c8	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-083779b33fab	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-085e899ea77c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-0e7dd9b9f633	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-10a7aff9a846	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-129bb6f691a9	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-191d6e03390b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-1f0caac77297	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-20ecacc37aeb	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-285f4628a232	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-2b08619a13ca	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-368a6a2aa721	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-36c5db4aa5da	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-375e5ac4b7b9	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-3eb6e9741a6f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-3f4df7d7f9e9	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-43a120e7e704	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-45457212f417	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-4ec7fa0c1a18	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-4f4c2de8c597	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-57c27cfcccc3	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-7327983be841	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-76da1c817933	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-7e7f8a70362f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-7ec2e0bc3224	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-85fb8ce5be04	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-888dd8e217ad	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-8e49bbf06de1	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-a06242168974	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-a141619445ae	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-a65e131a947b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-a8bb08b0777d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-ae3c7f4560a8	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-aed5890c31fd	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-b3ff2834d926	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-b632455aa32f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-b7b1edd78596	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-b8e9d92f6d8c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-c2928a6a5383	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-c60555d5c7d1	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-cb60be3a18d7	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-d3f448ee5735	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-d4a456dcd79d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-d524040b4fb9	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-d5715d289649	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-d5dacfd13199	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-d9fed743ba81	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-dc5671b3e1c5	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-df889daf46be	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-e58876915894	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-f23fc0599367	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-f24ea53b2295	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-f7cf410021d1	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+function-ffe2b7205fa6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-15eac9819c6c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-1e9dbc40a018	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-2404f6f99dc2	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-2408bb90e3f5	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-4695bf5dac1d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-680678885bf0	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-905e290354d6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-a33cdc3cb94c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-b1b604fb88e0	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-e0d41a473319	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+join-e5bc60420728	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-00e620c0dcbc	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-41d33f46f7cf	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-4ca5c3f33484	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-55376bebc5ee	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-6cfcdc215579	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-6e742595c971	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-820f3637ea79	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-9510e5677656	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-981f8511acc9	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-b94028642db1	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-d1068edbcfae	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-d8f4ed143cd6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+select-f50157ebc924	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+subquery-1211629d0152	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+subquery-15a8f6d19354	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+subquery-16cdd83fc030	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+subquery-5e1430e4a2f4	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+subquery-72f938095124	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+subquery-767c97b094fd	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+subquery-adfb86d71cf2	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-0733066f86f5	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-0f92ebe4c3ea	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-1861fd1938d7	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-2c53545c594f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-349025470b4b	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-39e29a47286e	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-4a102471a033	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-4d3549863a6d	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-546784a989a5	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-58e8a05deee8	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-69df3b9e4699	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-6bcd1badcd40	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-9575105b95d9	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-a4c084f41e1a	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-af373af9ae59	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-b1ba0f906029	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-b1ffe37ec40c	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-b62cb0422540	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-b84fe7a458b1	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-cb7a1662f949	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-d0b35ccb55a6	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-d185ac88345f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-d2c25613c18f	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-e27c89ff7d87	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-e44d45ef2cd8	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-ec0f29d046da	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+window-fcc3a88212a9	23	CREATE TABLE ... AS WITH ... is refused: the CTE, or a column it names, is not found.
+constraint-f09d1380625f	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
+constraint-f31ab9469767	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
+constraint-21c060091480	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
+constraint-34e06397277a	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
+constraint-91a394494308	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
+constraint-96d0571e02c2	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
+constraint-b55455157723	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
+constraint-ec8dae14560d	26	A deferred foreign key broken by an autocommit statement is not checked when the statement commits.
+join-4107c2436917	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+join-5b4031e18907	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+join-6a3eaabeb36c	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+join-8566659e60cb	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+join-de1ea48537b7	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
+function-30799b248f0c	28	sum() over text holding integers returns a real where SQLite returns an integer.
+function-4e3cc3b8841e	28	sum() over text holding integers returns a real where SQLite returns an integer.
+maintenance-03ef7ec52415	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-0f1489d32b44	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-2096611f428f	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-307a757cf5b8	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-564dc1970e39	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-6d3204b2d4c1	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-6f9f409f5724	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-7e3baf86ce79	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-976ad4bc14f4	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-9a265e160190	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-e59e3fe33f96	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-efed3266f217	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-f25ccdcd3e25	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-f4802aab5215	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+maintenance-f90757191118	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
+pragma-02989255d893	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-1977b537fcba	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-2b09712222c6	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-3175adb8aa22	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-3c8fb16d6dad	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-3e7b0abd2608	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-42ad5cb41e04	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-4c3a75e5a5cd	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-60ad350025a6	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-82f4006b2e1e	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-a96a95ec184b	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-b15cc000f9e6	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-bab242742e1e	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-ddb1537a5dd6	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-e25a44e4aee6	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+pragma-f07b02922e18	30	The pragma_<name> table valued function of a setting pragma is "no such table".
+insert-ffc72e9894b2	31	A UNIQUE index violation on a table whose key is not the column reports extended code 1555 where SQLite reports 2067.
+compound-696594bec9af	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+compound-afc0b98586d4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+cte-0cdfac053aef	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+cte-e07f62b0affe	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+expression-746476028706	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+expression-ab097bf032ed	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+function-603dd7b09c10	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+function-7cb84211612f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+function-bf5bf521e95c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+join-663ac17f4346	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+join-857e2083a4db	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+select-394d2e1477ea	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+select-b5295cbd486f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-00468db0053a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-0d4ed1526c09	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-0e68344ae4e3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-1125cc717a89	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-17b5ba549fa9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-2fc87209adfe	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-3c9b8e974d1e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-59c9c2af1b8f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-727f463c4c79	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-a24cf368814a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-ab4b646b7fea	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-b2e75831bbc6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-ba67d1193acb	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-cb2d92060f7e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-de2f8f38f0d5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-de787766c4c6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-f12299c15bc1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-f2bcacaedd56	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-fc091487e57b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+subquery-ff52161c4dd4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+window-2f3d20bec9e8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+window-33a95825054c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+window-5b6419ae7ca8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+window-717fd5508977	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+window-c50cc7c039af	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+window-d4098c7c32ce	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
+vtab-498e056e0267	33	MATCH in this placement is refused as unsupported and no capability row says so.
+vtab-502dc2c0ee37	33	MATCH in this placement is refused as unsupported and no capability row says so.
+vtab-68c092325350	33	MATCH in this placement is refused as unsupported and no capability row says so.
+vtab-6d0c72e53a98	33	MATCH in this placement is refused as unsupported and no capability row says so.
+vtab-9d59df5db229	33	MATCH in this placement is refused as unsupported and no capability row says so.
+vtab-b376e1a10310	33	MATCH in this placement is refused as unsupported and no capability row says so.
+vtab-cd16910cd34e	33	MATCH in this placement is refused as unsupported and no capability row says so.
+update-4ef2683419b0	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
+update-6fef6d29ac84	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
+update-ecd76ed72594	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
+function-d157645a8bba	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
+function-daaca6e23388	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
+compound-values-order	36	An ORDER BY after a VALUES arm of several rows is accepted where SQLite refuses it.
+compound-0364d7c812d7	37	A STRICT table's ANY column converts text that looks like a number into a number.
+cte-0e30a44f5d9a	37	A STRICT table's ANY column converts text that looks like a number into a number.
+cte-301fddd69d86	37	A STRICT table's ANY column converts text that looks like a number into a number.
+cte-6f8e28eed7c1	37	A STRICT table's ANY column converts text that looks like a number into a number.
+cte-bc40db6ca756	37	A STRICT table's ANY column converts text that looks like a number into a number.
+cte-d04a4f3f0a25	37	A STRICT table's ANY column converts text that looks like a number into a number.
+cte-e1bf0e6505b1	37	A STRICT table's ANY column converts text that looks like a number into a number.
+cte-ec3d19ed69c9	37	A STRICT table's ANY column converts text that looks like a number into a number.
+cte-edd45a20e7d5	37	A STRICT table's ANY column converts text that looks like a number into a number.
+ddl_view-04962724de19	37	A STRICT table's ANY column converts text that looks like a number into a number.
+ddl_view-0c7d030f2a49	37	A STRICT table's ANY column converts text that looks like a number into a number.
+ddl_view-71b2c66d8196	37	A STRICT table's ANY column converts text that looks like a number into a number.
+function-69a95dd990f8	37	A STRICT table's ANY column converts text that looks like a number into a number.
+maintenance-399586159851	37	A STRICT table's ANY column converts text that looks like a number into a number.
+maintenance-3b3e6b5a9cd9	37	A STRICT table's ANY column converts text that looks like a number into a number.
+maintenance-9282db63543f	37	A STRICT table's ANY column converts text that looks like a number into a number.
+maintenance-bbe4e2ae65a3	37	A STRICT table's ANY column converts text that looks like a number into a number.
+select-efd4b6883300	37	A STRICT table's ANY column converts text that looks like a number into a number.
+update-3e63718215bd	37	A STRICT table's ANY column converts text that looks like a number into a number.
+window-1d901dd885ae	37	A STRICT table's ANY column converts text that looks like a number into a number.
+window-c291dc70ca94	37	A STRICT table's ANY column converts text that looks like a number into a number.
+ddl_index-1b6fce0c9265	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
+ddl_table-c5978c6cf3ab	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
+ddl_view-5bb6734f4135	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
+ddl_view-f3ba8519d974	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
+delete-4ba69b8726dd	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
+function-5dad128e9338	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
+insert-f83e2eb6accd	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
+update-0bb9b2ba0377	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
+window-cf12b0afa136	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
+ddl_view-1644fad59dd0	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
+ddl_view-2364343b8236	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
+ddl_view-2b4128272c38	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
+ddl_view-37cf5d6cfa1d	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
+ddl_view-76eaa8a82a2c	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
+ddl_view-771de28793d4	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
+ddl_table-390042c209da	41	A generated column is computed from the value before its source column's type converts it.
+maintenance-0c90a3ac751f	42	VACUUM fails on a table with a STORED generated column.
+maintenance-cd55551515df	42	VACUUM fails on a table with a STORED generated column.
+delete-bc5389dc988e	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
+insert-474302bef184	43	An upsert into a virtual table is accepted where SQLite refuses it.
+insert-d9eb0f918417	43	An upsert into a virtual table is accepted where SQLite refuses it.
+insert-db190017b572	43	RETURNING on a write to a virtual table returns nothing where SQLite names its columns.
+update-d5d92b4f8189	43	DELETE ... RETURNING on a virtual table is accepted where SQLite refuses it.
+insert-496da19fbcc3	44	INSERT OR IGNORE ... SELECT into FTS5 fails with constraint failed where SQLite skips the row.
+insert-e2bf17ca55b4	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
+expression-9f127381c5ff	47	The remainder of a real by an integer is an integer where SQLite returns a real.
+expression-c0283448cadf	47	The remainder of a real by an integer is an integer where SQLite returns a real.
+expression-d944e340b58a	47	The remainder of a real by an integer is an integer where SQLite returns a real.
+insert-926fc723d885	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
+insert-fb09024a432d	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
+window-538f7aa32570	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
+ddl_table-3fc9f2d11670	50	PRAGMA table_info reports notnull 0 for a STRICT table's PRIMARY KEY column, which SQLite reports as NOT NULL.
+
+# The retained corpus: the smallest case for each bug (retained/bugs.slt).
+retained-bug-01-commit	1	The smallest case for bug 1.
+retained-bug-01-begin	1	The smallest case for bug 1.
+retained-bug-02-not-null-column	2	The smallest case for bug 2.
+retained-bug-04-escape	4	The smallest case for bug 4.
+retained-bug-05-limit-real	5	The smallest case for bug 5.
+retained-bug-06-unique-index	6	The smallest case for bug 6.
+retained-bug-08-ctas-changes	8	The smallest case for bug 8.
+retained-bug-09-raise-rollback	9	The smallest case for bug 9.
+retained-bug-10-raise-ignore	10	The smallest case for bug 10.
+retained-bug-11-returning-wildcard	11	The smallest case for bug 11.
+retained-bug-12-drop-column-view	12	The smallest case for bug 12.
+retained-bug-16-temp-schema	16	The smallest case for bug 16.
+retained-bug-17-auto-vacuum	17	The smallest case for bug 17.
+retained-bug-18-writable-schema	18	The smallest case for bug 18.
+retained-bug-18-automatic-index	18	The smallest case for bug 18.
+retained-bug-19-row-value-set	19	The smallest case for bug 19.
+retained-bug-20-temp-index	20	The smallest case for bug 20.
+retained-bug-21-temp-qualified	21	The smallest case for bug 21.
+retained-bug-22-analyze-schema	22	The smallest case for bug 22.
+retained-bug-23-ctas-with	23	The smallest case for bug 23.
+retained-bug-26-deferred-fk	26	The smallest case for bug 26.
+retained-bug-27-right-join	27	The smallest case for bug 27.
+retained-bug-28-sum-text	28	The smallest case for bug 28.
+retained-bug-29-stat1-empty	29	The smallest case for bug 29.
+retained-bug-30-pragma-function	30	The smallest case for bug 30.
+retained-bug-31-unique-without-rowid	31	The smallest case for bug 31.
+retained-bug-33-match-derived	33	The smallest case for bug 33.
+retained-bug-34-update-from-partial-index	34	The smallest case for bug 34.
+retained-bug-35-unread-column	35	The smallest case for bug 35.
+retained-bug-37-strict-any	37	The smallest case for bug 37.
+retained-bug-38-negative-zero	38	The smallest case for bug 38.
+retained-bug-39-groups-offset	39	The smallest case for bug 39.
+retained-bug-40-view-type	40	The smallest case for bug 40.
+retained-bug-41-generated-before-type	41	The smallest case for bug 41.
+retained-bug-42-vacuum-generated	42	The smallest case for bug 42.
+retained-bug-43-returning-virtual-table	43	The smallest case for bug 43.
+retained-bug-43-upsert-virtual-table	43	The smallest case for bug 43.
+retained-bug-44-insert-ignore-fts	44	The smallest case for bug 44.
+retained-bug-45-or-rollback-virtual-table	45	The smallest case for bug 45.
+retained-bug-46-shadow-tables	46	The smallest case for bug 46.
+retained-bug-47-real-remainder	47	The smallest case for bug 47.
+retained-bug-48-upsert-target	48	The smallest case for bug 48.
+retained-bug-49-range-over-text	49	The smallest case for bug 49.
+retained-bug-50-strict-primary-key	50	The smallest case for bug 50.

@@ -309,8 +309,11 @@ fn measure(
                         };
                         match judge(&case.id, failures, ran, &known_list, &deliberate) {
                             Judged::Pass | Judged::Expected => {}
-                            Judged::Fail(failures) => failing
-                                .extend(failures.iter().take(3).map(|failure| failure.render())),
+                            Judged::Fail(failures) => {
+                                failing.extend(failures.iter().take(3).map(|failure| {
+                                    format!("{}\n      origin: {}", failure.render(), case.origin)
+                                }))
+                            }
                             Judged::Stale(listed) => failing.push(format!(
                                 "{} is listed as bug {} and now agrees",
                                 case.id, listed.bug
