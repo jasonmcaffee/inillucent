@@ -192,8 +192,15 @@ pub fn compute(rows: &[Vec<OwnedDatum>], plan: &WindowPlan) -> DbResult<Vec<Vec<
             !call.order.is_empty(),
         );
         for partition in &partitions {
+            let mut stepped_a_real = false;
             for row in partition.start..partition.end {
-                let value = evaluate(rows, call, partition, row)?;
+                let mut value = evaluate(rows, call, partition, row)?;
+                if slides_a_sum(call) {
+                    stepped_a_real |= frame_holds_a_real(rows, call, partition, row);
+                    if let (true, OwnedDatum::Int(number)) = (stepped_a_real, &value) {
+                        value = OwnedDatum::Real(*number as f64);
+                    }
+                }
                 if let Some(slot) = extra.get_mut(row) {
                     slot.push(value);
                 }
@@ -209,6 +216,62 @@ pub fn compute(rows: &[Vec<OwnedDatum>], plan: &WindowPlan) -> DbResult<Vec<Vec<
             whole
         })
         .collect())
+}
+
+/// Reports whether a call is `sum()` over a frame whose start moves.
+///
+/// **SQLite computes such a frame by adding the rows that enter it and
+/// removing the rows that leave, with one accumulator for the partition.**
+/// `sum()`'s accumulator records that it has seen a value that is not an
+/// integer, and removing that value does not clear the record, so from then
+/// on every row of the partition answers a real. `sum(a) OVER (ORDER BY a
+/// RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)` over the texts `'0x10'` and
+/// `'10'` is 10.0 on the second row there, although its frame holds only
+/// `'10'`. A frame that starts at `UNBOUNDED PRECEDING` only grows, so the
+/// frame itself already holds every value the accumulator saw. A frame with
+/// an `EXCLUDE` clause is summed afresh for every row in SQLite, so there the
+/// frame's own values decide: `sum(a) OVER (... ROWS BETWEEN CURRENT ROW AND
+/// CURRENT ROW EXCLUDE TIES)` is the integer 5 on a row holding 5 after a row
+/// holding a real.
+///
+/// @param call - the window call
+fn slides_a_sum(call: &WindowCall) -> bool {
+    matches!(call.func, WindowSlot::Aggregate(AggregateKind::Sum))
+        && !matches!(call.frame.start, FrameEnd::UnboundedPreceding)
+        && call.frame.exclude == FrameExclude::NoOthers
+}
+
+/// Reports whether one row's frame holds a value `sum()` adds as a real.
+///
+/// That is every value `sqlite3_value_numeric_type` does not call an
+/// integer: a real, a blob, and text that numeric affinity does not make an
+/// integer. A row the call's `FILTER` drops is never added, and NULL is
+/// skipped.
+///
+/// @param rows - the buffered input
+/// @param call - the window call
+/// @param partition - the row's partition
+/// @param row - the row whose frame is read
+fn frame_holds_a_real(
+    rows: &[Vec<OwnedDatum>],
+    call: &WindowCall,
+    partition: &frames::Partition,
+    row: usize,
+) -> bool {
+    let Some(column) = call.arguments.first() else {
+        return false;
+    };
+    frame_of(rows, call, partition, row)
+        .into_iter()
+        .filter(|member| passes_filter(rows, call, *member))
+        .any(|member| match value_at(rows, member, *column) {
+            Datum::Null | Datum::Int(_) => false,
+            Datum::Real(_) | Datum::Blob(_) => true,
+            text => !matches!(
+                inillucent_value::affinity::apply_numeric_affinity(Value::from(&text), false),
+                Value::Integer(_)
+            ),
+        })
 }
 
 /// Returns one value of one row, or NULL when the column is not there.

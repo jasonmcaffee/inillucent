@@ -708,21 +708,36 @@ pub fn group_array_final(items: Vec<Node>, binary: bool) -> DbResult<Answer> {
 }
 
 /// Folds one label and value into a `json_group_object` accumulator.
+///
+/// **A row whose label is NULL is skipped, value and all.** SQLite's
+/// `jsonObjectStep` reads the label with `sqlite3_value_text` and adds the
+/// member only when that is not NULL, so
+/// `json_group_object(b, a)` over rows whose `b` is NULL leaves them out and
+/// never reads their `a`. This failed the statement with "labels must be
+/// TEXT". A blob label is its bytes read as text, as `sqlite3_value_text`
+/// reads it, and the label ends at its first NUL, as `sqlite3Strlen30` ends it.
+///
+/// @param members - the accumulator
+/// @param label - the member's label
+/// @param value - the member's value
 pub fn group_object_step(
     members: &mut Vec<(Node, Node)>,
     label: &Argument<'_>,
     value: &Argument<'_>,
 ) -> DbResult<()> {
-    let name = match label.value {
-        Value::Text(text) => {
-            String::from_utf8(text.utf8_bytes().to_vec()).map_err(|_| malformed())?
-        }
-        Value::Integer(number) => number.to_string(),
-        Value::Real(number) => {
-            String::from_utf8(numeric::real_to_text(*number)).map_err(|_| malformed())?
-        }
-        _ => return Err(failure("json_group_object() labels must be TEXT")),
+    let bytes = match label.value {
+        Value::Null => return Ok(()),
+        Value::Text(text) => text.utf8_bytes().to_vec(),
+        Value::Blob(blob) => blob.raw().to_vec(),
+        Value::Integer(number) => number.to_string().into_bytes(),
+        Value::Real(number) => numeric::real_to_text(*number),
     };
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    let name = String::from_utf8(bytes.get(..end).unwrap_or_default().to_vec())
+        .map_err(|_| malformed())?;
     members.push((Node::text_escaped(&name), stored(value, false)?));
     Ok(())
 }
