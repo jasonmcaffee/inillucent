@@ -296,6 +296,8 @@ impl ImportedDatabase {
         &self,
         sql: &str,
     ) -> DbResult<(std::rc::Rc<Cached>, u32)> {
+        // See `ImportedDatabase::clear_defer_foreign_keys`.
+        self.load_schema_once(sql);
         // **An authorizer that can refuse is asked every time.** A cached plan
         // is a plan whose authorizer already said yes once, and reusing it
         // would skip the callback on every later execution - so a connection

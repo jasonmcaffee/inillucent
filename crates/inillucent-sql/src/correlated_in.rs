@@ -36,15 +36,74 @@ use crate::bind::{BoundExpr, BoundSelect, BoundStatement, SubqueryKind};
 /// exactly as it was, so the refusal that names it still fires.
 ///
 /// @param statement - the bound statement, rewritten in place
+///
+/// **The statement's triggers are lowered too.** A trigger body is bound
+/// with the statement that fires it, and a correlated `IN` in a body was
+/// refused as not built when the body ran, while the same query typed as a
+/// statement of its own was lowered and answered.
 pub fn lower(statement: &mut BoundStatement) {
-    let mut next = highest_subquery_id(statement).saturating_add(1);
-    let mut rewrite = |expr: &mut BoundExpr| lower_one(expr, &mut next);
+    let mut highest = 0usize;
+    walk_statement(statement, &mut |expr: &mut BoundExpr| {
+        if let BoundExpr::Subquery { id, .. } = expr {
+            highest = highest.max(*id);
+        }
+    });
+    let mut next = highest.saturating_add(1);
+    walk_statement(statement, &mut |expr: &mut BoundExpr| {
+        lower_one(expr, &mut next)
+    });
+}
+
+/// Applies a rewrite to a statement and to every trigger body it fires.
+///
+/// @param statement - the bound statement
+/// @param rewrite - what to do to each expression
+fn walk_statement(statement: &mut BoundStatement, rewrite: crate::rewrite::Rewrite<'_>) {
     match statement {
-        BoundStatement::Select(select) => crate::rewrite::rewrite_select(select, &mut rewrite),
-        BoundStatement::Insert(insert) => crate::rewrite::rewrite_insert(insert, &mut rewrite),
-        BoundStatement::Update(update) => crate::rewrite::rewrite_update(update, &mut rewrite),
-        BoundStatement::Delete(delete) => crate::rewrite::rewrite_delete(delete, &mut rewrite),
+        BoundStatement::Select(select) => crate::rewrite::rewrite_select(select, rewrite),
+        BoundStatement::Insert(insert) => {
+            crate::rewrite::rewrite_insert(insert, rewrite);
+            walk_triggers(&mut insert.triggers, rewrite);
+        }
+        BoundStatement::Update(update) => {
+            crate::rewrite::rewrite_update(update, rewrite);
+            walk_triggers(&mut update.triggers, rewrite);
+        }
+        BoundStatement::Delete(delete) => {
+            crate::rewrite::rewrite_delete(delete, rewrite);
+            walk_triggers(&mut delete.triggers, rewrite);
+        }
         BoundStatement::Directive(_) | BoundStatement::Empty => {}
+    }
+}
+
+/// Applies a rewrite to every statement in some triggers' bodies, and to the
+/// triggers those statements fire in turn.
+///
+/// @param triggers - the triggers
+/// @param rewrite - what to do to each expression
+fn walk_triggers(triggers: &mut [crate::dml::BoundTrigger], rewrite: crate::rewrite::Rewrite<'_>) {
+    use crate::dml::BoundTriggerStatement;
+    for trigger in triggers {
+        for statement in &mut trigger.body {
+            match statement {
+                BoundTriggerStatement::Select(select) => {
+                    crate::rewrite::rewrite_select(select, rewrite)
+                }
+                BoundTriggerStatement::Insert(insert) => {
+                    crate::rewrite::rewrite_insert(insert, rewrite);
+                    walk_triggers(&mut insert.triggers, rewrite);
+                }
+                BoundTriggerStatement::Update(update) => {
+                    crate::rewrite::rewrite_update(update, rewrite);
+                    walk_triggers(&mut update.triggers, rewrite);
+                }
+                BoundTriggerStatement::Delete(delete) => {
+                    crate::rewrite::rewrite_delete(delete, rewrite);
+                    walk_triggers(&mut delete.triggers, rewrite);
+                }
+            }
+        }
     }
 }
 
@@ -225,28 +284,4 @@ fn exists(block: &BoundSelect, extra: Option<BoundExpr>, next: &mut usize) -> Bo
         affinity: None,
         collation: Collation::Binary,
     }
-}
-
-/// Returns the largest subquery number a statement uses.
-///
-/// The rewrite adds blocks, and every block's number has to be one nothing else
-/// in the statement holds: the compiler builds a block once per number and
-/// would otherwise build one of the new blocks in place of an old one.
-///
-/// @param statement - the bound statement
-fn highest_subquery_id(statement: &mut BoundStatement) -> usize {
-    let mut highest = 0usize;
-    let mut look = |expr: &mut BoundExpr| {
-        if let BoundExpr::Subquery { id, .. } = expr {
-            highest = highest.max(*id);
-        }
-    };
-    match statement {
-        BoundStatement::Select(select) => crate::rewrite::rewrite_select(select, &mut look),
-        BoundStatement::Insert(insert) => crate::rewrite::rewrite_insert(insert, &mut look),
-        BoundStatement::Update(update) => crate::rewrite::rewrite_update(update, &mut look),
-        BoundStatement::Delete(delete) => crate::rewrite::rewrite_delete(delete, &mut look),
-        BoundStatement::Directive(_) | BoundStatement::Empty => {}
-    }
-    highest
 }

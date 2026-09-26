@@ -79,7 +79,8 @@ impl crate::ImportedDatabase {
                         .and_then(|index| marks.get(index).map(|(_, mark)| *mark))
                 };
                 let Some(mark) = found else {
-                    return Err(refusal(format!(
+                    // `SQLITE_ERROR` (1), as SQLite answers; `refusal` answered 21.
+                    return Err(inillucent_base::error::statement_refusal(format!(
                         "no such savepoint: {}",
                         String::from_utf8_lossy(name)
                     )));

@@ -219,6 +219,23 @@ pub fn rewrite_update(statement: &mut BoundUpdate, rewrite: Rewrite<'_>) {
     for assignment in &mut statement.assignments {
         rewrite_expr(&mut assignment.value, rewrite);
     }
+    // **The `FROM` terms, and the queries a derived one holds.** They were
+    // left out, so no rewrite reached a derived table in `UPDATE ... FROM`:
+    // a correlated `IN` in its `WHERE` stayed an `IN` and the physical pass
+    // refused it as not built, while the same derived table in a `SELECT` was
+    // lowered to `EXISTS` and answered.
+    for source in &mut statement.from {
+        rewrite_option(source.constraint.as_mut(), rewrite);
+        match &mut source.rows {
+            SourceRows::Table | SourceRows::RecursiveSelf { .. } => {}
+            SourceRows::Subquery(block) => rewrite_select(block, rewrite),
+            SourceRows::Recursive(body) => {
+                for (_, arm) in body.seeds.iter_mut().chain(body.steps.iter_mut()) {
+                    rewrite_select(arm, rewrite);
+                }
+            }
+        }
+    }
     rewrite_option(statement.filter.as_mut(), rewrite);
     for check in &mut statement.checks {
         rewrite_expr(&mut check.expr, rewrite);

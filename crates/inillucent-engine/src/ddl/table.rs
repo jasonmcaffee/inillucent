@@ -175,6 +175,13 @@ impl crate::ImportedDatabase {
     /// write path applies, from column affinity to the `NOT NULL` a declared
     /// type carried over.
     ///
+    /// **In the database the statement named.** `schema_of` left this
+    /// directive out, so `CREATE TABLE aux.copy AS SELECT ...` made `copy` in
+    /// `main`, and `CREATE TEMP TABLE tt AS SELECT ...` made a table that
+    /// outlived the connection. The fill names the database too, so it cannot
+    /// reach a table of the same name in another one.
+    ///
+    /// @param database - which database, as the binder numbered them
     /// @param name - the table's name as written
     /// @param exists - whether a table of that name is already there
     /// @param if_not_exists - whether the statement said so
@@ -182,6 +189,7 @@ impl crate::ImportedDatabase {
     /// @param select_sql - the query, as the source text it was written as
     pub(crate) fn create_table_as_select(
         &mut self,
+        database: usize,
         name: &[u8],
         exists: bool,
         if_not_exists: bool,
@@ -199,8 +207,19 @@ impl crate::ImportedDatabase {
         }
         self.define_table(name, create_sql)?;
         self.refresh_catalog();
+        let schema = match database {
+            crate::MAIN => b"main".to_vec(),
+            crate::TEMP => b"temp".to_vec(),
+            other => self
+                .session_state
+                .attached
+                .get(other.saturating_sub(crate::FIRST_ATTACHED))
+                .map(|held| held.name.clone())
+                .unwrap_or_else(|| b"main".to_vec()),
+        };
         let fill = format!(
-            "INSERT INTO \"{}\" {}",
+            "INSERT INTO \"{}\".\"{}\" {}",
+            String::from_utf8_lossy(&schema).replace('"', "\"\""),
             String::from_utf8_lossy(name).replace('"', "\"\""),
             String::from_utf8_lossy(select_sql)
         );

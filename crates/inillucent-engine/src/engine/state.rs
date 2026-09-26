@@ -489,6 +489,16 @@ impl Pragmas {
 /// lifts them into `Session` - which is what makes two connections two things
 /// rather than two numbers reaching into one.
 pub(crate) struct SessionState {
+    /// The sessions that have run a statement that reads the database.
+    ///
+    /// SQLite loads a connection's schema with the first such statement, and
+    /// loading it clears `PRAGMA defer_foreign_keys`; see
+    /// `ImportedDatabase::settle_defer_foreign_keys`.
+    pub(crate) sessions_read: std::cell::RefCell<std::collections::HashSet<u64>>,
+    /// How many statements are running inside one another: a statement the
+    /// engine runs itself, such as the fill of `CREATE TABLE ... AS SELECT`,
+    /// is one level inside the statement the caller ran.
+    pub(crate) nesting: std::cell::Cell<usize>,
     /// The authorizer every statement is bound under, when one is installed.
     ///
     /// `sqlite3_set_authorizer`'s subject: a callback the binder consults

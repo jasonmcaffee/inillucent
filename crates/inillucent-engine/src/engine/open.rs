@@ -260,6 +260,8 @@ impl crate::ImportedDatabase {
             },
             pragmas: std::rc::Rc::new(Pragmas::fresh()),
             session_state: SessionState {
+                sessions_read: std::cell::RefCell::new(std::collections::HashSet::new()),
+                nesting: std::cell::Cell::new(0),
                 modules_begun: std::cell::Cell::new(false),
                 authorizer: None,
                 collations: Vec::new(),
@@ -585,6 +587,8 @@ impl crate::ImportedDatabase {
             },
             pragmas: std::rc::Rc::new(Pragmas::fresh()),
             session_state: SessionState {
+                sessions_read: std::cell::RefCell::new(std::collections::HashSet::new()),
+                nesting: std::cell::Cell::new(0),
                 modules_begun: std::cell::Cell::new(false),
                 attached: Vec::new(),
                 temps: Vec::new(),

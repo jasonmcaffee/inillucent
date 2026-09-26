@@ -15,31 +15,14 @@
 # at one of those arms, so a cadence that runs the case only at the default arm
 # does not call it fixed.
 
-probe-temp.as.select	8	changes() after CREATE TEMP TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
 
 # Generated cases, grouped by bug. Written from the triage of an inillucent-matrix run;
 # each line's case fails in the way its bug's section on task-2136 describes.
-constraint-f18eefd57be9	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-schema-013cdbdd2c4d	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 schema-4bac1079f631	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
-constraint-f09d1380625f	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
-constraint-34e06397277a	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
-constraint-91a394494308	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
-constraint-ec8dae14560d	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
 pragma-3e7b0abd2608	30	The pragma_<name> table valued function of a setting pragma is "no such table".
-vtab-502dc2c0ee37	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-6d0c72e53a98	33	MATCH in this placement is refused as unsupported and no capability row says so.
 
 # The retained corpus: the smallest case for each bug (retained/bugs.slt).
 retained-bug-65-wide-table-small-page	65@small-pool,sqlite-page	The smallest case for bug 65.
-constraint-690285108c13	1	A transaction misuse fails with code 21 where SQLite gives 1.
-constraint-dc38cbee1a45	1	A transaction misuse fails with code 21 where SQLite gives 1.
-constraint-7f13864f6326	1	A transaction misuse fails with code 21 where SQLite gives 1.
-insert-5aa1dfe0b5fb	1	A transaction misuse fails with code 21 where SQLite gives 1.
-insert-10da80761533	1	A transaction misuse fails with code 21 where SQLite gives 1.
-insert-d40a3e91040d	1	A transaction misuse fails with code 21 where SQLite gives 1.
-schema-68da179d805b	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-schema-a3d515bd4dcc	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 compound-675728531270	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 function-2c26c5b0e1a2	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 function-40a304199e60	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
@@ -48,50 +31,10 @@ subquery-18d45dc81472	20	CREATE INDEX on a TEMP table named without its schema i
 subquery-4c61a7552385	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 schema-9fe38660ce1e	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
 subquery-1887ef877c0b	22	ANALYZE of an attached schema by name is "no such table".
-constraint-0f0c44a959dd	26	With PRAGMA defer_foreign_keys set on a fresh connection, SQLite's schema load clears it and the INSERT fails before a rowid is assigned; inillucent fails at the commit and last_insert_rowid() names the row it undid.
 window-9bfa31d81cdf	28	sum() over text holding integers returns a real where SQLite returns an integer.
 pragma-b5f85a129c9f	30	The pragma_<name> table valued function of a setting pragma is "no such table".
-subquery-0382edc64e05	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-828ef33dbb0f	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-f59b88a40387	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-7b5e6077bc59	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-e513015fa1ae	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-eb815bd585c2	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-1b1159061485	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-99152d407d64	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-40e8a0e3c8b9	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-6d847238bff4	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-d520c9745efd	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-19f098eb36fc	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-6e3b86d481ba	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-896e9a72924b	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-184d438bd6cb	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-6137674499d1	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-e48d3cbe7a52	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-58f312c90ae2	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-8146fda16792	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-f7ade8cab54a	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-3bc0301c76c9	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-54164f2517b9	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-818a4e64a970	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-bcd6dd2b3c2c	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-cd7a6eb1e257	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-e95166f09434	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-f93aabc34ed5	32	A correlated subquery is refused as not built with no capability row that says so.
-vtab-5835c39738da	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-743db933170b	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-05c1dd7e0e22	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-4f82dc773dcd	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-62918fa95155	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-73b845170802	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-88f783eb2300	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-c1309df7426e	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-d7ae003224c1	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-dafb1dd635d2	33	MATCH in this placement is refused as unsupported and no capability row says so.
 function-59e00600e1fc	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
 insert-5aebf7432b2e	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
-insert-74feeab48119	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
-insert-4199efb9fa26	1	ROLLBACK, ROLLBACK TO or RELEASE with no transaction or savepoint to end fails with result code 21 where SQLite gives 1.
 insert-70936f4cce9c	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
 insert-c4e7f9f07e60	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
 probe-lim.columns	65@small-pool,sqlite-page	CREATE TABLE with 2,000 columns fails at a 4,096 byte page and with the small buffer pool.

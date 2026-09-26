@@ -74,6 +74,7 @@ use super::{index_shape, ImportedDatabase, Outcome};
 fn schema_of(directive: &Directive) -> usize {
     match directive {
         Directive::CreateTable { database, .. }
+        | Directive::CreateTableAsSelect { database, .. }
         | Directive::CreateVirtualTable { database, .. }
         | Directive::CreateView { database, .. }
         | Directive::CreateIndex { database, .. }
@@ -228,8 +229,15 @@ impl ImportedDatabase {
                 exists,
                 create_sql,
                 select_sql,
-                ..
-            } => self.create_table_as_select(&name, exists, if_not_exists, create_sql, &select_sql),
+                database,
+            } => self.create_table_as_select(
+                database,
+                &name,
+                exists,
+                if_not_exists,
+                create_sql,
+                &select_sql,
+            ),
             // **`USING inillucent_hnsw` is sugar for a store plus a promise.**
             // The store is an ordinary `inillucent_search` virtual table over
             // the same HNSW `inillucent-core` builds for the retrieval engine,

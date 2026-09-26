@@ -11,7 +11,6 @@
 //! three - a module now hears about `savepoint` and `release`, where before it
 //! heard about neither - which is what made the seam worth taking.
 
-use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
 
 use crate::ImportedDatabase;
@@ -108,7 +107,8 @@ impl ImportedDatabase {
             .iter()
             .rposition(|(held, _)| *held == folded);
         let Some(position) = found else {
-            return Err(refusal(format!(
+            // `SQLITE_ERROR` (1), as SQLite answers; `refusal` answered 21.
+            return Err(inillucent_base::error::statement_refusal(format!(
                 "no such savepoint: {}",
                 String::from_utf8_lossy(name)
             )));

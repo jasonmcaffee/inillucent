@@ -1033,6 +1033,23 @@ impl<'a> Binder<'a> {
             if !planned.is_check && trigger.time == ast::TriggerTime::Before {
                 mark_raises(&mut one, false);
             }
+            // **`PRAGMA defer_foreign_keys` defers the parent's side too.** A
+            // parent action whose body only checks - `RESTRICT`, and `NO
+            // ACTION` - is dropped while it is on, and the commit's check of
+            // every key takes its place: SQLite's `fkActionTrigger` builds no
+            // `RESTRICT` program under `SQLITE_DeferFKs`, and its `NO ACTION`
+            // check adds to the deferred counter. A `DELETE` a `RESTRICT` key
+            // refused inside `BEGIN` therefore runs there, as it does in
+            // SQLite. The actions that change rows still run.
+            if self.defer_foreign_keys
+                && !planned.is_check
+                && one
+                    .body
+                    .iter()
+                    .all(|statement| matches!(statement, BoundTriggerStatement::Select(_)))
+            {
+                continue;
+            }
             bound.push(one);
         }
         Ok(bound)

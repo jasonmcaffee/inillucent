@@ -43,7 +43,17 @@ impl crate::ImportedDatabase {
         // lets a second process have the file between statements, and what makes
         // this connection notice when one has written to it.
         self.enter(Self::writes_of(cached))?;
+        let reads = self.session_state.nesting.get() == 0 && opens_a_transaction(cached);
+        self.session_state
+            .nesting
+            .set(self.session_state.nesting.get().saturating_add(1));
         let outcome = self.apply_compiled(cached, params);
+        self.session_state
+            .nesting
+            .set(self.session_state.nesting.get().saturating_sub(1));
+        if reads && self.writing.batch().is_none() {
+            self.clear_defer_foreign_keys();
+        }
         self.leave()?;
         let outcome = outcome?;
         // **The cyclic half of a foreign key's action happens here**, after the
@@ -237,6 +247,65 @@ impl crate::ImportedDatabase {
         let plan = plan_select_with(select, self.pragmas.levers());
         let prepared = physical::prepare_any(&plan, self)?;
         Ok(physical::run_any_prepared(&plan, self, &prepared, params)?.0)
+    }
+
+    /// Clears `PRAGMA defer_foreign_keys` where SQLite clears it.
+    ///
+    /// **SQLite clears it at the end of every transaction**, and an autocommit
+    /// statement that reads or writes a table is a transaction of its own: after
+    /// `PRAGMA defer_foreign_keys = ON; SELECT count(*) FROM p` it reads 0,
+    /// while after `SELECT 2`, which opens no transaction, it still reads 1.
+    /// It also clears it when a connection loads its schema, which happens
+    /// before the first such statement runs: so the setting made right after a
+    /// connection opens does not reach the statement after it, and an `INSERT`
+    /// that breaks a key then fails at the row. Both were measured on the
+    /// pinned 3.53.4. inillucent kept the setting until the next `COMMIT`.
+    ///
+    /// The flag is read when a statement is bound, so the compiled statements
+    /// are dropped when it changes, as the pragma itself does.
+    ///
+    /// This half runs when an autocommit statement that read or wrote a table
+    /// ends; [`ImportedDatabase::load_schema_once`] is the other.
+    pub(crate) fn clear_defer_foreign_keys(&self) {
+        if self.pragmas.defer_foreign_keys() {
+            self.pragmas.set_defer_foreign_keys(false);
+            self.forget_compiled_statements();
+        }
+    }
+
+    /// Clears `PRAGMA defer_foreign_keys` before a session's first statement
+    /// that is not a pragma is compiled, which is where SQLite loads the
+    /// schema.
+    ///
+    /// Before the compile, because the flag decides how a foreign key is
+    /// bound: an `INSERT` compiled with it set carries no check at all.
+    ///
+    /// @param sql - the statement about to be compiled
+    pub(crate) fn load_schema_once(&self, sql: &str) {
+        let head = sql
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // A pragma and a transaction statement read no table, so they load
+        // no schema; `BEGIN` on its own leaves the setting as it was.
+        if matches!(
+            head.as_str(),
+            "pragma" | "begin" | "commit" | "end" | "rollback" | "savepoint" | "release"
+        ) {
+            return;
+        }
+        let session = self.session_state.session.get();
+        let first = self
+            .session_state
+            .sessions_read
+            .borrow_mut()
+            .insert(session);
+        // Inside a transaction the load's read is part of the transaction and
+        // ends nothing, so the setting stands until the transaction ends.
+        if first && self.writing.batch().is_none() {
+            self.clear_defer_foreign_keys();
+        }
     }
 
     /// Runs one already-compiled statement, without settling anything after it.
@@ -1348,5 +1417,31 @@ fn values_hold_subquery(statement: &inillucent_sql::dml::BoundInsert) -> bool {
             .flatten()
             .any(inillucent_sql::plan::expression_holds_subquery),
         inillucent_sql::dml::BoundInsertSource::Select(_) => false,
+    }
+}
+
+/// Reports whether a statement reads or writes a table, which is what opens a
+/// transaction in SQLite.
+///
+/// A query over no table (`SELECT 2`) opens none, and neither does a pragma or
+/// a transaction statement. See `ImportedDatabase::settle_defer_foreign_keys`.
+///
+/// @param cached - the compiled statement
+fn opens_a_transaction(cached: &Cached) -> bool {
+    match cached {
+        Cached::Select(plan, ..) => !plan.select.sources.is_empty() || plan.subqueries,
+        Cached::Nothing | Cached::QueryPlan(_) | Cached::Program(_) => false,
+        Cached::Ddl(sql) => {
+            let head = sql
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            !matches!(
+                head.as_str(),
+                "pragma" | "begin" | "commit" | "end" | "rollback" | "savepoint" | "release"
+            )
+        }
+        _ => true,
     }
 }
