@@ -69,6 +69,55 @@ pub fn real_value(value: &Value<'_>) -> f64 {
     }
 }
 
+/// Returns the number SQLite's arithmetic reads a value as.
+///
+/// This is `computeNumericType` in SQLite's `vdbe.c`, which every arithmetic
+/// operator uses to decide between integer and real arithmetic. It is not
+/// [`numerify`] and not numeric affinity, and the differences are visible:
+///
+/// - text that is not wholly a number still has a class. `'abc'` and `'12x'`
+///   are the integers 0 and 12, so `'abc' / 2` is the integer 0, and
+///   `'0.5-1.75'` is the real 0.5, so `- '0.5-1.75'` is -0.5. Reading those
+///   through numeric affinity left them text, and the callers then counted
+///   them as zero or divided in floating point;
+/// - a complete number whose digits do not also read as a clean integer is a
+///   real. `'12' || x'00'` is the complete integer 12 to `atof`, which stops
+///   at the NUL, and not to `atoi64`, which does not, so `('12' || x'00') + 1`
+///   is the real 13.0 in 3.53.4.
+///
+/// A number is returned as it is, and NULL is returned as NULL.
+///
+/// @param value - the operand
+pub fn arithmetic_number(value: &Value<'_>) -> Value<'static> {
+    let (raw, text_encoding) = match value {
+        Value::Null => return Value::Null,
+        Value::Integer(integer) => return Value::Integer(*integer),
+        Value::Real(real) => return Value::Real(*real),
+        Value::Text(text) => (text.raw(), text.encoding()),
+        Value::Blob(blob) => (blob.raw(), TextEncoding::Utf8),
+    };
+    let parsed = numeric::atof(raw, text_encoding);
+    let code = parsed.code();
+    let (integer, syntax) = numeric::atoi64(raw, text_encoding);
+    // `sqlite3Atoi64`'s return code: 0 for a clean integer, 1 for digits with
+    // something after them, -1 for no digits, and 2 or 3 for an overflow.
+    let clean = syntax == IntegerSyntax::Exact;
+    let at_most_trailing = matches!(
+        syntax,
+        IntegerSyntax::Exact | IntegerSyntax::TrailingBytes | IntegerSyntax::NoDigits
+    );
+    let is_integer = if code <= 0 {
+        code == 0 && at_most_trailing
+    } else {
+        code & 2 == 0 && clean
+    };
+    if is_integer {
+        Value::Integer(integer)
+    } else {
+        Value::Real(parsed.value)
+    }
+}
+
 /// Casts to NUMERIC, which chooses between integer and real.
 ///
 /// This is `sqlite3VdbeMemNumerify`. A value that already is a number is left

@@ -21,23 +21,36 @@ enum NumericKind {
     Integer(i64),
     /// The value is a real.
     Real(f64),
-    /// The value is neither and counts as zero.
-    NotNumeric,
 }
 
 /// Classifies an operand the way SQLite's `numericType` does.
+///
+/// Every text and blob has a class: `'abc'` is the integer 0 and `'1.5x'` the
+/// real 1.5. This used to go through numeric affinity, which leaves text that
+/// is not wholly a number as text, and such an operand was then read in
+/// floating point: `'abc' / 2` was 0.0 where SQLite answers 0, and
+/// `- '12x'` was 0 where SQLite answers -12. The caller has already returned
+/// NULL for a NULL operand, which is the only value with no class.
+///
+/// @param value - the operand, which is not NULL
 fn classify(value: &Value<'_>) -> NumericKind {
-    match value {
-        Value::Integer(integer) => NumericKind::Integer(*integer),
-        Value::Real(real) => NumericKind::Real(*real),
-        Value::Text(_) | Value::Blob(_) => {
-            match affinity::apply_numeric_affinity(value.clone(), false) {
-                Value::Integer(integer) => NumericKind::Integer(integer),
-                Value::Real(real) => NumericKind::Real(real),
-                _ => NumericKind::NotNumeric,
-            }
-        }
-        Value::Null => NumericKind::NotNumeric,
+    match cast::arithmetic_number(value) {
+        Value::Real(real) => NumericKind::Real(real),
+        Value::Integer(integer) => NumericKind::Integer(integer),
+        _ => NumericKind::Integer(0),
+    }
+}
+
+/// Returns the double an operand of a given class reads as.
+///
+/// This is `sqlite3VdbeRealValue`, which SQLite's floating point arithmetic
+/// uses for both operands whatever class each was given.
+///
+/// @param kind - the operand's class and value
+fn real_of(kind: NumericKind) -> f64 {
+    match kind {
+        NumericKind::Integer(integer) => integer as f64,
+        NumericKind::Real(real) => real,
     }
 }
 
@@ -65,42 +78,58 @@ pub fn arithmetic(
             cast::integer_value(right),
             false,
         )),
-        BinaryOp::Modulo => remainder(left, right),
         _ => numeric_arithmetic(op, left, right),
     }
 }
 
-/// Evaluates `+`, `-`, `*` and `/`.
+/// Evaluates `+`, `-`, `*`, `/` and `%`, as SQLite's `OP_Add` and its
+/// neighbours do.
+///
+/// Two integer operands use integer arithmetic. Anything else, and an integer
+/// operation that overflows, is computed in floating point, and the answer
+/// narrows back to an integer only when neither operand was a real and the
+/// operands were not two integers that overflowed. That one rule covers all
+/// five operators: `'abc' / 2` is the integer 0 because both operands are
+/// integers, and `7.0 % 2` is the real 1.0 because one operand is a real.
+///
+/// @param op - the operator
+/// @param left - the left operand, which is not NULL
+/// @param right - the right operand, which is not NULL
 fn numeric_arithmetic(op: BinaryOp, left: &Value<'_>, right: &Value<'_>) -> Value<'static> {
     let kind_left = classify(left);
     let kind_right = classify(right);
-    if let (NumericKind::Integer(a), NumericKind::Integer(b)) = (kind_left, kind_right) {
-        if let Some(value) = integer_arithmetic(op, a, b) {
-            return value;
+    let both_integers = match (kind_left, kind_right) {
+        (NumericKind::Integer(a), NumericKind::Integer(b)) => {
+            if let Some(value) = integer_arithmetic(op, a, b) {
+                return value;
+            }
+            true
         }
-    }
-    let a = cast::real_value(left);
-    let b = cast::real_value(right);
+        _ => false,
+    };
     let result = match op {
-        BinaryOp::Add => a + b,
-        BinaryOp::Subtract => a - b,
-        BinaryOp::Multiply => a * b,
+        BinaryOp::Add => real_of(kind_left) + real_of(kind_right),
+        BinaryOp::Subtract => real_of(kind_left) - real_of(kind_right),
+        BinaryOp::Multiply => real_of(kind_left) * real_of(kind_right),
         BinaryOp::Divide => {
-            if b == 0.0 {
+            let divisor = real_of(kind_right);
+            if divisor == 0.0 {
                 return Value::Null;
             }
-            a / b
+            real_of(kind_left) / divisor
         }
+        BinaryOp::Modulo => match real_remainder(left, right) {
+            Some(remainder) => remainder,
+            None => return Value::Null,
+        },
         _ => return Value::Null,
     };
     if result.is_nan() {
         return Value::Null;
     }
-    // A result computed in floating point narrows back when neither operand
-    // was really a real. This is what makes `typeof('abc' + 1)` an integer.
     let either_was_real =
         matches!(kind_left, NumericKind::Real(_)) || matches!(kind_right, NumericKind::Real(_));
-    if either_was_real || op == BinaryOp::Divide {
+    if either_was_real || both_integers {
         return Value::Real(result);
     }
     match affinity::integer_affinity(Value::Real(result)) {
@@ -111,6 +140,13 @@ fn numeric_arithmetic(op: BinaryOp, left: &Value<'_>, right: &Value<'_>) -> Valu
 
 /// Evaluates integer arithmetic, returning `None` when it overflows and the
 /// operation has to be redone in floating point.
+///
+/// `%` never overflows here: SQLite turns a divisor of -1 into 1, which is
+/// what keeps `i64::MIN % -1` at zero rather than trapping.
+///
+/// @param op - the operator
+/// @param a - the left operand
+/// @param b - the right operand
 fn integer_arithmetic(op: BinaryOp, a: i64, b: i64) -> Option<Value<'static>> {
     let value = match op {
         BinaryOp::Add => a.checked_add(b)?,
@@ -125,23 +161,32 @@ fn integer_arithmetic(op: BinaryOp, a: i64, b: i64) -> Option<Value<'static>> {
             }
             a / b
         }
+        BinaryOp::Modulo => {
+            if b == 0 {
+                return Some(Value::Null);
+            }
+            let divisor = if b == -1 { 1 } else { b };
+            a % divisor
+        }
         _ => return None,
     };
     Some(Value::Integer(value))
 }
 
-/// Evaluates `%`, which SQLite computes on integers whatever it was given.
-fn remainder(left: &Value<'_>, right: &Value<'_>) -> Value<'static> {
+/// Computes `%` when an operand is a real, as SQLite does: both operands are
+/// truncated to integers, and the remainder of those is the answer, as a double.
+///
+/// Returns `None` when the divisor truncates to zero, which is NULL.
+///
+/// @param left - the dividend
+/// @param right - the divisor
+fn real_remainder(left: &Value<'_>, right: &Value<'_>) -> Option<f64> {
     let divisor = cast::integer_value(right);
     if divisor == 0 {
-        return Value::Null;
+        return None;
     }
-    let dividend = cast::integer_value(left);
-    if divisor == -1 {
-        // `i64::MIN % -1` overflows in Rust and is zero in SQLite.
-        return Value::Integer(0);
-    }
-    Value::Integer(dividend % divisor)
+    let divisor = if divisor == -1 { 1 } else { divisor };
+    Some((cast::integer_value(left) % divisor) as f64)
 }
 
 /// Shifts, with SQLite's out-of-range and negative-count behaviour.
@@ -283,18 +328,19 @@ pub fn logical_not(value: &Value<'_>) -> Value<'static> {
 }
 
 /// Evaluates unary minus.
+///
+/// SQLite compiles `-x` as `0 - x`, so it is that subtraction: `- '12x'` is
+/// -12, `- '0.5-1.75'` is -0.5 and `- x'31'` is -1, where reading the operand
+/// through numeric affinity made all three zero. A negated literal never gets
+/// here, because the binder folds its sign into the literal as SQLite's
+/// parser does, which is what keeps `-0.0` a negative zero.
+///
+/// @param value - the operand
 pub fn negate(value: &Value<'_>) -> Value<'static> {
     if value.is_null() {
         return Value::Null;
     }
-    match classify(value) {
-        NumericKind::Integer(integer) => match integer.checked_neg() {
-            Some(negated) => Value::Integer(negated),
-            None => Value::Real(-(integer as f64)),
-        },
-        NumericKind::Real(real) => Value::Real(-real),
-        NumericKind::NotNumeric => Value::Integer(0),
-    }
+    numeric_arithmetic(BinaryOp::Subtract, &Value::Integer(0), value)
 }
 
 /// Evaluates `~`.
@@ -349,10 +395,11 @@ mod tests {
             ),
             Value::Real(9.223372036854776e18)
         );
-        // `%` truncates its operands to integers.
+        // `%` truncates its operands to integers, and answers a real when
+        // either operand was one.
         assert_same!(
             arithmetic(BinaryOp::Modulo, &Value::Real(5.5), &Value::Real(2.5), utf8),
-            Value::Integer(1)
+            Value::Real(1.0)
         );
     }
 

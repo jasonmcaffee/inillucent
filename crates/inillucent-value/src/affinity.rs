@@ -161,7 +161,7 @@ pub fn apply_numeric_affinity<'a>(value: Value<'a>, try_for_integer: bool) -> Va
         return value;
     }
     if parsed.syntax == RealSyntax::Integer {
-        if let Some(integer) = also_an_integer(raw, encoding, parsed.value) {
+        if let Some(integer) = also_an_integer(raw, encoding) {
             return Value::Integer(integer);
         }
     }
@@ -177,14 +177,20 @@ pub fn apply_numeric_affinity<'a>(value: Value<'a>, try_for_integer: bool) -> Va
 
 /// Reports the integer a value with integer syntax should become.
 ///
-/// SQLite prefers the double when the double is exactly the integer, and falls
-/// back to reading the digits directly, which is what lets a nineteen-digit
-/// literal keep every bit rather than going through a double first.
-fn also_an_integer(raw: &[u8], encoding: TextEncoding, real: f64) -> Option<i64> {
-    let candidate = numeric::real_to_i64(real);
-    if numeric::real_same_as_int(real, candidate) {
-        return Some(candidate);
-    }
+/// This is `rc==1 && sqlite3Atoi64(...)==0` in SQLite's
+/// `applyNumericAffinity`: the digits are read directly, which is what lets a
+/// nineteen digit literal keep every bit rather than going through a double.
+///
+/// **The digits must be the whole text, NUL included.** `atof` stops at a
+/// NUL and `atoi64` does not, so `'12' || x'00'` is integer syntax to the
+/// first and trailing bytes to the second, and SQLite makes it the real 12.0.
+/// This used to accept the double as well whenever it was exactly an integer,
+/// which made that text the integer 12 wherever the real was not narrowed
+/// afterwards, as in `sum()`. For text with no NUL the two tests agree.
+///
+/// @param raw - the text
+/// @param encoding - how the text is encoded
+fn also_an_integer(raw: &[u8], encoding: TextEncoding) -> Option<i64> {
     let (integer, syntax) = numeric::atoi64(raw, encoding);
     syntax.is_exact().then_some(integer)
 }

@@ -302,10 +302,17 @@ fn real_of(value: &Datum<'_>) -> f64 {
 /// `None` and resolves such a row to its peer group instead, which is what
 /// SQLite answers.
 ///
+/// A text or blob value is not a number either, but it is not NULL: SQLite
+/// leaves it unoffset, so its frame is its peer group, and it sorts above
+/// every number. It is passed as NaN, which `frames::range_bound` reads that
+/// way. Reading `'9'` as the number 9 put it inside the frames of numbers and
+/// of other text that SQLite keeps apart.
+///
 /// @param value - the row's ordering value
 fn real_or_null(value: &Datum<'_>) -> Option<f64> {
     match value {
         Datum::Null => None,
+        Datum::Text(_) | Datum::Blob(_) => Some(f64::NAN),
         other => Some(real_of(other)),
     }
 }

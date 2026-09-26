@@ -286,7 +286,8 @@ pub fn offset_row(
 /// @param row - the row whose frame this is
 /// @param spec - the frame, with its offsets already resolved
 /// @param order_value - the row's single `ORDER BY` value, for a `RANGE` offset,
-///   and `None` when that value is NULL
+///   `None` when that value is NULL, and NaN when it is text or a blob, which
+///   SQLite does not offset
 /// @param descending - whether that ordering term is descending
 pub fn frame(
     partition: &Partition,
@@ -496,6 +497,7 @@ fn group_bound(
 /// @param preceding - whether it counts backwards
 /// @param is_start - whether this is the frame's start
 /// @param order_value - the ordering value of a row, `None` when it is NULL
+///   and NaN when it is text or a blob
 /// @param descending - whether the ordering term is descending
 fn range_bound(
     partition: &Partition,
@@ -514,13 +516,24 @@ fn range_bound(
     // beside them. This engine read a NULL as `0.0`, which put every NULL row
     // one unit away from zero and, worse, put the NULL rows *inside* the frame
     // of every row whose value was near zero.
+    //
+    // **A text or blob ordering value is its own bound.** SQLite adds the
+    // offset only to a value that sorts below the empty string, so a text row's
+    // bound is the text itself and its frame is its peer group; and a text
+    // value sorts above every number, so no number's frame reaches it from
+    // below. The caller passes such a value as NaN. Reading the text as a number
+    // put `'9'` within one of `'1e2'`'s neighbours and counted rows SQLite
+    // leaves out.
     let (peer_start, peer_end) = partition.peers_of(row);
-    let Some(here) = order_value(row) else {
-        return Some(if is_start {
-            peer_start
-        } else {
-            peer_end.saturating_sub(1)
-        });
+    let here = match order_value(row) {
+        Some(here) if !here.is_nan() => here,
+        _ => {
+            return Some(if is_start {
+                peer_start
+            } else {
+                peer_end.saturating_sub(1)
+            })
+        }
     };
     let offset = offset as f64;
     let limit = if preceding != descending {
@@ -537,6 +550,9 @@ fn range_bound(
         let Some(value) = order_value(member) else {
             continue;
         };
+        // Text sorts above every number, which is what an infinity does in
+        // each of the four comparisons below.
+        let value = if value.is_nan() { f64::INFINITY } else { value };
         let inside = if is_start {
             if descending {
                 value <= limit

@@ -212,7 +212,7 @@ pub fn insert_at(
         // `CHECK` all test the value that will actually be stored, and after
         // affinity `'42'` in an `INTEGER` column *is* the integer 42.
         let mut image = image;
-        declarations.apply_affinity(&mut image);
+        plan.convert(&declarations, &space, &mut image)?;
         // **The statement's own `OR` algorithm, not the upsert's arm.** A
         // `NOT NULL` or a `CHECK` is not a key collision, and an
         // `ON CONFLICT ... DO NOTHING` says nothing about one: SQLite raises

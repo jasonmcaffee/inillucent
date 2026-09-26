@@ -93,7 +93,7 @@ pub fn logical_row(
             let physical = info
                 .columns
                 .get(declared)
-                .map(|column| physical_for(column.affinity).0)
+                .map(|column| physical_of(column).0)
                 .unwrap_or(PhysicalType::Any);
             stored_as(physical, value)
         })
@@ -218,7 +218,7 @@ pub(crate) fn table_shape(info: &TableInfo) -> (Vec<ColumnSpec>, SourceLayout) {
             continue;
         }
         let (physical, static_type) = match info.columns.get(declared) {
-            Some(column) => physical_for(column.affinity),
+            Some(column) => physical_of(column),
             None => (PhysicalType::Any, StaticType::Unknown),
         };
         columns.push(
@@ -351,7 +351,7 @@ pub(crate) fn keyed_table_shape(
     let mut slots: Vec<Option<usize>> = vec![None; width];
     for (position, declared) in order.iter().enumerate() {
         let (physical, static_type) = match info.columns.get(*declared) {
-            Some(column) => physical_for(column.affinity),
+            Some(column) => physical_of(column),
             None => (PhysicalType::Any, StaticType::Unknown),
         };
         let collation = info
@@ -607,7 +607,7 @@ pub(crate) fn index_shape(
         // tree is not ordered by any column a query can name.
         let computed = column.expr_sql.is_some();
         let (physical, static_type) = match table.columns.get(declared) {
-            Some(info) if !computed => physical_for(info.affinity),
+            Some(info) if !computed => physical_of(info),
             _ => (PhysicalType::Any, StaticType::Unknown),
         };
         let collation = key_collation(table, declared, column);
@@ -665,7 +665,7 @@ pub(crate) fn index_shape(
         // the entry - which is what an index on such a table is worth.
         for (offset, declared) in trailing.iter().enumerate() {
             let (physical, static_type) = match table.columns.get(*declared) {
-                Some(info) => physical_for(info.affinity),
+                Some(info) => physical_of(info),
                 None => (PhysicalType::Any, StaticType::Unknown),
             };
             let collation = table
@@ -777,6 +777,24 @@ fn collation_of(folded: &[u8]) -> Collation {
         b"RTRIM" => Collation::RTrim,
         _ => Collation::Binary,
     }
+}
+
+/// Chooses a mini-column layout for one column.
+///
+/// **An `ANY` column keeps the `Any` layout whatever its affinity.** In a
+/// `STRICT` table its affinity is BLOB, because SQLite converts nothing stored
+/// there, but until that was fixed it was NUMERIC, and every file written with
+/// such a table laid the column out as `Any`. The layout is derived from the
+/// `CREATE` text each time a file is opened, so choosing it by the corrected
+/// affinity would read those files with a layout they were not written in. An
+/// `ANY` column holds every class, which is what `Any` is for.
+///
+/// @param column - the column
+fn physical_of(column: &inillucent_sql::catalog_view::ColumnInfo) -> (PhysicalType, StaticType) {
+    if column.declared_type.eq_ignore_ascii_case(b"ANY") {
+        return (PhysicalType::Any, StaticType::Unknown);
+    }
+    physical_for(column.affinity)
 }
 
 /// Chooses a mini-column layout for a declared affinity.
