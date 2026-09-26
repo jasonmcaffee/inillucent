@@ -535,61 +535,9 @@ constraint-dc38cbee1a45	1	A transaction misuse fails with code 21 where SQLite g
 constraint-7f13864f6326	1	A transaction misuse fails with code 21 where SQLite gives 1.
 insert-5aa1dfe0b5fb	1	A transaction misuse fails with code 21 where SQLite gives 1.
 insert-10da80761533	1	A transaction misuse fails with code 21 where SQLite gives 1.
-insert-c501d978b033	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 insert-c7bd528fccf7	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-insert-a64443b3091f	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
-insert-b0ce0f9e9a98	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 insert-d40a3e91040d	1	A transaction misuse fails with code 21 where SQLite gives 1.
-ddl_index-9d12f13af767	6	CREATE UNIQUE INDEX over duplicate values fails with code 21 where SQLite gives 19.
-ddl_table-00be720d8e3c	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-0cb36e2c925c	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-1924d8f3ad92	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-3bc78569e21b	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-99693443bfb8	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-c454a0f2cc7c	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-e82b00af21ee	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-f71a1d157105	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-299acaee87b0	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-74dde2f9f9d8	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-8e73dda48178	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 ddl_table-b0b2e7be6016	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-decbfd647aee	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-e9511cb54935	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-10a9aecd0341	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-2f9f3ed948fb	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-8a2314f077cd	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-926d980b7ca1	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-a6aa8d118be0	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-ab14a16d9ff3	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-d644d01ef92a	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-fe18453cf382	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-3bc0c985747f	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-66d62850d932	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-7c79ef24d424	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-aab3304f166f	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-d383359aa7b1	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-f2f646ed7960	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-009c7d7dd407	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-1ad64b18d660	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-477066413b5f	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-5781d535f878	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-92101b70498d	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-969de2d452fc	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-9fb234783106	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-c9b02cf6b886	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-da702a07a5c2	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-dbafda6c4947	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-05b43b5f3ce8	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-125aefced1c2	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-238fd6045cc4	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-871869dcb4bd	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-8f89efdfd446	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-92dc102ac5a3	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-935aca160245	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-996241d69682	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-c4821a1c62cb	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-c6d7ea032739	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-ddl_table-dbda9f768cf6	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 schema-68da179d805b	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 schema-8dce41e6e88b	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
 schema-96b72e4d43cb	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
@@ -601,49 +549,11 @@ window-0694c72a204b	8	changes() after CREATE TABLE AS SELECT counts the copied r
 window-415d3624c22f	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
 window-fbb4d46a6719	8	changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves it alone.
 function-a9b0a5dabd92	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
-function-15a03050b1f7	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
-function-9c713c3d4998	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
 function-3aeccbee7d9e	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
-function-61916351cd50	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
 function-17232e51861f	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
 function-e16acbdaca74	9	last_insert_rowid() after a statement whose trigger fails is 0 where SQLite keeps the inserted row's id.
-ddl_index-1c429e241ce3	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_index-7c058cee5bb4	10	last_insert_rowid() counts a row the INSERT skipped.
 ddl_table-8d326329c6a8	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-a7370b14f226	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-b2427dd0459f	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-d5ed60684e51	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-f69dc034f5be	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-2b31463fd634	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-5131785ee570	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-7313b011fe3b	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-8e4e2efcc3d0	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-e3b6e207ce08	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-fa34aae24089	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_index-af230bed957e	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_index-b8df165ff657	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-0d35f6b31b17	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-22eb0351268d	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-6fcbde1ab09a	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-05940cfc2cce	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-0c040a3e3b20	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-21aa08e9f8b6	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-2973e1e8a24d	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-2ffe4eb42209	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-410b58e00a96	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-71cbe02434d0	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-e098ef788191	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-f58ba5bb3bfe	10	last_insert_rowid() counts a row the INSERT skipped.
 ddl_table-f779a2a90616	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-28650eacb0be	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-2bcef6610e41	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-fd6b31de3845	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-2e0cc8e5c709	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-484537417a7e	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-6219b3979576	10	last_insert_rowid() counts a row the INSERT skipped.
-ddl_table-902d1fcd2fc2	10	last_insert_rowid() counts a row the INSERT skipped.
-insert-7441956c0f92	10	last_insert_rowid() counts a row the INSERT skipped.
-insert-3acda1afbc97	10	last_insert_rowid() counts a row the INSERT skipped.
 schema-0809f42d4385	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
 schema-2740ed27abb3	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
 schema-3cf869e902b4	16	sqlite_temp_schema is "no such table" on a connection that has made no TEMP object.
@@ -682,67 +592,7 @@ pragma-9fb1802fbd57	17	PRAGMA auto_vacuum set on a new file reads back 0 after a
 pragma-4a001ae65bfd	18	PRAGMA automatic_index reads back 1 after it is set off.
 pragma-a8d15cdb9f55	18	PRAGMA automatic_index reads back 1 after it is set off.
 pragma-9d09ee3ff3fb	18	PRAGMA automatic_index reads back 1 after it is set off.
-update-8e7d987e70ca	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-b9b1528785a8	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-dcc7c5bbdfd7	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-e6b3ce35750b	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
 update-ea97a9cd7a07	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-14a1823d124d	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-1b6ea1e067e8	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-2cc9116ab016	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-2e7b01e27e2a	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-4f9b8c85cb9b	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-727fef3d5785	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-8c87b3df4a09	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-92ec66f4f352	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-9d08e9cd0cbd	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-b9a57fd7e984	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-e1c1564f23eb	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-e29c2b4bbf46	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-0ead77fde5c5	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-14192d16de1b	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-18419d52f8aa	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-1ade8d2a8488	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-26793f65460d	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-2c6b704d7bf7	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-65bb23a30b0f	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-7215040300dd	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-79a1a18afc24	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-899a6c5cd37b	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-cfca683d8cb3	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-cffdb004aaef	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-d7c62e52c08a	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-f86416043fb0	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-105c0dcefec0	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-567adebd6b94	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-58622be7ef92	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-6203f876b0e2	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-66e5b07297df	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-7665f24a4e58	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-9f0e62c4f6e5	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-a5751a218170	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-b416e20081c1	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-c4c9e5380f16	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-e9c328bd40fe	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-40c67d8c2775	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-44d042f2e2ab	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-6d193b2693fe	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-6fa1335d0795	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-b75e89f681c2	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-b7fdebed4081	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-d96ebc33da40	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-fc5cc9fe8d28	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-018cc54f89fb	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-0cfa49ba1426	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-151eeab20221	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-49a18b1a7f03	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-8da51c327bcb	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-9550567b677f	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-a55e3156b04b	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-a95b2a07e81f	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-b002e3318001	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-c206a69c7000	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
-update-ec2ac003ab85	19	A row value SET is refused as unsupported and no capability row says the engine lacks it.
 delete-0b69d09a0748	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 delete-195967abf026	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 delete-3fbb09787a01	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
@@ -4847,597 +4697,77 @@ pragma-d20b09dbc631	30	The pragma_<name> table valued function of a setting prag
 pragma-d2cd279c11ac	30	The pragma_<name> table valued function of a setting pragma is "no such table".
 pragma-d3225b8db341	30	The pragma_<name> table valued function of a setting pragma is "no such table".
 pragma-e8848a475b93	30	The pragma_<name> table valued function of a setting pragma is "no such table".
-insert-2489f0f38873	31	A UNIQUE index violation on a table whose key is not the column reports extended code 1555 where SQLite reports 2067.
-insert-f81abd13e61e	31	A UNIQUE index violation on a table whose key is not the column reports extended code 1555 where SQLite reports 2067.
-insert-2e1eada3024b	31	A UNIQUE index violation on a table whose key is not the column reports extended code 1555 where SQLite reports 2067.
-insert-08bedb929ee1	31	A UNIQUE index violation on a table whose key is not the column reports extended code 1555 where SQLite reports 2067.
-insert-d6328439f8bf	31	A UNIQUE index violation on a table whose key is not the column reports extended code 1555 where SQLite reports 2067.
-insert-f9b19f01972a	31	A UNIQUE index violation on a table whose key is not the column reports extended code 1555 where SQLite reports 2067.
-cte-b3202b1eb324	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-c9aa787600d9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-36d36576016c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-ab8287e7815f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-ada97dd76a5f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-1e5940e13fe7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-5008ea69b843	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-677604152bf2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-6d8c4cab81c4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-a074bfd11750	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-a66236622210	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-b24b6dffc120	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-c1863c208400	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-66ff07f5d32e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-7154c77f1b9a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-83daea7ad437	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-8057485b6028	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-823c2b2ecdc4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-66b336ce6ce4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-af9fc50ac506	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-b6b4eaa349e1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-d9a1229ce90b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-55ec6d1c5014	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-ccc330840ee5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-e483be89fd3f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-e9e0ad0d4859	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-7d0339f0b104	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-bd3c6669f00b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-e657a968dd67	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-6a184f8d3ba5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-a5258d1fbd50	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-compound-f03485ba4784	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-04cebe4df0bf	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-ee191147c8c2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-0d9af9873283	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-c83f33c2a49c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 cte-07e062abb05f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-cte-b54ca1689f42	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-55327dcd9fa8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-90489b2f8a91	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-95c95073bc0d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-ad7fc2ea245e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-af9ed2cfde2b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-b912b0c9d92d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-dc462c7cb96e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-dfa129223da9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-f5537e04b775	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-67214c8df221	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-87f441f74b43	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-b137b1a9b0e2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-b254ead23a3c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-0cdb0d542075	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-0eeacdf67ee8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-1288c1312804	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-23251243788b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-34033fd55c01	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-3ea20817ba82	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-4a7255c6df27	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-4b4702d98a19	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-5eab425b45dd	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-747ad84025a0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-7b74e4c0d546	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-83e6495f59e6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-8e0b51628dfb	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-a3bfb89b8ad9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-a6663b541910	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-ae976518b4b5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-bb0f94b617bf	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-c4a339643e51	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-d8548b9ddf24	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-e0ff64e57c76	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-e6509de56a91	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-e79553361a83	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-e8e346067ac1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-287c8d32786f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-a9451c5b852f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-2d5da30dd300	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-3388cddf100a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-52781e6ba484	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-60734400bc3c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-63b9ce9cdccb	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-66a1e2b78c55	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-7438a0efcbee	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-7c8309907e2f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-8a5d664f42a3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-97c92d34c594	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-a49cf7e9b117	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-a4e2515c130e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-ac6f3f289940	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-b1022c00e3e4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-b5c8a281515e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-bd561b1f43db	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-c1842646d60d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-c918ef76b887	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-ce4731e750fa	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-d62272899f23	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-da4701aef998	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-ed854665cf36	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-fcff1951bbd2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-333d284d1752	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-bd1cc97ddf35	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-b2a680a4b134	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-7f09e68cd8d5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-135510dc8511	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 join-13df1ea5a31b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-9095c9ce5dc3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-1a7653c9e6b7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-2c4ce6e21933	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-37012f8aa91e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-78691b813cf0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-a6e32bc64909	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-ba872ecfb247	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-bad67aa46503	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-fd1a3254bbfb	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-0af531347c0e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 join-c58a5f5bbdc9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-188499536381	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-341f24429c98	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-53e79858dc7e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-8640ad84b2bb	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-b3f4455f46f7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-01a79d168917	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-1d264f61c1c7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-7e66e4d4b619	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-c336f1a2a250	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-12fc8d6c1628	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-53e14a38c467	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 join-d25e7b8eccf3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-e2cd705670d7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-dbce7382375c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-447089a76c42	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-4a794c1c1e9d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-9faa125b1a73	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-0c7bd95261b2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-52464ed56555	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-2b43bd0ed1e1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-92b6e04a607c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-join-e812eec1ce73	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-85adde0679d3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-fada3f9e9411	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-07208afead68	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-0e1e6dc070cc	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-1a529bdeedff	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-222c0ff4adba	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-22728dd5b3b9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-22c50a6a08c3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-2c5eb8fa9d89	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-2e22484aaa34	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-3917a18ca41a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-5daf6dcb9f35	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-61bfab11cd6b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-76fbd0f381e8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-7badaaff1741	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-8514f9a253fd	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-8a671638b58e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-8ac1a1a45b8e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-ae35171b796f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-b8525a2e0fd2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-ba79880903fc	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-be0aab3a0c56	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-c51443035429	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-cd270c4c578d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-d73912fc87cf	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-d9bed6f69a37	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-e2e0e6daed92	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-2d5dbcb8e0d4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-473c47b4567c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-6be76417868d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-afcfda5a6aeb	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-ca40623baac6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-f68c1fbef531	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-459a6e39a65e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-5f6b8a825977	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-795bb4ea0561	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-927fb144d809	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-bf84a2919c88	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-c3d70f42e5ad	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-1c620ed07a62	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-46a5a4cf1be6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-5d5571a7e930	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-64e19d6e95c1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-720ca6aa49f5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-89ecb6635b73	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-8af93fb1e450	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-8b32e4393bdc	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-c15dbb02dfbe	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-c77be5721d51	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-d74542886d8e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-df4688237539	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-d41a8f4fdd0e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-d09e46d3e5ba	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-91fccf53153c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-daca22fb11f9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-expression-571b30335316	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-0bbabc0c788a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-40171194597a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-926115165f81	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-68f87c7e0615	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-9f44b5f394c5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-bd2c17e6bc59	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-c1e08396bd51	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-330478e6223e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-105ffadd7084	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-553923fa0263	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-7aedd71b33d8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-924786538a8a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-f9684817e7ba	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-284284df50ad	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-8fdd2bfd0df0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-9bf3d2339283	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-9e3a1869f0d9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-b9c73eae4335	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-bde288ab9596	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-cb6d703c9f95	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-d09172d4ebce	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-e33f24340cd6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-04c1163c8aa5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-b101a986d85b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-0382edc64e05	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-03af4b25dad5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-095a75fa8539	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-189c50375f34	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-1e680588bb22	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2565f3bccaf1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2a5fdb5fdf1f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2a6624e66a8d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2f1007b9e6b5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2f7947d7cefc	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-43bda87ea65c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-611623010f12	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-6efe6a6b774e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-7aef865ba8aa	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-828ef33dbb0f	32	A correlated subquery is refused as not built with no capability row that says so.
 subquery-9404d50450ce	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-a2a081cb9a0b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-a2c6978917fc	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-ace9f6d32b6e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b1890160e105	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b381541a85a2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-bb32ce236a80	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-bdbbdfc66858	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c0670dee6d18	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c40b5b126e7b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-d6edf76ee104	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-d9d3ed3e27b3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-db1818e50bb6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-decb06c37473	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-e92a629fc9b7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-f28939b581c0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-f59b88a40387	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-086e472e22f7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-0f3c72b9648e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-1481260a1019	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-203ed188e30b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2445d48bcc9b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2879356c18ae	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-29ac87d82cf2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2b87d1693466	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-375673a3bb6e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-4a69a4c38e0d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-52727f831638	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-64e0ca2d92d8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-7b5e6077bc59	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-7da08b7bda75	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-85ad778bc6b1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-88a12f22873d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-8946ddfeb338	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-8fbf5044bbf9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-99eb5b8cf780	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-9d5f82ea8d50	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-a4b404e2cc9d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-a567480461ef	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-ac521d12bb5c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-adef204cd1ed	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-b3a6e8e9124e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b5cdf6ff4ccf	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b830059f9145	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c00b08c78f8d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-d72c820e4296	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-e122fa79b82f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-e513015fa1ae	32	A correlated subquery is refused as not built with no capability row that says so.
 subquery-eb815bd585c2	32	A correlated subquery is refused as not built with no capability row that says so.
 subquery-ec9b5bf97946	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-fc2433a193f1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-fcff19315f2e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-ff3a6c61736b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-16366a38c97a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-1b1159061485	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-1ba25fa5dd08	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-269544951ca6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-30f6e25dd47f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-364882007834	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-39d7e14e8bfb	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-51d9565cbe5f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-798be460a9f0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-79d47ef3e556	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-87254525f659	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-92fd90aad65f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-99152d407d64	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-9cdcd63cacb4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-9e45b6a70c9f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-a916feea8dee	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b03eebb9954a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b0de0eac3fc8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b1f95b7d6dd3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b80d6d975f61	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c39074401a68	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c91ee39ae194	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-da252b1b4981	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-e8e7f6df91a1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-00e05bcc535e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-017036acc95f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-07e5edda15d5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-1165098811bd	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-190823f5919c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2ce0add37b9e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-3b9aabfef202	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-3e618af3ef74	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-40e8a0e3c8b9	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-4912d4d63625	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-5e78b639b586	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-628e9ad577b5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-681e4247e1a3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-6d847238bff4	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-83d6fa2208c3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-926dc8fcd1df	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-93ef2ac4f227	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-a8a9bdc17d85	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-ae7734a5352b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-bc134ee193c0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-bd98f74f34bd	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c6af60f7d24e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-d520c9745efd	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-d89d29d6be90	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-e5a60a4c0569	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-ebe7df1f9e67	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-f13439761e50	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-f3078d7be85b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-f44214bcdcbf	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-f5947d92eca4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-f8056501b648	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-13a30041bac7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-150050f96d36	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-18036e6d62ed	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-19f098eb36fc	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-1ce0a38e6904	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-4e4f5092f464	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-4e6b29cfd708	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-6e3b86d481ba	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-78137a88acd0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-7a93f9fb2478	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-7b81c367d3fe	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-7bc2d4019c92	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-896e9a72924b	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-94bc6fcd5765	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-9c3c565cb53c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b079ba88dc81	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b66c0fce30fa	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-ba514f01eb93	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c2e53db08da6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c7e40715eba3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-ce67ce5b8e68	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-e2274e58e58a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-f1e4e4964790	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-f9e500fcd602	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-fbe588c013a8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-0a89f36bdc48	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-155d0449d09d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-184d438bd6cb	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-22de51e09c22	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-241d00142053	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-3ace529dbc5c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-5f497dd64c7f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-604bbbed5760	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-60a5c870ab30	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-60aa03678941	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-6137674499d1	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-61d5e8926c18	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-693d6594e823	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-69f1bd94bd64	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-6b5674eff9b0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-7425e77b0509	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-7497f81401b6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-985df9cd3516	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-a3577f25b5e5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b64240ee9cb4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-bfb390b26c82	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-cf6d91a51bc2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-dbf33fc7a4b8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-de8833e0c1f9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-e48d3cbe7a52	32	A correlated subquery is refused as not built with no capability row that says so.
 subquery-fc12b4741e05	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-13c0920db479	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-1a47be30a91a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2061d18ec847	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-252fb342f7c1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2a8138702ecb	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-393998d718b7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-4c3cca19fd48	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-58f312c90ae2	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-694398f3f722	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-6c8afdd3007f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-6e4b9a06922e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-74d2772ad61a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-761e9a8e1f7d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-78cebd092965	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-7d7e02aab93c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-7ef0d70e4a9e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-8146fda16792	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-8237c36e587f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-845305ab0e54	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-948012c5ad7f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-9716b845b241	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-aba7f27d7e8f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-aeb8fee63e7d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b965cf44c403	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c55e9e79d93a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c8b167a4a897	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-d1e515b6efba	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-dfb9462fdfde	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-e07931c891d4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-e46dbf1df3f6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-f2afd7a8a435	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-f7ade8cab54a	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-fc3ae143658c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-0f2cbaa760d4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-17f19a2dfa99	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-23fd031685a7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-2af8a225fafc	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-335b5b98d474	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-3bc0301c76c9	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-4172dc75f865	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-4491d7604258	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-494f9ad3bbb1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-4bb3836d5718	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-4f79a92fa398	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-54164f2517b9	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-5d2e63d3330e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-6b6a5db3b2b7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-7285b4263504	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-776791c6a3f1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-818a4e64a970	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-8805f3f9d70d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-93975b803fa4	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-966d3af5ff5c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-9b50e45b9286	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-a2c347713888	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-a50c0e46101b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-a8128ace8338	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-aa27db852070	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b2aef0b66307	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b4e5db7e9c5e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-b966bc7c34fc	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-bb6b6c44dd69	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-bcd6dd2b3c2c	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-c497df17f597	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-c8a6b4ad53e1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-c8ecaf93e3f8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-cd7a6eb1e257	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-d62e83060ad6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-e95166f09434	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-eeb130a51ad1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 subquery-f93aabc34ed5	32	A correlated subquery is refused as not built with no capability row that says so.
-subquery-fa89753ab12b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-4e5d0a877854	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-751092b46a66	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-fe0314691bd5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-08694cb839c2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-4ba5f48453da	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-610d10712a6d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-select-85398e0ac9a9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-8f5a97f6d8a6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-a9b297fed7d5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-c3d1a797a8e9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-d0d5970ec014	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-d9264556f019	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-1236a4ca4a2f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-4a33b3d7fcea	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-9aa17b92ce16	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-05a97d2e1f58	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-9afbab59c1e7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-a2b70b35f380	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-e50cfe424532	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-1fa7d1f8dbc9	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-22aa902a381c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-4415b8d23ec8	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-4e380640747f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-6b17aded6229	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-90475fbf0240	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-a25563fee8f1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-a636fcb47b06	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-bdcae2ead156	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-bfcf31a7d03e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-c36e35f987f2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-d05580c93f21	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-eb102f156d3a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-f318db6a7510	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-f504f3267463	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-ff5f9955add5	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-494ea656eeef	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-5fcaa6b70973	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-792155281379	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-979673b54fba	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-ad7e8f76ad92	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-f9fd6b90bd55	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-28efb1b27190	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-2d6bdc947c79	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-4a68cdbad194	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-4ffed400f84c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-7d6d995b6641	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-bf22e241609f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-d201d0d8d6cb	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-f7851071231c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-16c1a91e32a6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-3bf556637601	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-64c3648ecb3f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-82323cf60854	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-84e495b26b6a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-8be8cf3dec1a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-8e789cc31b69	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-ae36bc66197e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-e9fe0b4b19e1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-ee4420477f66	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-f3ad4f48f00a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-57e9da5a9e9b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-7d34e78b1be7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-f80e1258304b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-fd86f9b17977	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-1c199d136df6	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-301d622ba420	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-343317edceac	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-9dd63c924269	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-a0f8da7b3777	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 window-b2550b3e5ec7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-c4b53db25f97	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-f3911d8eb4a7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-1bdbc4f6656b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-29c19b402390	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-38bd5af23220	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-4e5231336983	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-5238f496510c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-537c828480d3	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 window-91255702859a	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-a98f7e93fe09	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-c92ce225fb07	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-f6fece1ccfc1	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-18339be967a0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-1a46aed98c96	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-20b2939d3310	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-224538a2681c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-41e666b6af2e	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-43616cf49181	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-7a88789278af	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-7f7c5da497ba	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-821ccd65ab5c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-cb7140c8236d	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-3d5dfe710f95	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-b6cab08e107b	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-window-c8832ba8b06f	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-vtab-28fa03ff9e29	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-3a7781771423	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-3c424945fd2a	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-57025e89cb30	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-57e243c2c867	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-5835c39738da	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-58ab279cea97	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-6bc21c5c2655	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-743db933170b	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-8b8c678eee9e	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-97eb018baafe	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-9e1401b60738	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-a2fb44b9d7c8	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-ae1cd5fc214f	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-c77fd0433b83	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-05c1dd7e0e22	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-13edc9dffe2b	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-3364df62a40b	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-4f82dc773dcd	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-62918fa95155	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-73b845170802	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-88f783eb2300	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-89818bad7fae	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-b055b32769b0	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-c1309df7426e	33	MATCH in this placement is refused as unsupported and no capability row says so.
-vtab-ca940b5e20ab	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-d7ae003224c1	33	MATCH in this placement is refused as unsupported and no capability row says so.
 vtab-dafb1dd635d2	33	MATCH in this placement is refused as unsupported and no capability row says so.
 update-334eb08de37f	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
@@ -6103,12 +5433,6 @@ ddl_table-a9e825560603	50	A STRICT table's PRIMARY KEY is not NOT NULL, so OR IG
 ddl_table-e935b3824153	50	PRAGMA table_info reports notnull 0 for a STRICT table's PRIMARY KEY column, which SQLite reports as NOT NULL.
 ddl_table-2c3a5d80eb22	50	PRAGMA table_info reports notnull 0 for a STRICT table's PRIMARY KEY column, which SQLite reports as NOT NULL.
 ddl_table-3995d4192019	50	PRAGMA table_info reports notnull 0 for a STRICT table's PRIMARY KEY column, which SQLite reports as NOT NULL.
-update-53e283673574	62	An UPDATE of a virtual table with a value computed from the row is refused as an error, with no capability row.
-update-62a7bc2c930e	62	An UPDATE of a virtual table with a value computed from the row is refused as an error, with no capability row.
-update-0de06e6660b3	62	An UPDATE of a virtual table with a value computed from the row is refused as an error, with no capability row.
-update-3aa75f096511	62	An UPDATE of a virtual table with a value computed from the row is refused as an error, with no capability row.
-update-f3601d8d5d18	62	An UPDATE of a virtual table with a value computed from the row is refused as an error, with no capability row.
-update-5a7c033d9abe	62	An UPDATE of a virtual table with a value computed from the row is refused as an error, with no capability row.
 function-7e11b921183c	63	json_quote() of a blob fails where SQLite returns the JSON text null.
 function-db8fd63dc06b	63	json_quote() of a blob fails where SQLite returns the JSON text null.
 function-2b3bdc44a94d	63	json_quote() of a blob fails where SQLite returns the JSON text null.
@@ -6124,6 +5448,5 @@ expression-4938a1631a2d	64	A COLLATE comparison on a virtual table's column comp
 probe-lim.columns	65@small-pool,sqlite-page	CREATE TABLE with 2,000 columns fails at a 4,096 byte page and with the small buffer pool.
 constraint-bab07571f5db	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 constraint-05ad544170ba	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
-function-ddb471ea2153	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 function-1dafb9cd4199	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 retained-bug-67-text-with-nul	67	The smallest case for bug 67.
