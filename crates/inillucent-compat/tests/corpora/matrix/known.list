@@ -21,9 +21,6 @@ probe-temp.as.select	8	changes() after CREATE TEMP TABLE AS SELECT counts the co
 # each line's case fails in the way its bug's section on task-2136 describes.
 constraint-f18eefd57be9	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 schema-013cdbdd2c4d	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-schema-910bf633dd3e	8	changes() or total_changes() after CREATE TABLE AS SELECT counts the copied rows where SQLite leaves them alone.
-insert-35d5770a78dd	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
-update-a98d21c0bb28	20	CREATE INDEX on a TEMP table named without its schema is "no such table".
 schema-4bac1079f631	21	CREATE TEMP TABLE temp.name is refused; SQLite accepts the temp qualifier.
 constraint-f09d1380625f	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
 constraint-f31ab9469767	25	changes() or total_changes() after ROLLBACK or ROLLBACK TO differs from SQLite's, which a rollback does not reset.
@@ -36,10 +33,8 @@ vtab-6d0c72e53a98	33	MATCH in this placement is refused as unsupported and no ca
 compound-0364d7c812d7	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-04962724de19	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-0c7d030f2a49	37	A STRICT table's ANY column converts text that looks like a number into a number.
-ddl_view-71b2c66d8196	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-399586159851	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-3b3e6b5a9cd9	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-9282db63543f	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-bbe4e2ae65a3	37	A STRICT table's ANY column converts text that looks like a number into a number.
 update-3e63718215bd	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_index-1b6fce0c9265	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
@@ -52,7 +47,6 @@ update-0bb9b2ba0377	38	Negative zero: round(-0.0) keeps the sign, a REAL column 
 ddl_table-390042c209da	41	A generated column is computed from the value before its source column's type converts it.
 
 # The retained corpus: the smallest case for each bug (retained/bugs.slt).
-retained-bug-23-ctas-with	23	The smallest case for bug 23.
 retained-bug-28-sum-text	28	The smallest case for bug 28.
 retained-bug-35-unread-column	35	The smallest case for bug 35.
 retained-bug-37-strict-any	37	The smallest case for bug 37.
@@ -71,20 +65,11 @@ retained-bug-64-collate-on-json-each	64	The smallest case for bug 64.
 retained-bug-65-wide-table-small-page	65@small-pool,sqlite-page	The smallest case for bug 65.
 function-bb650048102f	28	sum() over text holding integers returns a real where SQLite returns an integer.
 function-0f628af25f99	28	sum() over text holding integers returns a real where SQLite returns an integer.
-subquery-34b8c0a17073	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-subquery-7b4f47c21cc7	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 function-a0c918ebb7d5	35	An error in a result column the outer query does not read fails the statement.
 function-7aba340fa062	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
 function-62bf8374420a	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
 select-e54294d81d26	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-37065638322b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-67a79e7a3a16	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-296598539dc1	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-f08f17cf6b1c	37	A STRICT table's ANY column converts text that looks like a number into a number.
 cte-413f4ec208f6	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-a6a6a75f6dce	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-eebe2416ebbc	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-d92b9d6acd26	37	A STRICT table's ANY column converts text that looks like a number into a number.
 function-8206eccf8295	37	A STRICT table's ANY column converts text that looks like a number into a number.
 window-effa8af166e8	37	A STRICT table's ANY column converts text that looks like a number into a number.
 window-b71eda42930d	37	A STRICT table's ANY column converts text that looks like a number into a number.
