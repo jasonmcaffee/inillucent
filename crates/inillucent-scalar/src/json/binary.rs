@@ -236,6 +236,12 @@ fn decode(blob: &[u8], at: usize, depth: usize) -> DbResult<(Node, usize)> {
         TYPE_NULL if body.is_empty() => Node::Null,
         TYPE_TRUE if body.is_empty() => Node::True,
         TYPE_FALSE if body.is_empty() => Node::False,
+        // A number with no digits is malformed, as SQLite's own decoder
+        // says: `json_quote(x'03')` is "malformed JSON" there. Reading it as
+        // an empty number made such a blob the empty document.
+        TYPE_INT | TYPE_INT5 | TYPE_FLOAT | TYPE_FLOAT5 if body.is_empty() => {
+            return Err(malformed())
+        }
         TYPE_INT => Node::Int(text(body)?),
         TYPE_INT5 => Node::Int5(text(body)?),
         TYPE_FLOAT => Node::Float(text(body)?),

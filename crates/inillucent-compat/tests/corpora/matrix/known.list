@@ -616,19 +616,7 @@ window-89ef43d1b7f9	32	A correlated subquery reading a column the joined row doe
 window-cb49fd29642c	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 window-2f6dd5c8d5b2	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
 window-077cfe314ec0	32	A correlated subquery reading a column the joined row does not carry is refused as unsupported and no capability row says so.
-function-7aba340fa062	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-62bf8374420a	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-cte-37065638322b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-67a79e7a3a16	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-296598539dc1	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-f08f17cf6b1c	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-413f4ec208f6	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-a6a6a75f6dce	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-eebe2416ebbc	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-d92b9d6acd26	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-ef3d1ca82e72	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 window-1750d8e34d0a	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
-function-8c464b79147b	63	json_quote() of a blob fails where SQLite returns the JSON text null.
 constraint-0363a7224b87	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 constraint-0565b761a794	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
 constraint-1e9cc0a0b8e2	1	COMMIT or ROLLBACK with no transaction fails with result code 21 where SQLite gives 1.
@@ -4990,44 +4978,11 @@ join-4a4acd987b63	27	A RIGHT or FULL JOIN puts the right table's values in the l
 join-9573f87f976f	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
 join-b409918ad80e	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
 join-d602563dedd6	27	A RIGHT or FULL JOIN puts the right table's values in the left table's columns when the left side has no match.
-function-7e0242600c65	28	sum() over text returns a real where SQLite returns an integer.
-function-cc0587ac2490	28	sum() over text holding integers returns a real where SQLite returns an integer.
-function-77addb987a79	28	sum() over text holding integers returns a real where SQLite returns an integer.
-function-d73bae36efa1	28	sum() over text holding integers returns a real where SQLite returns an integer.
-function-fa639e01b91a	28	sum() over text returns a real where SQLite returns an integer.
-function-fd269973916e	28	sum() over text returns a real where SQLite returns an integer.
-function-375320f33b68	28	sum() over text returns a real where SQLite returns an integer.
-function-ec8868f8960d	28	sum() over text holding integers returns a real where SQLite returns an integer.
 function-fefc73e9fa8b	28	sum() over text holding integers returns a real where SQLite returns an integer.
-function-e8493e853a77	28	sum() over text holding integers returns a real where SQLite returns an integer.
-function-e8e81cc08709	28	sum() over text holding integers returns a real where SQLite returns an integer.
-window-889f151ae98a	28	A window sum over text holding integers returns a real where SQLite returns an integer.
 window-9bfa31d81cdf	28	sum() over text holding integers returns a real where SQLite returns an integer.
-window-699f01a1ec3f	28	A window sum over text holding integers returns a real where SQLite returns an integer.
 window-dd215f77e3e4	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-0e8e5a3cc1d8	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-55c6c4ec1a60	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-c7a202df0d4e	28	A window sum over text holding integers returns a real where SQLite returns an integer.
 window-bccd8d523f3d	28	sum() over text returns a real where SQLite returns an integer.
-window-4e87e06dfa8d	28	sum() over text returns a real where SQLite returns an integer.
-window-5c6d80ebbb5a	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-8f351b824524	28	sum() over text returns a real where SQLite returns an integer.
-window-91783257f7d2	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-bb54efefb162	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-1f3001c6aed7	28	sum() over text returns a real where SQLite returns an integer.
-window-f5a709381e6c	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-0c9fc22a4ccd	28	sum() over text holding integers returns a real where SQLite returns an integer.
-window-bf19dd5f0a8a	28	sum() over text holding integers returns a real where SQLite returns an integer.
-window-6c0fb1f08e6f	28	sum() over text returns a real where SQLite returns an integer.
-window-16f523b25f67	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-b8a856de0762	28	A window sum over text holding integers returns a real where SQLite returns an integer.
 window-bc00ae78b9d5	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-1e66b85958fb	28	sum() over text returns a real where SQLite returns an integer.
-window-1e4d79824a6f	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-3069274987bb	28	sum() over text returns a real where SQLite returns an integer.
-window-f1415b48c33f	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-5a261b7ac454	28	A window sum over text holding integers returns a real where SQLite returns an integer.
-window-ff2292f85119	28	A window sum over text holding integers returns a real where SQLite returns an integer.
 maintenance-036d6427bbbb	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
 maintenance-09d29ace35c2	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
 maintenance-141f0a37a29e	29	sqlite_stat1 after ANALYZE holds rows SQLite does not write.
@@ -5741,38 +5696,7 @@ update-e087e07c7d8e	34	UPDATE ... FROM over a table with an index on a column th
 update-e1d6aff807fc	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
 update-e2b4d6e8733b	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
 update-f7cf9afa90d7	34	UPDATE ... FROM over a table with an index on a column the FROM table also has is refused as ambiguous.
-function-481825770325	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-33120cd51f04	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-429e8b9f9a92	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-a237d6c8cb1d	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-a8dd76a502e9	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-5a21bebde8df	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-75a1f6a2a3b6	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-41f21a846c84	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-b0610afb051e	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-bc20da4d37f2	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-f924ad92653a	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-1be483f3af8b	35	An error in a result column the outer query does not read fails the statement.
-function-338c0ebea6f8	35	An error in a result column the outer query does not read fails the statement.
-function-36ac64d6bdd5	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-a943c256566c	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-dfc3a0208012	35	An error in a result column the outer query does not read fails the statement.
-function-f20994cc3197	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-4160f0aabfaa	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-5cce01475c23	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-630cfcad0cea	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-82e70b55d62f	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-51b59736f0af	35	An error in a result column the outer query does not read fails the statement.
-function-6ebb7d8c7ff1	35	An error in a result column the outer query does not read fails the statement.
-function-b1187cdf0dca	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-19d27250356c	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
 function-59e00600e1fc	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-function-5af8926f3714	35	An error in a result column the outer query does not read fails the statement.
-function-816ad0f07a64	35	An error in a result column the outer query does not read fails the statement where SQLite never evaluates it.
-delete-aab6af0a92d2	37	A STRICT table's ANY column converts text that looks like a number into a number.
-ddl_index-74887dbe5b69	37	A STRICT table's ANY column converts text that looks like a number into a number.
-ddl_index-bf489a79dec3	37	A STRICT table's ANY column converts text that looks like a number into a number.
-ddl_table-18ab801e43c9	37	A STRICT ANY column converts numeric text.
 ddl_view-16e3872592d8	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-8be8af39e450	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-9b9954964c42	37	A STRICT table's ANY column converts text that looks like a number into a number.
@@ -5783,99 +5707,8 @@ ddl_view-381216d42ac0	37	A STRICT table's ANY column converts text that looks li
 ddl_view-7c28152f8261	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-7d6da3196be1	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-a74eebe10c06	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-369c744178c6	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-3bac9dff2b28	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-4589b1a240da	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-4a49bee56985	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-4e0b6d662210	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-5e57bb98da3b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-881ef3abf362	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-8be31ef301cb	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-a0469ffd96de	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-b80004ecdb72	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-c8e947ae70e7	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-ccd1eb4c70f1	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-197bd9bcfd64	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-1dafecff4bc9	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-39dc51022b53	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-3caa5892edd2	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-78ed82cfa523	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-b4b6f079e3e7	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-0cb38f559a51	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-2a040c32439b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-2cd65364b84b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-389600496ffe	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-537664681047	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-71d144e57853	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-9b5375cd050c	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-b157e8c34233	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-b60fcaa2addf	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-c5389a5f2190	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-e3c5e93e4121	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-e59276b33550	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-ef0314d654fe	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-f6ddf97cc877	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-813fa18d599f	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-89c088b6b924	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-98c7977ad303	37	A STRICT table's ANY column converts text that looks like a number into a number.
 cte-c2fa3da25150	37	A STRICT table's ANY column converts text that looks like a number into a number.
-compound-384c2b34b161	37	A STRICT table's ANY column converts text that looks like a number into a number.
-compound-9098da0eb465	37	A STRICT table's ANY column converts text that looks like a number into a number.
-compound-11c963a640b5	37	A STRICT table's ANY column converts text that looks like a number into a number.
-compound-87a8f86d1f6c	37	A STRICT table's ANY column converts text that looks like a number into a number.
-compound-93b496cc6407	37	A STRICT table's ANY column converts text that looks like a number into a number.
-compound-c9801c6954c4	37	A STRICT table's ANY column converts text that looks like a number into a number.
-compound-80c641557f3a	37	A STRICT table's ANY column converts text that looks like a number into a number.
-compound-5b700642f645	37	A STRICT table's ANY column converts text that looks like a number into a number.
-compound-cbe74dc28bc6	37	A STRICT table's ANY column converts text that looks like a number into a number.
-ddl_table-5459f2126599	37	A STRICT ANY column converts numeric text.
-ddl_table-c4b9be34432b	37	A STRICT ANY column converts numeric text.
-cte-0e0d006a6b40	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-70ddde17aa56	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-8d4e3644aea4	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-9b78a3def4da	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-be4e88f9be01	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-d15e4c05421b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-f434195b5a18	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-f72d3a13ce83	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-0356ca793fba	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-1f9c35572fcb	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-7a193191bd92	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-a7fd4fbddca7	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-a945f5fe58b9	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-af024e19cabc	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-af22f0585646	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-bf9cf8fe7f06	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-cadb672c23a3	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-cc46b158347e	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-d75e70094e7d	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-eb3df156a8fe	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-0db5ed50cf3e	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-371c89073447	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-3dc9d977ce30	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-6a2d7d5c8a65	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-90a0467cb5c9	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-a81a704a3ced	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-bfe014695649	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-d5f07e6589f0	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-db7a2e6025b4	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-f0e1c092331b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-f95ec0435d2e	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-1508fc1a66c2	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-20a5e35831b5	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-438f2c7fe057	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-4fbe05712491	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-6954b4c96ad4	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-77e4d899a9c9	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-8b512148817a	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-a63350d49e5a	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-a7ef92b56830	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-b721dcd9fd3f	37	A STRICT table's ANY column converts text that looks like a number into a number.
-cte-f9515cf913e9	37	A STRICT table's ANY column converts text that looks like a number into a number.
 cte-fbd71952543c	37	A STRICT table's ANY column converts text that looks like a number into a number.
-ddl_table-5d0064eac48a	37	A STRICT ANY column converts numeric text.
-ddl_table-958fe5660f4a	37	A STRICT ANY column converts numeric text.
-ddl_table-6325d8fae7dc	37	A STRICT ANY column converts numeric text.
 ddl_view-0c4c81205827	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-5f5a253d606d	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-b6482c920041	37	A STRICT table's ANY column converts text that looks like a number into a number.
@@ -5885,181 +5718,25 @@ ddl_view-fd1f1313765f	37	A STRICT table's ANY column converts text that looks li
 ddl_view-4430aa126e7b	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-d538b9e36cbf	37	A STRICT table's ANY column converts text that looks like a number into a number.
 ddl_view-e35c5f4ff115	37	A STRICT table's ANY column converts text that looks like a number into a number.
-expression-1899a8a9453f	37	A STRICT table's ANY column converts text that looks like a number into a number.
-expression-427e2b051a66	37	A STRICT table's ANY column converts text that looks like a number into a number.
-expression-55f6bd9d02d1	37	A STRICT table's ANY column converts text that looks like a number into a number.
-expression-7b716c18e78e	37	A STRICT table's ANY column converts text that looks like a number into a number.
-expression-4e08cb1b5098	37	A STRICT table's ANY column converts text that looks like a number into a number.
-expression-e24a8c0097a3	37	A STRICT table's ANY column converts text that looks like a number into a number.
-join-206653222ae6	37	A STRICT table's ANY column converts text that looks like a number into a number.
 join-a94859f42619	37	A STRICT table's ANY column converts text that looks like a number into a number.
-join-fed942061d3b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-insert-29bd5edf8f56	37	A STRICT table's ANY column converts text that looks like a number into a number.
-insert-4284b232730a	37	A STRICT table's ANY column converts text that looks like a number into a number.
-expression-5efa5644de31	37	A STRICT table's ANY column converts text that looks like a number into a number.
-expression-9823d490e05f	37	A STRICT table's ANY column converts text that looks like a number into a number.
-join-45b6069bed86	37	A STRICT table's ANY column converts text that looks like a number into a number.
-join-3a29e1a18fb5	37	A STRICT table's ANY column converts text that looks like a number into a number.
 join-8ab5f3da741a	37	A STRICT table's ANY column converts text that looks like a number into a number.
 join-c67f593632c8	37	A STRICT table's ANY column converts text that looks like a number into a number.
 join-eb05710d126a	37	A STRICT table's ANY column converts text that looks like a number into a number.
-join-056e106bc376	37	A STRICT table's ANY column converts text that looks like a number into a number.
-join-285949b1514f	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-7f08d61e6270	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-8f539060fc08	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-a376fca0593d	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-a658f1c7b230	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-48fdf1cf087b	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-58014e9bf5dd	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-edc764bd1766	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-edfbcf76cc35	37	A STRICT table's ANY column converts text that looks like a number into a number.
-insert-098fcc3f8fa3	37	A STRICT table's ANY column converts text that looks like a number into a number.
-insert-67457f0998f8	37	A STRICT table's ANY column converts text that looks like a number into a number.
-insert-f72283cbae57	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-17f555b0535c	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-428b7e074c1e	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-760c34e79cc0	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-9f73fc4e80dd	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-e44e98ad99ef	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-eff1116f803f	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-fdab41893e2a	37	A STRICT table's ANY column converts text that looks like a number into a number.
-insert-4ba4eb5eda07	37	A STRICT table's ANY column converts text that looks like a number into a number.
-insert-4dfad969bd76	37	A STRICT table's ANY column converts text that looks like a number into a number.
-insert-f1c0214e9192	37	A STRICT table's ANY column converts text that looks like a number into a number.
-join-b54fa9b79d61	37	A STRICT table's ANY column converts text that looks like a number into a number.
-join-6fb5ac04ee39	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-2ad99890931b	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-73db681bbbbb	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-f3be8c7a1b7b	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-2e5a8bbcf91b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-5c8e216e959d	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-64744f04787a	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-74e2ffe237e0	37	A STRICT table's ANY column converts text that looks like a number into a number.
-maintenance-8450429c2160	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-954227be2cf5	37	A STRICT table's ANY column converts text that looks like a number into a number.
 maintenance-a97a878cf55b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-3ffb3bc15458	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-8d3404abeca2	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-c216b593266b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-d99f0e31bd9b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-e375a8130546	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-fb26c4936fde	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-2609385eb6e0	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-47dbe34c5a1b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-c63e6a42b6b1	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-c95a9a959e61	37	A STRICT table's ANY column converts text that looks like a number into a number.
-function-fde599ef3d87	37	A STRICT table's ANY column converts text that looks like a number into a number.
-subquery-fa76adac7f95	37	A STRICT ANY column converts numeric text, so more rows match.
-subquery-5694fb179fa9	37	A STRICT table's ANY column converts text that looks like a number into a number.
-subquery-82bcf11d2aa8	37	A STRICT ANY column converts numeric text, so more rows match.
-subquery-3518cfe08501	37	A STRICT table's ANY column converts text that looks like a number into a number.
-subquery-661cec3595b7	37	A STRICT ANY column converts numeric text, so more rows match.
-subquery-d402ce5d13ea	37	A STRICT table's ANY column converts text that looks like a number into a number.
-select-c17532a3bdde	37	A STRICT table's ANY column converts text that looks like a number into a number.
-select-b9cabe561c3b	37	A STRICT table's ANY column converts text that looks like a number into a number.
-select-da5ab2563747	37	A STRICT table's ANY column converts text that looks like a number into a number.
-update-0a7e93eb8cf0	37	A STRICT table's ANY column converts text that looks like a number into a number.
-update-12a6e3309aa5	37	A STRICT table's ANY column converts text that looks like a number into a number.
-update-ce19e90c6f1a	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-7b59a7799e9e	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-e0093df49c7e	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-aebe174d9fa7	37	A STRICT table's ANY column converts text that looks like a number into a number.
-update-343eb0743064	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-90270f892594	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-ee9b3544f7af	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-171db467eb29	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-ad909ef7540a	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-a1a67b8904b5	37	A STRICT table's ANY column converts text that looks like a number into a number.
-window-b1019afeb81e	37	A STRICT table's ANY column converts text that looks like a number into a number.
-delete-89f0b288de40	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-delete-dd28931ccf2d	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-delete-03ee7616715a	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-delete-65bb64901c6f	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-delete-eeb30c381bf4	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-delete-3ed72ed5386c	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-delete-b0aa2086d269	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-delete-f4c2845c0c63	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-735aa9c09fc2	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-0b9ee671baf0	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-5ac4071eb67a	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-d064b630aa5b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-f4938f4f64db	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_view-c0a5a6dcd337	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_view-d34067947ecc	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 ddl_view-dd16775d0b1b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-cte-67414fda22e0	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_index-057faec98ebc	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-00097c5deb28	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-66e163ff3fbe	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-73c4ee547b79	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-cte-5449e37935c9	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-cte-a7a3fe2d453c	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-cte-ffa0714982f5	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 cte-0ff572d15c5d	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-7038b00fa45e	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-8e8ee6fce7e8	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-80204017c5e3	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_table-f4f51382bdba	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 ddl_view-e2caf186d48a	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_view-6eaf3ec46cc1	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-ddl_view-843da4541f4b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-join-9b806cb51133	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-join-af160c727518	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-join-737111bf836a	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-89ef55a04003	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-88e6f8b64f2b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-948a1533ea3d	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-9e8814c1b6dd	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-c73ba2d53049	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-ee8d8e164b8e	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-24c80d22c3ed	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-af7d218385fc	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-ff0363769f57	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-8b4fafd2ed8c	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-c579bf1a9c3d	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-0780f8e4905f	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-251a4ab84327	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-262c2ff32895	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-0f3a08b40f85	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-insert-98775d1898c0	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-join-8944f922f539	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-join-d091e3df566c	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-join-75fcbd122bf9	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-f72715396655	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-616c587ca9bc	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-1823f8042972	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-b0877a6283f7	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-db867007d225	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-b5333a3b91dd	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-374270e5552e	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-function-7006c3fa24c3	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 function-c9c3e80a2a5b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-select-48a798b8ea51	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-subquery-43ef90057432	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-subquery-b1a2547f9504	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-subquery-1b123d6de1c4	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-select-e3ed33411908	38	Negative zero.
-select-5ad6654978f1	38	Negative zero.
-select-0dad4c5cb094	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-update-10b7009051aa	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-update-8b30b6f47e68	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-update-6139a7b10c1d	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-update-c4c3b4eb45d7	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 window-562e9db7ab96	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-b0d05056be72	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-4611e4b21c58	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-624c26507c80	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-d16b7fdf9190	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-update-b18bf1007430	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-update-c756e33caa3b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-update-7a899f7e53da	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-update-cc1f69733e1b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-eb9af9a0fef5	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-8670711d98ba	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-75cf0bb41f5b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 window-9c8173a6a7f9	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-3398dc040a8b	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
-window-c7649676ba57	38	Negative zero: round(-0.0) keeps the sign, a REAL column reads -0.0 back as -0.0, and an ANY or INTEGER column stores it as the integer 0; SQLite answers 0.0, 0.0 and -0.0.
 window-7aa46f61eb04	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
 window-88f436e01976	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
 window-b15e5cfd0656	39	A GROUPS frame with an offset is refused as if it were a RANGE frame.
@@ -6207,17 +5884,6 @@ ddl_view-c03523f9c369	40	PRAGMA table_info on a view reports no declared type fo
 ddl_view-ce0f7caf8c97	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
 ddl_view-e67731992e48	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
 ddl_view-ed364f054265	40	PRAGMA table_info on a view reports no declared type for a column taken from a typed column.
-ddl_table-cc76f5ba2889	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-d6cde15b2f0b	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-da398804507a	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-e155b8d25e1e	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-21728015dd1a	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-263f76f1d932	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-2de461fae01d	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-7bc5814eaef4	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-406610e7d622	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-5de249523cc3	41	A generated column is computed from the value before its source column's type converts it.
-ddl_table-5e5b653404d9	41	A generated column is computed from the value before its source column's type converts it.
 maintenance-d50b390aecac	42	VACUUM fails on a table with a STORED generated column.
 maintenance-9beb621dbd6b	42	VACUUM fails on a table with a STORED generated column.
 maintenance-e1e083e82d8b	42	VACUUM fails on a table with a STORED generated column.
@@ -6288,38 +5954,6 @@ insert-c4e7f9f07e60	45	An INSERT OR ROLLBACK refused by a virtual table leaves t
 insert-da8178c5039a	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
 insert-1af23f67ea60	45	An INSERT OR ROLLBACK refused by a virtual table leaves the transaction open where SQLite rolls it back.
 schema-ba056b0647fe	46	The SQL stored for an FTS5 shadow table quotes its name differently from SQLite.
-expression-5460f7360163	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-d6ea316dc448	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-37807538acb1	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-3ddbad5b3c2e	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-430adcf0e202	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-75fa4c4f28e6	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-807003853e66	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-86ab4e2d6b98	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-d305c3647ac8	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-5c5e16b401c0	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-a471f510f8f2	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-068218d1031d	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-c8cbe0ba562a	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-dbec6ab76d26	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-2fc94c97ad97	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-6b3b82064a1e	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-70df3c1f64a1	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-b61a75750166	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-77c61dae14c8	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-239767b78222	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-2fdcde3c0ebe	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-da958cde3bdd	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-ea7c64e5b1e1	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-f4c49314f97d	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-291742a06d0a	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-64d11beaba72	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-fbc7c6b7e0e2	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-7697b58b54b5	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-6c9b06181165	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-f71f69749565	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-39f1ba7fb9b5	47	The remainder of a real by an integer is an integer where SQLite returns a real.
-expression-b6647f68e94a	47	The remainder of a real by an integer is an integer where SQLite returns a real.
 insert-201712ea8249	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
 insert-86d007b015f9	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
 insert-facd5e40dd15	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
@@ -6345,14 +5979,6 @@ insert-f3773a516025	48	An upsert whose conflict target matches no PRIMARY KEY or
 insert-1235d99ca3ba	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
 insert-7fec509eb3ac	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
 insert-a28fd0b255df	48	An upsert whose conflict target matches no PRIMARY KEY or UNIQUE constraint is accepted where SQLite refuses it.
-window-c02e7570f355	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
-window-8d00c7b03874	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
-window-d440d4ceae45	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
-window-f1f814d43358	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
-window-059e239a7a60	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
-window-2fe9fd376155	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
-window-72fa15839284	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
-window-ebe40e5b5912	49	A RANGE frame with a numeric offset over text values counts rows SQLite leaves out.
 ddl_table-19890ea480d6	50	PRAGMA table_info reports notnull 0 for a STRICT table's PRIMARY KEY column, which SQLite reports as NOT NULL.
 ddl_table-05e9df555857	50	PRAGMA table_info reports notnull 0 for a STRICT table's PRIMARY KEY column, which SQLite reports as NOT NULL.
 ddl_table-d7fc3a951140	50	A STRICT table's PRIMARY KEY is not NOT NULL, so OR IGNORE keeps rows SQLite skips.
@@ -6366,18 +5992,6 @@ update-0de06e6660b3	62	An UPDATE of a virtual table with a value computed from t
 update-3aa75f096511	62	An UPDATE of a virtual table with a value computed from the row is refused as an error, with no capability row.
 update-f3601d8d5d18	62	An UPDATE of a virtual table with a value computed from the row is refused as an error, with no capability row.
 update-5a7c033d9abe	62	An UPDATE of a virtual table with a value computed from the row is refused as an error, with no capability row.
-function-7e11b921183c	63	json_quote() of a blob fails where SQLite returns the JSON text null.
-function-db8fd63dc06b	63	json_quote() of a blob fails where SQLite returns the JSON text null.
-function-2b3bdc44a94d	63	json_quote() of a blob fails where SQLite returns the JSON text null.
-function-56642346b80e	63	json_quote() of a blob fails where SQLite returns the JSON text null.
-function-f0c37fcff557	63	json_quote() of a blob fails where SQLite returns the JSON text null.
-function-f35bb1f5d7cf	63	json_quote() of a blob fails where SQLite returns the JSON text null.
-function-5d1eafdac053	63	json_quote() of a blob fails where SQLite returns the JSON text null.
-function-5a3d86d9d3b4	63	json_quote() of a blob fails where SQLite returns the JSON text null.
-expression-c1132c788478	64	A COLLATE comparison on json_each's value column compares as BINARY.
-expression-e88ac7eb2561	64	A COLLATE comparison on json_each's value column compares as BINARY.
-expression-a23cc4fed6e8	64	A COLLATE comparison on a virtual table's column compares as BINARY.
-expression-4938a1631a2d	64	A COLLATE comparison on a virtual table's column compares as BINARY.
 probe-lim.columns	65@small-pool,sqlite-page	CREATE TABLE with 2,000 columns fails at a 4,096 byte page and with the small buffer pool.
 constraint-bab07571f5db	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
 constraint-05ad544170ba	66	changes() after an UPDATE ... FROM or INSERT ... SELECT whose source fails keeps the previous statement's count; SQLite resets it to 0.
